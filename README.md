@@ -52,7 +52,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Issues use `type:*`, `area:*`, `priority
 
 ## Quickstart
 
-Prerequisites: Go 1.23+, Node 22+, pnpm, and Docker Desktop (or Docker Engine with Compose v2).
+Prerequisites: Go 1.24+, Node 22+, pnpm, and Docker Desktop (or Docker Engine with Compose v2).
 
 ```bash
 cp .env.example .env   # local-only credentials
@@ -74,6 +74,24 @@ make help              # all targets
 Reset the local stack (drops volumes): `make reset`.
 
 > Port conflict? If a service port is already used on your machine (for example a local PostgreSQL on 5432), override it in `.env` — e.g. `POSTGRES_PORT=55432` — and update the connection string accordingly.
+
+## Demo data
+
+`make seed` wipes and regenerates a deterministic dataset: 3 tenants, users, vendors, **100,000 requisitions**, and **1,000,000 domain events** (PostgreSQL `demo` schema + MongoDB `events`). It completes in under two minutes on a laptop.
+
+```bash
+make seed          # reset + generate (deterministic, seed=42)
+make seed-reset    # wipe demo data only
+make reset         # drop compose volumes and recreate the stack
+```
+
+Override sizes for a lighter run:
+
+```bash
+go run ./scripts/seed --tenants 2 --requisitions 10000 --events 100000
+```
+
+The tool reads `DATABASE_URL`, `MONGO_URI`, and `MONGO_DB` from `.env` (or the environment).
 
 ## Docs
 
