@@ -1,6 +1,6 @@
 # AI-assisted development workflow
 
-This repository is built with AI coding agents (Claude Code, Cursor, Copilot, or similar) as part of the standard engineering workflow — matching the target job description. The rules below keep AI output reviewable and production-safe.
+This repository is built with AI coding agents (Claude Code, Cursor, Copilot, or similar) as part of the standard engineering workflow. The rules below keep AI output reviewable and production-safe.
 
 ## Principles
 

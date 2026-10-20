@@ -2,11 +2,11 @@
 
 - **Status:** Accepted
 - **Date:** 2026-10-20
-- **Related:** PRD §20, JD technology stack (GitLab CI)
+- **Related:** PRD §20, toolchain requirements (GitLab CI)
 
 ## Context
 
-The job description lists **GitLab CI**, but the showcase repository is hosted on **GitHub** (`luksluki/eprocurement`). We need a CI pipeline that proves the same competencies: linting, unit tests, integration tests, image builds, e2e, and deployment gating.
+GitLab CI is part of the intended toolchain, but this repository is hosted on **GitHub** (`luksluki/eprocurement`). We need a CI pipeline that covers the same ground: linting, unit tests, integration tests, image builds, e2e, and deployment gating.
 
 ## Decision
 
@@ -31,6 +31,6 @@ Caching: Go modules/build cache, pnpm store, Docker layer cache. Concurrency can
 
 **Positive:** free for the repo; tight GitHub integration; PR checks and branch protection work natively.
 
-**Negative:** JD keyword "GitLab CI" is not literally present in CI config files; mitigated by documenting the mapping in README and keeping pipeline structure equivalent (`docs/ci-mapping.md`, created with M0).
+**Negative:** the GitLab CI keyword is not literally present in the CI configuration; mitigated by documenting equivalent stages in the README and keeping the pipeline structure equivalent.
 
 **Follow-up:** optionally add `.gitlab-ci.yml` mirror + GitLab remote in Phase 2 if a specific employer values it.

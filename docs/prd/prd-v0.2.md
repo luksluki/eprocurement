@@ -5,7 +5,6 @@
 **Status:** Working Product Definition
 **Brand:** ELCODE — Independent Software Studio
 **Product:** ELCODE ProcureKit (working name)
-**Purpose:** Showcase product — enterprise full-stack engineering evidence (Skyhi Senior/Mid-Senior Full-Stack JD, Role C: eProcurement)
 **Initial market:** Indonesia (demonstration only; not a commercial launch in Phase 0)
 **Author:** Shion (for R. Luki Rahayu Agung) — 2026-10-20
 
@@ -15,7 +14,7 @@
 
 ## 1. Executive Summary
 
-ProcureKit is a **mini, multi-tenant eProcurement platform** built as a portfolio showcase for enterprise full-stack engineering. It implements one coherent business slice end-to-end:
+ProcureKit is a **mini, multi-tenant eProcurement platform** built as a reference implementation for enterprise procurement operations. It implements one coherent business slice end-to-end:
 
 ```text
 VENDOR
@@ -27,44 +26,44 @@ VENDOR
   → SPEND DASHBOARD + SCHEDULED EXPORTS
 ```
 
-It is deliberately **not** a commercial ERP replacement. Its value is technical evidence: Go microservices with clean/hexagonal architecture, gRPC, PostgreSQL + MongoDB + Redis, RabbitMQ with outbox/DLQ/retries, cron with distributed locks, a data-heavy Next.js UI, OpenTelemetry, Docker/Kubernetes, GitLab CI, Playwright — mapped one-to-one to the target job description.
+It is deliberately **not** a commercial ERP replacement. Its value is technical evidence: Go microservices with clean/hexagonal architecture, gRPC, PostgreSQL + MongoDB + Redis, RabbitMQ with outbox/DLQ/retries, cron with distributed locks, a data-heavy Next.js UI, OpenTelemetry, Docker/Kubernetes, GitLab CI, Playwright.
 
 ## 2. Vision
 
-**Vision statement.** Demonstrate, in a running system, that ELCODE can own enterprise procurement features from requirement to production — including the unglamorous parts: state machines, idempotency, retries, auditability, and multi-company isolation.
+**Vision statement.** Deliver enterprise procurement features end-to-end in a running system — including the unglamorous parts: state machines, idempotency, retries, auditability, and multi-company isolation.
 
-**Product promise.** *A 5-minute demo that survives a 60-minute technical interview.*
+**Product promise.** *A 5-minute demo that proves the system under real failure conditions.*
 
-**Core product thesis.** Hiring evidence for enterprise roles is not a list of frameworks; it is a **recoverable system**: kill the worker and nothing is lost, replay an event and nothing is duplicated, open a trace and the whole request is visible.
+**Core product thesis.** Enterprise readiness is not a list of frameworks; it is a **recoverable system**: kill the worker and nothing is lost, replay an event and nothing is duplicated, open a trace and the whole request is visible.
 
 ## 3. Strategic Positioning
 
-**Category.** Reference implementation / engineering showcase (not a commercial SaaS in Phase 0).
+**Category.** Reference implementation (not a commercial SaaS in Phase 0).
 
 **Positioning boundaries.**
 - Not a full ERP; not an accounting suite; not a sourcing marketplace.
 - No payment gateway integration in MVP (invoice matching only).
 - No mobile app, no POS, no offline-first (those belong to other roles).
 
-**What success looks like.** A reviewer can open the repo, run `docker compose up`, follow the demo script, and tick every "Must-Have" line of the JD from observable behaviour — not from claims.
+**What success looks like.** An engineer can open the repo, run `docker compose up`, follow the demo script, and verify every key capability from observable behaviour — not from claims.
 
-## 4. Showcase Objectives & JD Alignment
+## 4. Engineering Objectives
 
 | Objective | Evidence |
 |---|---|
-| Show Go microservices with clean architecture | `services/gateway`, `services/procurement`, `services/documents`, `services/worker` — hexagon layers (domain/app/adapters) |
-| Show gRPC + REST | REST edge (GoFiber) + gRPC/Protobuf internal contracts |
-| Show PostgreSQL depth | Relational core, migrations, indexes, EXPLAIN notes, transactional outbox |
-| Show MongoDB depth | Event history, audit log, document metadata, aggregation pipelines |
-| Show Redis | Cache + distributed lock for cron |
-| Show RabbitMQ | Topic exchange, routing, DLQ, retry with backoff, idempotent consumers |
-| Show scheduled jobs | Nightly export with lock, heartbeat, missed-run detection |
-| Show React/Next enterprise UI | Next.js + TanStack Query/Table + Zustand + RHF/Zod + Tailwind |
-| Show observability | OpenTelemetry traces across REST → gRPC → worker; Prometheus metrics |
-| Show delivery discipline | GitLab CI, Playwright e2e, PR reviews, ADRs, dev notes |
-| Show AI-assisted development | `docs/ai-workflow.md` — prompts, review checklist, guardrails |
+| Go microservices with clean architecture | `services/gateway`, `services/procurement`, `services/documents`, `services/worker` — hexagon layers (domain/app/adapters) |
+| gRPC + REST | REST edge (GoFiber) + gRPC/Protobuf internal contracts |
+| PostgreSQL depth | Relational core, migrations, indexes, EXPLAIN notes, transactional outbox |
+| MongoDB depth | Event history, audit log, document metadata, aggregation pipelines |
+| Redis | Cache + distributed lock for cron |
+| RabbitMQ | Topic exchange, routing, DLQ, retry with backoff, idempotent consumers |
+| scheduled jobs | Nightly export with lock, heartbeat, missed-run detection |
+| React/Next enterprise UI | Next.js + TanStack Query/Table + Zustand + RHF/Zod + Tailwind |
+| observability | OpenTelemetry traces across REST → gRPC → worker; Prometheus metrics |
+| delivery discipline | GitLab CI, Playwright e2e, PR reviews, ADRs, dev notes |
+| AI-assisted development | `docs/ai-workflow.md` — prompts, review checklist, guardrails |
 
-**Non-goal of the showcase:** breadth. Depth on one slice beats ten half-features.
+**Non-goal of this phase:** breadth. Depth on one slice beats ten half-features.
 
 ## 4.1 Decision Log (2026-10-20)
 
@@ -120,7 +119,7 @@ Every step emits a domain event; every event is stored in an append-only history
 3. **Tenant isolation is not optional.** `tenant_id` scoping in every query; RLS as defense-in-depth.
 4. **The UI shows exceptions, not noise.** Approval queues and discrepancies first; vanity metrics later.
 5. **Observable by default.** Every request carries `trace_id`; every job logs start/end/attempt.
-6. **Showcase depth over breadth.** One slice, fully hardened.
+6. **Depth over breadth.** One slice, fully hardened.
 
 ## 10. Scope — MVP
 
@@ -339,7 +338,7 @@ procurekit/
 └─ README.md
 ```
 
-**Go module strategy.** One Go module with multiple binaries (`services/*/cmd/*/main.go`) and shared `internal/platform` (config, telemetry, db, auth middleware). Rationale: fast iteration for a showcase; the service boundaries stay explicit and can be split into modules later without changing APIs.
+**Go module strategy.** One Go module with multiple binaries (`services/*/cmd/*/main.go`) and shared `internal/platform` (config, telemetry, db, auth middleware). Rationale: fast iteration in this phase; the service boundaries stay explicit and can be split into modules later without changing APIs.
 
 ## 15. API Structure
 
@@ -402,9 +401,9 @@ service Documents   { rpc ListEvents(...) returns (...); rpc CreatePresignedUplo
 | i18n | UI copy ID + EN (cookie-based) |
 | Portability | Runs on `docker compose up` with one command; no cloud dependency |
 
-## 20. Technology Stack & JD Evidence Matrix
+## 20. Technology Stack & Capability Matrix
 
-| JD requirement | Where it lives |
+| Capability | Where it lives |
 |---|---|
 | Go microservices, clean/hexagonal | 5 Go services with `domain/app/adapters` layers |
 | gRPC / Protobuf | `proto/` contracts; gateway↔services |
@@ -454,7 +453,7 @@ service Documents   { rpc ListEvents(...) returns (...); rpc CreatePresignedUplo
 - [ ] Nightly export runs under lock; missed-run metric visible.
 - [ ] p95 latency meets NFR on seed dataset.
 - [ ] Playwright e2e covers happy path + one resilience scenario.
-- [ ] README maps every JD requirement to code/tests/demo steps.
+- [ ] README maps every key capability to code/tests/demo steps.
 
 ## 24. Risks & Mitigations
 
@@ -464,7 +463,7 @@ service Documents   { rpc ListEvents(...) returns (...); rpc CreatePresignedUplo
 | Async complexity eats the timeline | Outbox + single worker first; add retry/DLQ in week 2 |
 | Go ramp-up | Start with gateway; reuse patterns; AI-assisted coding with review checklist |
 | Demo environment fragility | Compose-first; no cloud dependencies; seed + reset script |
-| "Showcase smell" (too perfect) | Document real trade-offs and open decisions in ADRs |
+| "Too perfect" demo (not representative) | Document real trade-offs and open decisions in ADRs |
 
 ## 25. Decisions (resolved 2026-10-20)
 
@@ -476,8 +475,8 @@ service Documents   { rpc ListEvents(...) returns (...); rpc CreatePresignedUplo
 | D4 | Kubernetes | kind manifests + CI validation; no managed cluster |
 | D5 | Demo hosting | VPS is not sized for always-on; default local demo + video; optional on-demand trimmed profile or VPS upgrade |
 
-**Hosting addendum (capacity check, 2026-10-20).** The shared ELCODE VPS reports 3.6 GB total RAM (≈1.6 GB available), 9.4 GB free disk, 2 vCPU, and 11 running containers (studio prod/staging, Postgres, MinIO ×2, GlitchTip ×3, portfolio). A trimmed ProcureKit demo stack (web + 5 Go services + Mongo + Redis + RabbitMQ; reusing Postgres/MinIO; no Jaeger/Prometheus) needs ≈1.0–1.4 GB and several GB of images — feasible only as an on-demand, memory-capped demo, not always-on. Managed Kubernetes is rejected on cost/ops grounds.
+**Hosting addendum (capacity check, 2026-10-20).** The demo runs locally; no always-on public deployment is planned. A shared VPS was evaluated and found undersized (≈1.6 GB available RAM, 9.4 GB free disk), and a managed Kubernetes cluster is rejected on cost and operations grounds.
 
 ## 26. Summary
 
-ProcureKit is a deliberately narrow, deliberately deep reference implementation: one procure-to-pay slice with enterprise-grade correctness, async resilience, observability, and a data-heavy UI. It converts "I have done enterprise SaaS" into "here is the system, run it and judge it" — which is exactly what the target JD asks a senior engineer to demonstrate.
+ProcureKit is a deliberately narrow, deliberately deep reference implementation: one procure-to-pay slice with enterprise-grade correctness, async resilience, observability, and a data-heavy UI. It is meant to be run, broken, and recovered — not just read.
