@@ -39,6 +39,15 @@ scripts/                     seed, reset, migrate, gen-proto
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Issues use `type:*`, `area:*`, `priority:*`, `size:*` labels and milestones **M0–M5**.
 
+## CI
+
+`.github/workflows/ci.yml` runs on pushes and pull requests to `develop` and `main` (plus manual dispatch):
+
+- **Go** — `go vet`, `go build`, `go test`
+- **Web** — `pnpm install --frozen-lockfile`, `pnpm build`, `pnpm lint`, `pnpm test`
+
+> GitHub Actions minutes for private repositories depend on the account plan (Free includes 2,000 Linux minutes/month). Public repositories use free standard runners.
+
 ## Quickstart
 
 Prerequisites: Go 1.23+, Node 22+, pnpm, and Docker Desktop (or Docker Engine with Compose v2).
