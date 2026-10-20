@@ -1,4 +1,4 @@
-.PHONY: help install build lint test fmt compose-up compose-down compose-logs compose-ps reset
+.PHONY: help install build lint test fmt compose-up compose-down compose-logs compose-ps seed seed-reset reset
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -11,6 +11,8 @@ help: ## Show available targets
 	@echo "  compose-down  Stop local stack (keeps volumes)"
 	@echo "  compose-logs  Follow local stack logs"
 	@echo "  compose-ps    Show service health"
+	@echo "  seed          Reset demo data and generate the dataset"
+	@echo "  seed-reset    Wipe demo data (PostgreSQL + MongoDB)"
 	@echo "  reset         Drop volumes and recreate the local stack"
 
 install: ## Install JS workspace dependencies
@@ -29,7 +31,7 @@ test: ## Run Go and JS test placeholders
 	pnpm test
 
 fmt: ## Format Go code
-	gofmt -w services internal
+	gofmt -w services internal scripts
 
 compose-up: ## Start local stack and wait for healthy services
 	docker compose up -d --wait
@@ -42,6 +44,12 @@ compose-logs: ## Follow local stack logs
 
 compose-ps: ## Show service health
 	docker compose ps
+
+seed: ## Reset demo data and generate the deterministic dataset
+	go run ./scripts/seed
+
+seed-reset: ## Wipe demo data (PostgreSQL + MongoDB)
+	go run ./scripts/seed --reset
 
 reset: ## Drop volumes and recreate the local stack
 	docker compose down -v --remove-orphans
