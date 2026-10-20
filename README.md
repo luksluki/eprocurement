@@ -75,6 +75,8 @@ Reset the local stack (drops volumes): `make reset`.
 
 > Port conflict? If a service port is already used on your machine (for example a local PostgreSQL on 5432), override it in `.env` — e.g. `POSTGRES_PORT=55432` — and update the connection string accordingly.
 
+Full walkthrough with expected output, troubleshooting, and demo-data reset guide: [`docs/onboarding.md`](docs/onboarding.md).
+
 ## Demo data
 
 `make seed` wipes and regenerates a deterministic dataset: 3 tenants, users, vendors, **100,000 requisitions**, and **1,000,000 domain events** (PostgreSQL `demo` schema + MongoDB `events`). It completes in under two minutes on a laptop.
@@ -95,6 +97,7 @@ The tool reads `DATABASE_URL`, `MONGO_URI`, and `MONGO_DB` from `.env` (or the e
 
 ## Docs
 
+- Local onboarding — `docs/onboarding.md`
 - PRD v0.2 — `docs/prd/prd-v0.2.md`
 - Architecture decisions — `docs/adr/`
 - Agent workflow — `AGENTS.md`
