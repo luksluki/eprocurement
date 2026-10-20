@@ -41,7 +41,15 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Issues use `type:*`, `area:*`, `priority
 
 ## Quickstart
 
-_To be added by the M0 foundation issues (monorepo skeleton + Docker Compose)._
+_Skeleton only (issue #13). Service behaviour arrives with the individual issues._
+
+```bash
+pnpm install      # install workspace tooling (Turborepo)
+go build ./...    # compile the five service skeletons
+make help         # list developer targets
+```
+
+Docker Compose arrives in #14; the full quickstart will be completed there.
 
 ## Docs
 
