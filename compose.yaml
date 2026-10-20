@@ -98,7 +98,33 @@ services:
     networks: [backend]
 
   # Observability profile (Jaeger + Prometheus/Grafana) arrives with #54.
-  # Application services (gateway/identity/...) join the backend network in later issues.
+  # Remaining application services (gateway/procurement/documents/worker) join in later issues.
+
+  identity:
+    build:
+      context: .
+      dockerfile: deploy/docker/service.Dockerfile
+      args:
+        SERVICE: identity
+    environment:
+      APP_ENV: ${APP_ENV:-local}
+      PORT: "8081"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Inside the compose network the database is reached by service name,
+      # not by the host-local URL in .env.
+      DATABASE_URL: postgres://${POSTGRES_USER:-eprocurement}:${POSTGRES_PASSWORD:-eprocurement}@postgres:5432/${POSTGRES_DB:-eprocurement}?sslmode=disable
+    ports:
+      - "${IDENTITY_PORT:-8081}:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/bin/grpc-health-probe", "-addr=localhost:8081", "-service=identity"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks: [backend]
 
 volumes:
   pgdata:
