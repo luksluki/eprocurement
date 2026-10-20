@@ -97,5 +97,6 @@ The tool reads `DATABASE_URL`, `MONGO_URI`, and `MONGO_DB` from `.env` (or the e
 
 - PRD v0.2 — `docs/prd/prd-v0.2.md`
 - Architecture decisions — `docs/adr/`
+- Agent workflow — `AGENTS.md`
 - AI-assisted workflow — `docs/ai-workflow.md`
 - Backlog map — `docs/backlog-v0.1.md`
