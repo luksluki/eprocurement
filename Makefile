@@ -1,4 +1,4 @@
-.PHONY: help install build lint test fmt compose-up compose-down seed reset
+.PHONY: help install build lint test fmt compose-up compose-down compose-logs compose-ps reset
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -7,10 +7,11 @@ help: ## Show available targets
 	@echo "  lint          Run Go vet and JS lint placeholders"
 	@echo "  test          Run Go and JS test placeholders"
 	@echo "  fmt           Format Go code (gofmt)"
-	@echo "  compose-up    Start local stack (arrives in #14)"
-	@echo "  compose-down  Stop local stack (arrives in #14)"
-	@echo "  seed          Seed demo data (arrives in #17)"
-	@echo "  reset         Reset local data (arrives in #17)"
+	@echo "  compose-up    Start local stack and wait for healthy services"
+	@echo "  compose-down  Stop local stack (keeps volumes)"
+	@echo "  compose-logs  Follow local stack logs"
+	@echo "  compose-ps    Show service health"
+	@echo "  reset         Drop volumes and recreate the local stack"
 
 install: ## Install JS workspace dependencies
 	pnpm install
@@ -30,14 +31,18 @@ test: ## Run Go and JS test placeholders
 fmt: ## Format Go code
 	gofmt -w services internal
 
-compose-up: ## Start local stack (arrives in #14)
-	@echo "docker compose stack arrives in issue #14"
+compose-up: ## Start local stack and wait for healthy services
+	docker compose up -d --wait
 
-compose-down: ## Stop local stack (arrives in #14)
-	@echo "docker compose stack arrives in issue #14"
+compose-down: ## Stop local stack (keeps volumes)
+	docker compose down
 
-seed: ## Seed demo data (arrives in #17)
-	@echo "seed script arrives in issue #17"
+compose-logs: ## Follow local stack logs
+	docker compose logs -f --tail=100
 
-reset: ## Reset local data (arrives in #17)
-	@echo "reset script arrives in issue #17"
+compose-ps: ## Show service health
+	docker compose ps
+
+reset: ## Drop volumes and recreate the local stack
+	docker compose down -v --remove-orphans
+	docker compose up -d --wait
