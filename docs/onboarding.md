@@ -51,7 +51,9 @@ Success: `Done in ...s` with no `--frozen-lockfile` error.
 make compose-up     # docker compose up -d --wait
 ```
 
-This starts PostgreSQL, MongoDB, Redis, RabbitMQ, MinIO, and the OTel collector, and **waits until every service is healthy**. First run pulls the images (~1–2 min); later runs take seconds.
+This starts PostgreSQL, MongoDB, Redis, RabbitMQ, MinIO, the OTel collector, and the `identity` service (built from source on the first run), and **waits until every service is healthy**. First run pulls images and builds the Go services (~2–3 min); later runs take seconds.
+
+> After changing Go code, rebuild the service images first: `docker compose build`, then `make compose-up` — plain `up` keeps the previously built image.
 
 ```bash
 make compose-ps     # all services should report "healthy"
@@ -65,6 +67,7 @@ make compose-ps     # all services should report "healthy"
 | RabbitMQ (AMQP / UI) | `localhost:5672` / http://localhost:15672 (`eprocurement` / `eprocurement`) |
 | MinIO (S3 / Console) | http://localhost:9000 / http://localhost:9001 (`eprocurement` / `eprocurement`) |
 | OTel collector (gRPC / HTTP / health) | `localhost:4317` / `localhost:4318` / http://localhost:13133 |
+| identity (gRPC + health) | `localhost:8081` — probe: `go run ./scripts/grpc-health-probe -addr localhost:8081 -service identity` |
 
 ### 2.4 Build
 
@@ -119,10 +122,11 @@ You now have a working environment. Head to [CONTRIBUTING.md](../CONTRIBUTING.md
 | `RABBITMQ_PORT` / `RABBITMQ_MANAGEMENT_PORT` | `5672` / `15672` |
 | `MINIO_PORT` / `MINIO_CONSOLE_PORT` | `9000` / `9001` |
 | `OTEL_GRPC_PORT` / `OTEL_HTTP_PORT` / `OTEL_HEALTH_PORT` | `4317` / `4318` / `13133` |
+| `IDENTITY_PORT` | `8081` |
 
 **Credentials** (local development only — all default to `eprocurement`): `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `MONGO_ROOT_USER`, `MONGO_ROOT_PASSWORD`, `MONGO_DB`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`.
 
-**Connection strings** (read by the seed tool and, later, by services):
+**Connection strings** (read by the seed tool and the services):
 
 | Variable | Default |
 |---|---|
@@ -133,7 +137,7 @@ You now have a working environment. Head to [CONTRIBUTING.md](../CONTRIBUTING.md
 | `S3_ENDPOINT` | `http://localhost:9000` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` |
 
-**Application services** (optional; safe to omit): `APP_ENV` (default `local`) and `PORT` (default `8080`), read by `internal/platform/config`.
+**Application services** (optional; safe to omit): `APP_ENV` (default `local`) and `LOG_LEVEL` (default `info`). Each Go service also reads a `PORT` env with its own default — `identity` defaults to `8081`; inside compose the port is fixed at 8081 and published as `IDENTITY_PORT`. The `identity` schema is documented in [`docs/schema/identity.md`](schema/identity.md).
 
 > **Port overrides have two halves.** Compose only maps ports — it does not rewrite connection strings. If you set `POSTGRES_PORT=55432`, you must also change the port inside `DATABASE_URL`, or `make seed` will keep dialing 5432. The same applies to `MONGO_PORT` + `MONGO_URI`, `RABBITMQ_PORT` + `RABBITMQ_URL`, `MINIO_PORT` + `S3_ENDPOINT`, and `OTEL_GRPC_PORT` + `OTEL_EXPORTER_OTLP_ENDPOINT`. After editing `.env`, recreate the stack: `make compose-down && make compose-up`.
 

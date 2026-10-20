@@ -57,7 +57,7 @@ Prerequisites: Go 1.24+, Node 22+, pnpm, and Docker Desktop (or Docker Engine wi
 ```bash
 cp .env.example .env   # local-only credentials
 make install           # pnpm install
-make compose-up        # Postgres, MongoDB, Redis, RabbitMQ, MinIO, OTel collector
+make compose-up        # Postgres, MongoDB, Redis, RabbitMQ, MinIO, OTel collector, identity
 make build             # go build ./... + turbo build
 make help              # all targets
 ```
@@ -70,6 +70,7 @@ make help              # all targets
 | RabbitMQ (AMQP / UI) | `localhost:5672` / http://localhost:15672 |
 | MinIO (S3 / Console) | http://localhost:9000 / http://localhost:9001 |
 | OTel collector (gRPC / HTTP / health) | `localhost:4317` / `localhost:4318` / http://localhost:13133 |
+| identity (gRPC + health) | `localhost:8081` |
 
 Reset the local stack (drops volumes): `make reset`.
 
@@ -98,6 +99,7 @@ The tool reads `DATABASE_URL`, `MONGO_URI`, and `MONGO_DB` from `.env` (or the e
 ## Docs
 
 - Local onboarding — `docs/onboarding.md`
+- Identity schema — `docs/schema/identity.md`
 - PRD v0.2 — `docs/prd/prd-v0.2.md`
 - Architecture decisions — `docs/adr/`
 - Agent workflow — `AGENTS.md`
