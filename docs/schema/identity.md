@@ -19,7 +19,7 @@ Owned by the `identity` service per [ADR-0001](../adr/0001-architecture.md): no 
 | `tenant_id` | uuid NOT NULL | Tenant scoping for every query (see *Tenancy* below) |
 | `email` | text NOT NULL | Unique per tenant, case-insensitive |
 | `display_name` | text NOT NULL default `''` | |
-| `password_hash` | text NOT NULL | argon2id; mandatory from the first user write (login arrives with a later issue) |
+| `password_hash` | text NOT NULL | argon2id in PHC string format (`$argon2id$v=19$m=65536,t=2,p=4$…`); produced by `auth.HashPassword` |
 | `status` | text NOT NULL default `'active'` | `active` \| `disabled` |
 | `created_at` / `updated_at` | timestamptz NOT NULL | |
 
@@ -49,12 +49,36 @@ Join table: `user_id` × `role_id` composite PK, both `ON DELETE CASCADE`, `gran
 
 Indexes: `refresh_tokens_user_idx (user_id)`; `refresh_tokens_expires_idx (expires_at)` for cleanup jobs.
 
+## Token semantics (issue #20)
+
+**Access token** — JWT signed with Ed25519 (`alg: EdDSA`), 15 minutes, claims:
+
+| Claim | Meaning |
+|---|---|
+| `iss` | `identity.eprocurement` |
+| `sub` | user id |
+| `tid` | tenant id |
+| `roles` | granted role codes at issue time |
+| `jti` | unique token id |
+| `iat` / `exp` | issued-at / expiry (15 min) |
+
+The `kid` header identifies the signing key (first 8 bytes of the public key's sha256). Set `IDENTITY_JWT_KEY` (base64 32-byte seed) for a stable key across restarts; unset means an ephemeral key per boot. JWKS exposure for the gateway arrives with #21.
+
+**Refresh token** — 32 random bytes, hex-encoded to the client; only its sha256 is stored (`token_hash`), 7-day expiry. Rules:
+
+- Each `Refresh` call issues a new token and sets the old row's `rotated_to`.
+- Presenting a rotated token again (reuse → likely theft) revokes the whole token family via the `rotated_to` chain, then fails.
+- `Logout` sets `revoked_at`; revoked and expired tokens always fail with the same generic error.
+- Access tokens stay valid until expiry after logout (15 min max exposure); the Redis revocation list for immediate access-token logout is PRD §17, a later issue.
+
+**Login behaviour** — unknown email, wrong password, email present in several tenants (ambiguous), and disabled user all return the identical `invalid email or password` error; the unknown-email path burns an argon2id verification against a dummy hash to keep timing flat. Login attempts are rate-limited per email + client address (`IDENTITY_LOGIN_RATE_PER_MIN`, default 5/min, in-memory).
+
 ## Tenancy
 
 `tenant_id` is the scoping key on every user query; the service layer always filters by it, and cross-tenant requests must fail with 404/403 (FR-01). The per-tenant email uniqueness means two tenants may legitimately share an address. PostgreSQL RLS as defense-in-depth (ADR-0001) arrives with the query layer in a later issue, together with cross-tenant denial tests.
 
 ## Planned follow-ups
 
-- `identity.v1` gRPC API (Login, Refresh, ListUsers, AssignRoles) — next issues in epic #2.
-- JWKS endpoint material: signing keys live in config/secret storage, not in this schema.
+- JWKS endpoint + key rotation with `kid` (#21); gateway REST exposure of login.
 - Logout revocation list in Redis (PRD §17) complements `revoked_at` here.
+- ListUsers / AssignRoles RPCs — later issues in epic #2.

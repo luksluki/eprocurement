@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package identity.v1;
+
+option go_package = "github.com/luksluki/eprocurement/gen/go/identity/v1;identityv1";
+
+// Identity is the internal auth API. It is reachable only from inside the
+// backend network; login is exposed to clients through the gateway (issue #20).
+service Identity {
+  // Login verifies credentials and returns a fresh access + refresh pair.
+  // Unknown email, wrong password, ambiguous email, and disabled user all
+  // return the same error to prevent user enumeration.
+  rpc Login(LoginRequest) returns (LoginResponse);
+  // Refresh exchanges a valid refresh token for a new pair; the old refresh
+  // token is invalidated (rotation). Reuse of a rotated token revokes the
+  // whole token family.
+  rpc Refresh(RefreshRequest) returns (LoginResponse);
+  // Logout revokes a refresh token. Idempotent.
+  rpc Logout(LogoutRequest) returns (LogoutResponse);
+}
+
+message LoginRequest {
+  string email = 1;
+  string password = 2;
+}
+
+message RefreshRequest {
+  string refresh_token = 1;
+}
+
+message LogoutRequest {
+  string refresh_token = 1;
+}
+
+message LoginResponse {
+  string access_token = 1;   // JWT, EdDSA-signed, 15 min
+  int64 access_expires_in = 2;   // seconds
+  string refresh_token = 3;  // opaque, 7 days, rotate on use
+  int64 refresh_expires_in = 4;  // seconds
+  string token_type = 5;     // "Bearer"
+}
+
+message LogoutResponse {}

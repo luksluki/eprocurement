@@ -1,4 +1,4 @@
-.PHONY: help install build lint test fmt compose-up compose-down compose-logs compose-ps seed seed-reset reset
+.PHONY: help install build lint test fmt compose-up compose-down compose-logs compose-ps seed seed-reset reset gen-proto
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -14,6 +14,7 @@ help: ## Show available targets
 	@echo "  seed          Reset demo data and generate the dataset"
 	@echo "  seed-reset    Wipe demo data (PostgreSQL + MongoDB)"
 	@echo "  reset         Drop volumes and recreate the local stack"
+	@echo "  gen-proto     Regenerate gen/go from proto/ (needs protoc; see docs/onboarding.md)"
 
 install: ## Install JS workspace dependencies
 	pnpm install
@@ -54,3 +55,13 @@ seed-reset: ## Wipe demo data (PostgreSQL + MongoDB)
 reset: ## Drop volumes and recreate the local stack
 	docker compose down -v --remove-orphans
 	docker compose up -d --wait
+
+PROTOC := $(shell command -v .tools/protoc/bin/protoc 2>/dev/null || command -v protoc 2>/dev/null)
+
+gen-proto: ## Regenerate gen/go from proto/
+	@test -n "$(PROTOC)" || (echo "protoc not found: install it into .tools/protoc (see docs/onboarding.md)" && exit 1)
+	PATH="$$PATH:$$(go env GOPATH)/bin" $(PROTOC) \
+		--proto_path=proto \
+		--go_out=. --go_opt=module=github.com/luksluki/eprocurement \
+		--go-grpc_out=. --go-grpc_opt=module=github.com/luksluki/eprocurement \
+		$$(find proto -name '*.proto')
