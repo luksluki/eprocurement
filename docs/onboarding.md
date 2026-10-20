@@ -14,11 +14,11 @@ Time budget: about 10 minutes on a typical laptop (the seed step dominates).
 | pnpm | 12.8.1 | `pnpm --version` | Pinned via `packageManager` in `package.json`; enable with `corepack enable`. |
 | Docker | Engine 27+ | `docker --version` | Docker Desktop, or Engine + Compose v2 plugin. |
 | Docker Compose | v2 | `docker compose version` | v1 (`docker-compose`) is not supported. |
-| GNU Make | 4+ | `make --version` | Windows: Git Bash and WSL2 both ship a working `make`. |
+| GNU Make | 4+ | `make --version` | Windows: install it — `scoop install make` or `choco install make` (WSL2: `sudo apt install make`). |
 
 Everything runs through `make`; there is no per-service setup.
 
-Windows note: use **Git Bash** (or WSL2) as your terminal so the Makefile targets and `.env` handling behave the same as on Linux/macOS.
+Windows note: use **Git Bash** (or WSL2) as your terminal so the Makefile targets and `.env` handling behave the same as on Linux/macOS — but install GNU Make first (`scoop install make`, `choco install make`, or `sudo apt install make` in WSL2).
 
 ## 2. Fresh clone walkthrough
 
@@ -190,7 +190,7 @@ All flags: `--dsn`, `--mongo-uri`, `--mongo-db`, `--tenants`, `--vendors-per-ten
 
 ## 6. Troubleshooting
 
-**`make: command not found` (Windows)** — run the walkthrough from Git Bash or WSL2, not PowerShell/cmd. Git Bash ships with `make`; verify with `make --version`.
+**`make: command not found` (Windows)** — install GNU Make (`scoop install make`, `choco install make`, or `sudo apt install make` in WSL2), then run from Git Bash or WSL2. Verify with `make --version`.
 
 **`docker: Cannot connect to the Docker daemon`** — Docker Desktop is not running. Start it, wait for `docker info` to succeed, then retry `make compose-up`.
 
