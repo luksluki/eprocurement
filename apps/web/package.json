@@ -1,0 +1,11 @@
+{
+  "name": "@eprocurement/web",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "build": "node -e \"console.log('web build placeholder')\"",
+    "lint": "node -e \"console.log('web lint placeholder')\"",
+    "test": "node -e \"console.log('web test placeholder')\"",
+    "dev": "node -e \"console.log('web dev placeholder: Next.js arrives in #50')\""
+  }
+}
