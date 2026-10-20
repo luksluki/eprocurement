@@ -1,0 +1,37 @@
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Node
+node_modules/
+.pnpm-store/
+.next/
+.turbo/
+dist/
+coverage/
+playwright-report/
+test-results/
+
+# Go
+bin/
+tmp/
+*.test
+*.out
+vendor/
+
+# Local data
+data/
+*.log
+
+# OS temp
+.openclaw/
