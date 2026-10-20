@@ -1,5 +1,7 @@
 # eProcurement — ELCODE ProcureKit
 
+[![CI](https://github.com/luksluki/eprocurement/actions/workflows/ci.yml/badge.svg)](https://github.com/luksluki/eprocurement/actions/workflows/ci.yml)
+
 Multi-tenant eProcurement platform (procure-to-pay slice) and reference implementation: **Go microservices + Next.js**, PostgreSQL + MongoDB + Redis + RabbitMQ, OpenTelemetry, Docker/Kubernetes manifests.
 
 **Status:** planning — backlog lives in GitHub Issues + Project board. PRD: [`docs/prd/prd-v0.2.md`](docs/prd/prd-v0.2.md).
