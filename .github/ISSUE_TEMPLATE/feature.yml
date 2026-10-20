@@ -1,0 +1,42 @@
+name: Feature
+description: A shippable unit of work (≤2 days)
+title: ""
+labels: ["type: feature"]
+body:
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Why is this needed? Link the epic.
+      placeholder: "Part of #12. Needed so approvers can decide quickly."
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What will be built (and not built)?
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Testable checklist
+      placeholder: "- [ ] POST /api/v1/... returns 201\n- [ ] Invalid input returns 400 with field errors"
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Technical notes
+      description: Data model, events, indexes, migrations, test approach
+    validations:
+      required: false
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: Blocked by / blocks
+    validations:
+      required: false

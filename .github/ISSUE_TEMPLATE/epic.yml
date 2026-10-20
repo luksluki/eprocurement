@@ -1,0 +1,37 @@
+name: Epic
+description: A delivery theme that groups related issues
+title: "EPIC: "
+labels: ["type: epic"]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What outcome does this epic deliver?
+      placeholder: "Enable a complete procure-to-pay slice for one tenant."
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What is in / out of scope?
+      placeholder: "- In: vendor CRUD, PR, approvals\n- Out: sourcing events"
+    validations:
+      required: true
+  - type: textarea
+    id: success
+    attributes:
+      label: Success metrics
+      description: How do we know the epic is done?
+      placeholder: "- All child issues closed\n- Demo path works end-to-end"
+    validations:
+      required: true
+  - type: textarea
+    id: children
+    attributes:
+      label: Child issues
+      description: Checklist of issues (filled after backlog creation)
+      placeholder: "- [ ] #12 ..."
+    validations:
+      required: false
