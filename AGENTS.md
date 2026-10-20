@@ -7,7 +7,7 @@ This repository is built issue-by-issue with Git Flow. ZCode (and other coding a
 - eProcurement reference implementation: **Go microservices + Next.js**.
 - Services: `gateway`, `identity`, `procurement`, `documents`, `worker`; web app in `apps/web`.
 - Data: PostgreSQL + MongoDB + Redis + RabbitMQ + MinIO; OpenTelemetry collector.
-- Read first: `README.md`, `docs/prd/prd-v0.2.md`, `docs/adr/`, `docs/backlog-v0.1.md`, `CONTRIBUTING.md`.
+- Read first: `README.md`, `docs/prd/prd-v0.2.md`, `docs/adr/`, `docs/backlog-v0.1.md`, `docs/ai-workflow.md`, `CONTRIBUTING.md`.
 - Board: GitHub Project **eProcurement v0.1**; milestones **M0–M5**.
 
 ## Golden rules (non-negotiable)

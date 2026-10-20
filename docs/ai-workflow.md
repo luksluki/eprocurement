@@ -2,6 +2,8 @@
 
 This repository is built with AI coding agents (Claude Code, Cursor, Copilot, or similar) as part of the standard engineering workflow. The rules below keep AI output reviewable and production-safe.
 
+> **Operational workflow:** coding agents follow [`AGENTS.md`](../AGENTS.md) at the repository root. This document defines the AI usage policy and review standards; `AGENTS.md` defines how work is executed (branching, gates, PRs, reporting).
+
 ## Principles
 
 1. **Context before code.** Every task starts from an issue with acceptance criteria, plus the PRD and relevant ADRs. Prompts must include the issue number.
