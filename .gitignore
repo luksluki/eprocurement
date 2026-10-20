@@ -35,3 +35,4 @@ data/
 
 # OS temp
 .openclaw/
+.tools/

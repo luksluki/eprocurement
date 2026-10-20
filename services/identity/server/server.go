@@ -16,7 +16,9 @@ import (
 	"strings"
 	"time"
 
+	identityv1 "github.com/luksluki/eprocurement/gen/go/identity/v1"
 	"github.com/luksluki/eprocurement/internal/platform/logger"
+	"github.com/luksluki/eprocurement/services/identity/auth"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
@@ -46,9 +48,10 @@ type Server struct {
 	// lastHealth mirrors the reported readiness status; written only by
 	// refreshReadiness, which runs sequentially (once in Serve, then from the
 	// single readinessLoop goroutine).
-	lastHealth healthpb.HealthCheckResponse_ServingStatus
-	stop       chan struct{}
-	done       chan struct{}
+	lastHealth  healthpb.HealthCheckResponse_ServingStatus
+	identityAPI *api
+	stop        chan struct{}
+	done        chan struct{}
 }
 
 // New returns a Server ready to Serve on the given listener.
@@ -73,6 +76,9 @@ func New(log *slog.Logger, pinger Pinger, opts ...Option) *Server {
 	s.lastHealth = healthpb.HealthCheckResponse_NOT_SERVING
 	s.health.SetServingStatus(ServiceName, s.lastHealth) // until the first ping succeeds
 	healthpb.RegisterHealthServer(s.grpc, s.health)
+	if s.identityAPI != nil {
+		identityv1.RegisterIdentityServer(s.grpc, s.identityAPI)
+	}
 	reflection.Register(s.grpc)
 	return s
 }
@@ -83,6 +89,11 @@ type Option func(*Server)
 // WithHealthInterval overrides the readiness ping interval (tests use short values).
 func WithHealthInterval(d time.Duration) Option {
 	return func(s *Server) { s.interval = d }
+}
+
+// WithIdentityAPI registers the identity.v1 API (login/refresh/logout).
+func WithIdentityAPI(svc *auth.Service) Option {
+	return func(s *Server) { s.identityAPI = newAPI(s.log, svc) }
 }
 
 // Serve accepts connections until ctx is cancelled, then stops gracefully.
@@ -115,6 +126,9 @@ func (s *Server) Serve(ctx context.Context, lis net.Listener) error {
 
 func (s *Server) readinessLoop(ctx context.Context) {
 	defer close(s.done)
+	if s.interval <= 0 { // tests: readiness set once in Serve, no ticking
+		return
+	}
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
 	for {

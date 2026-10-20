@@ -110,6 +110,8 @@ services:
       APP_ENV: ${APP_ENV:-local}
       PORT: "8081"
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      IDENTITY_LOGIN_RATE_PER_MIN: ${IDENTITY_LOGIN_RATE_PER_MIN:-5}
+      IDENTITY_JWT_KEY: ${IDENTITY_JWT_KEY:-}
       # Inside the compose network the database is reached by service name,
       # not by the host-local URL in .env.
       DATABASE_URL: postgres://${POSTGRES_USER:-eprocurement}:${POSTGRES_PASSWORD:-eprocurement}@postgres:5432/${POSTGRES_DB:-eprocurement}?sslmode=disable

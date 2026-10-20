@@ -137,7 +137,7 @@ You now have a working environment. Head to [CONTRIBUTING.md](../CONTRIBUTING.md
 | `S3_ENDPOINT` | `http://localhost:9000` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` |
 
-**Application services** (optional; safe to omit): `APP_ENV` (default `local`) and `LOG_LEVEL` (default `info`). Each Go service also reads a `PORT` env with its own default — `identity` defaults to `8081`; inside compose the port is fixed at 8081 and published as `IDENTITY_PORT`. The `identity` schema is documented in [`docs/schema/identity.md`](schema/identity.md).
+**Application services** (optional; safe to omit): `APP_ENV` (default `local`) and `LOG_LEVEL` (default `info`). Each Go service also reads a `PORT` env with its own default — `identity` defaults to `8081`; inside compose the port is fixed at 8081 and published as `IDENTITY_PORT`. The `identity` service also takes `IDENTITY_LOGIN_RATE_PER_MIN` (default `5`) and an optional `IDENTITY_JWT_KEY` (base64 32-byte Ed25519 seed; unset = ephemeral key per boot). The `identity` schema and token semantics are documented in [`docs/schema/identity.md`](schema/identity.md).
 
 > **Port overrides have two halves.** Compose only maps ports — it does not rewrite connection strings. If you set `POSTGRES_PORT=55432`, you must also change the port inside `DATABASE_URL`, or `make seed` will keep dialing 5432. The same applies to `MONGO_PORT` + `MONGO_URI`, `RABBITMQ_PORT` + `RABBITMQ_URL`, `MINIO_PORT` + `S3_ENDPOINT`, and `OTEL_GRPC_PORT` + `OTEL_EXPORTER_OTLP_ENDPOINT`. After editing `.env`, recreate the stack: `make compose-down && make compose-up`.
 
@@ -171,6 +171,10 @@ Data:
 | `make reset` | `compose down -v` + `compose up --wait` | Nuke volumes and start clean. |
 
 See [§5](#5-demo-data-and-resets) for the difference between the reset levels.
+
+### Changing gRPC contracts
+
+Generated code under `gen/go/` is committed, so building never needs `protoc`. After editing files in `proto/`, regenerate with `make gen-proto` — it needs the protoc compiler (unzip a release from <https://github.com/protocolbuffers/protobuf/releases> into `.tools/protoc/`, git-ignored) plus `go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11` and `go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1`. Commit both the `.proto` change and the regenerated files together.
 
 ## 5. Demo data and resets
 
