@@ -62,7 +62,7 @@ Indexes: `refresh_tokens_user_idx (user_id)`; `refresh_tokens_expires_idx (expir
 | `jti` | unique token id |
 | `iat` / `exp` | issued-at / expiry (15 min) |
 
-The `kid` header identifies the signing key (first 8 bytes of the public key's sha256). Set `IDENTITY_JWT_KEY` (base64 32-byte seed) for a stable key across restarts; unset means an ephemeral key per boot. JWKS exposure for the gateway arrives with #21.
+The `kid` header identifies the signing key (first 8 bytes of the public key's sha256). Set `IDENTITY_JWT_KEY` (base64 32-byte seed) for a stable key across restarts; unset means an ephemeral key per boot. The active public keys (current + `IDENTITY_JWT_KEY_PREVIOUS` during rotation) are served to verifiers through the `GetJwks` gRPC RPC; the gateway exposes them at `/.well-known/jwks.json` and verifies tokens against its cached copy. Rotation procedure: [`docs/ops/jwks-rotation.md`](../ops/jwks-rotation.md).
 
 **Refresh token** — 32 random bytes, hex-encoded to the client; only its sha256 is stored (`token_hash`), 7-day expiry. Rules:
 
@@ -79,6 +79,6 @@ The `kid` header identifies the signing key (first 8 bytes of the public key's s
 
 ## Planned follow-ups
 
-- JWKS endpoint + key rotation with `kid` (#21); gateway REST exposure of login.
+- Gateway REST endpoints for login/refresh/logout (the web shell issue wires them).
 - Logout revocation list in Redis (PRD §17) complements `revoked_at` here.
 - ListUsers / AssignRoles RPCs — later issues in epic #2.

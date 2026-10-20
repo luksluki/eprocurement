@@ -37,7 +37,7 @@ func startIdentityServer(t *testing.T) (identityv1.IdentityClient, *pgxpool.Pool
 		t.Fatalf("generate key: %v", err)
 	}
 	log := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil)) // keep test output clean
-	svc := auth.New(db, log, priv, 1000)
+	svc := auth.New(db, log, auth.NewKeyring(priv, nil), 1000)
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

@@ -273,6 +273,148 @@ func (*LogoutResponse) Descriptor() ([]byte, []int) {
 	return file_identity_v1_identity_proto_rawDescGZIP(), []int{4}
 }
 
+type GetJwksRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetJwksRequest) Reset() {
+	*x = GetJwksRequest{}
+	mi := &file_identity_v1_identity_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetJwksRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetJwksRequest) ProtoMessage() {}
+
+func (x *GetJwksRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_identity_v1_identity_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetJwksRequest.ProtoReflect.Descriptor instead.
+func (*GetJwksRequest) Descriptor() ([]byte, []int) {
+	return file_identity_v1_identity_proto_rawDescGZIP(), []int{5}
+}
+
+type GetJwksResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Active keys, newest first. Ed25519 public keys in raw 32-byte form; the
+	// gateway converts them to the standard JWKS OKP/Ed25519 shape.
+	Keys          []*Jwk `protobuf:"bytes,1,rep,name=keys,proto3" json:"keys,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetJwksResponse) Reset() {
+	*x = GetJwksResponse{}
+	mi := &file_identity_v1_identity_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetJwksResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetJwksResponse) ProtoMessage() {}
+
+func (x *GetJwksResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_identity_v1_identity_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetJwksResponse.ProtoReflect.Descriptor instead.
+func (*GetJwksResponse) Descriptor() ([]byte, []int) {
+	return file_identity_v1_identity_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *GetJwksResponse) GetKeys() []*Jwk {
+	if x != nil {
+		return x.Keys
+	}
+	return nil
+}
+
+type Jwk struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Kid           string                 `protobuf:"bytes,1,opt,name=kid,proto3" json:"kid,omitempty"`          // key id, also in the JWT header
+	Ed25519       []byte                 `protobuf:"bytes,2,opt,name=ed25519,proto3" json:"ed25519,omitempty"`  // raw public key
+	Current       bool                   `protobuf:"varint,3,opt,name=current,proto3" json:"current,omitempty"` // true = tokens are signed with this key
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Jwk) Reset() {
+	*x = Jwk{}
+	mi := &file_identity_v1_identity_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Jwk) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Jwk) ProtoMessage() {}
+
+func (x *Jwk) ProtoReflect() protoreflect.Message {
+	mi := &file_identity_v1_identity_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Jwk.ProtoReflect.Descriptor instead.
+func (*Jwk) Descriptor() ([]byte, []int) {
+	return file_identity_v1_identity_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *Jwk) GetKid() string {
+	if x != nil {
+		return x.Kid
+	}
+	return ""
+}
+
+func (x *Jwk) GetEd25519() []byte {
+	if x != nil {
+		return x.Ed25519
+	}
+	return nil
+}
+
+func (x *Jwk) GetCurrent() bool {
+	if x != nil {
+		return x.Current
+	}
+	return false
+}
+
 var File_identity_v1_identity_proto protoreflect.FileDescriptor
 
 const file_identity_v1_identity_proto_rawDesc = "" +
@@ -292,11 +434,19 @@ const file_identity_v1_identity_proto_rawDesc = "" +
 	"\x12refresh_expires_in\x18\x04 \x01(\x03R\x10refreshExpiresIn\x12\x1d\n" +
 	"\n" +
 	"token_type\x18\x05 \x01(\tR\ttokenType\"\x10\n" +
-	"\x0eLogoutResponse2\xd1\x01\n" +
+	"\x0eLogoutResponse\"\x10\n" +
+	"\x0eGetJwksRequest\"7\n" +
+	"\x0fGetJwksResponse\x12$\n" +
+	"\x04keys\x18\x01 \x03(\v2\x10.identity.v1.JwkR\x04keys\"K\n" +
+	"\x03Jwk\x12\x10\n" +
+	"\x03kid\x18\x01 \x01(\tR\x03kid\x12\x18\n" +
+	"\aed25519\x18\x02 \x01(\fR\aed25519\x12\x18\n" +
+	"\acurrent\x18\x03 \x01(\bR\acurrent2\x97\x02\n" +
 	"\bIdentity\x12>\n" +
 	"\x05Login\x12\x19.identity.v1.LoginRequest\x1a\x1a.identity.v1.LoginResponse\x12B\n" +
 	"\aRefresh\x12\x1b.identity.v1.RefreshRequest\x1a\x1a.identity.v1.LoginResponse\x12A\n" +
-	"\x06Logout\x12\x1a.identity.v1.LogoutRequest\x1a\x1b.identity.v1.LogoutResponseB@Z>github.com/luksluki/eprocurement/gen/go/identity/v1;identityv1b\x06proto3"
+	"\x06Logout\x12\x1a.identity.v1.LogoutRequest\x1a\x1b.identity.v1.LogoutResponse\x12D\n" +
+	"\aGetJwks\x12\x1b.identity.v1.GetJwksRequest\x1a\x1c.identity.v1.GetJwksResponseB@Z>github.com/luksluki/eprocurement/gen/go/identity/v1;identityv1b\x06proto3"
 
 var (
 	file_identity_v1_identity_proto_rawDescOnce sync.Once
@@ -310,26 +460,32 @@ func file_identity_v1_identity_proto_rawDescGZIP() []byte {
 	return file_identity_v1_identity_proto_rawDescData
 }
 
-var file_identity_v1_identity_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_identity_v1_identity_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_identity_v1_identity_proto_goTypes = []any{
-	(*LoginRequest)(nil),   // 0: identity.v1.LoginRequest
-	(*RefreshRequest)(nil), // 1: identity.v1.RefreshRequest
-	(*LogoutRequest)(nil),  // 2: identity.v1.LogoutRequest
-	(*LoginResponse)(nil),  // 3: identity.v1.LoginResponse
-	(*LogoutResponse)(nil), // 4: identity.v1.LogoutResponse
+	(*LoginRequest)(nil),    // 0: identity.v1.LoginRequest
+	(*RefreshRequest)(nil),  // 1: identity.v1.RefreshRequest
+	(*LogoutRequest)(nil),   // 2: identity.v1.LogoutRequest
+	(*LoginResponse)(nil),   // 3: identity.v1.LoginResponse
+	(*LogoutResponse)(nil),  // 4: identity.v1.LogoutResponse
+	(*GetJwksRequest)(nil),  // 5: identity.v1.GetJwksRequest
+	(*GetJwksResponse)(nil), // 6: identity.v1.GetJwksResponse
+	(*Jwk)(nil),             // 7: identity.v1.Jwk
 }
 var file_identity_v1_identity_proto_depIdxs = []int32{
-	0, // 0: identity.v1.Identity.Login:input_type -> identity.v1.LoginRequest
-	1, // 1: identity.v1.Identity.Refresh:input_type -> identity.v1.RefreshRequest
-	2, // 2: identity.v1.Identity.Logout:input_type -> identity.v1.LogoutRequest
-	3, // 3: identity.v1.Identity.Login:output_type -> identity.v1.LoginResponse
-	3, // 4: identity.v1.Identity.Refresh:output_type -> identity.v1.LoginResponse
-	4, // 5: identity.v1.Identity.Logout:output_type -> identity.v1.LogoutResponse
-	3, // [3:6] is the sub-list for method output_type
-	0, // [0:3] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	7, // 0: identity.v1.GetJwksResponse.keys:type_name -> identity.v1.Jwk
+	0, // 1: identity.v1.Identity.Login:input_type -> identity.v1.LoginRequest
+	1, // 2: identity.v1.Identity.Refresh:input_type -> identity.v1.RefreshRequest
+	2, // 3: identity.v1.Identity.Logout:input_type -> identity.v1.LogoutRequest
+	5, // 4: identity.v1.Identity.GetJwks:input_type -> identity.v1.GetJwksRequest
+	3, // 5: identity.v1.Identity.Login:output_type -> identity.v1.LoginResponse
+	3, // 6: identity.v1.Identity.Refresh:output_type -> identity.v1.LoginResponse
+	4, // 7: identity.v1.Identity.Logout:output_type -> identity.v1.LogoutResponse
+	6, // 8: identity.v1.Identity.GetJwks:output_type -> identity.v1.GetJwksResponse
+	5, // [5:9] is the sub-list for method output_type
+	1, // [1:5] is the sub-list for method input_type
+	1, // [1:1] is the sub-list for extension type_name
+	1, // [1:1] is the sub-list for extension extendee
+	0, // [0:1] is the sub-list for field type_name
 }
 
 func init() { file_identity_v1_identity_proto_init() }
@@ -343,7 +499,7 @@ func file_identity_v1_identity_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_identity_v1_identity_proto_rawDesc), len(file_identity_v1_identity_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   5,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

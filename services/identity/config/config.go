@@ -13,6 +13,7 @@ type Config struct {
 	DatabaseURL     string // DATABASE_URL — PostgreSQL connection string
 	LogLevel        string // LOG_LEVEL (default "info")
 	JWTKeySeed      string // IDENTITY_JWT_KEY — base64 32-byte Ed25519 seed; empty = ephemeral per boot
+	JWTKeyPrevSeed  string // IDENTITY_JWT_KEY_PREVIOUS — previous key, kept verifiable during rotation
 	LoginRatePerMin int    // IDENTITY_LOGIN_RATE_PER_MIN — login attempts per email+address (default 5)
 }
 
@@ -26,6 +27,7 @@ func Load() Config {
 		DatabaseURL:     envOr("DATABASE_URL", "postgres://eprocurement:eprocurement@localhost:5432/eprocurement?sslmode=disable"),
 		LogLevel:        envOr("LOG_LEVEL", "info"),
 		JWTKeySeed:      os.Getenv("IDENTITY_JWT_KEY"),
+		JWTKeyPrevSeed:  os.Getenv("IDENTITY_JWT_KEY_PREVIOUS"),
 		LoginRatePerMin: envInt("IDENTITY_LOGIN_RATE_PER_MIN", 5),
 	}
 }

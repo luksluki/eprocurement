@@ -17,6 +17,9 @@ service Identity {
   rpc Refresh(RefreshRequest) returns (LoginResponse);
   // Logout revokes a refresh token. Idempotent.
   rpc Logout(LogoutRequest) returns (LogoutResponse);
+  // GetJwks returns the active signing keys (current + previous during
+  // rotation) so callers can verify access tokens without sharing secrets.
+  rpc GetJwks(GetJwksRequest) returns (GetJwksResponse);
 }
 
 message LoginRequest {
@@ -41,3 +44,17 @@ message LoginResponse {
 }
 
 message LogoutResponse {}
+
+message GetJwksRequest {}
+
+message GetJwksResponse {
+  // Active keys, newest first. Ed25519 public keys in raw 32-byte form; the
+  // gateway converts them to the standard JWKS OKP/Ed25519 shape.
+  repeated Jwk keys = 1;
+}
+
+message Jwk {
+  string kid = 1;              // key id, also in the JWT header
+  bytes ed25519 = 2;           // raw public key
+  bool current = 3;            // true = tokens are signed with this key
+}

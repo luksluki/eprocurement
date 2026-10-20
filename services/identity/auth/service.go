@@ -55,35 +55,84 @@ type userRecord struct {
 	PasswordHash string
 }
 
+// SigningKey is one Ed25519 signing key with its derived kid.
+type SigningKey struct {
+	Priv ed25519.PrivateKey
+	Kid  string
+}
+
+// Keyring holds the active signing keys: Current signs new tokens; Previous
+// (optional) stays verifiable during rotation until the last token it signed
+// has expired (15 minutes at most).
+type Keyring struct {
+	Current  SigningKey
+	Previous *SigningKey // nil when no rotation is in progress
+}
+
+// NewKeyring builds a Keyring from private keys, deriving each kid. A
+// previous key identical to the current one is dropped — it would be a no-op
+// rotation serving a single key anyway.
+func NewKeyring(current ed25519.PrivateKey, previous ed25519.PrivateKey) Keyring {
+	kr := Keyring{
+		Current: SigningKey{Priv: current, Kid: jwt.Kid(current.Public().(ed25519.PublicKey))},
+	}
+	if previous != nil {
+		prev := SigningKey{Priv: previous, Kid: jwt.Kid(previous.Public().(ed25519.PublicKey))}
+		if prev.Kid != kr.Current.Kid {
+			kr.Previous = &prev
+		}
+	}
+	return kr
+}
+
+// Jwk is one public key in the key set served to verifiers.
+type Jwk struct {
+	Kid     string
+	Ed25519 ed25519.PublicKey
+	Current bool
+}
+
 // Service implements the auth flows on top of PostgreSQL.
 type Service struct {
 	db           *pgxpool.Pool
 	log          *slog.Logger
-	priv         ed25519.PrivateKey
-	kid          string
+	keys         Keyring
 	loginLimiter *ratelimit.Limiter
 	now          func() time.Time
 }
 
-// New builds a Service. The Ed25519 key signs access tokens; jwtKeySeed (a
-// base64-encoded 32-byte seed, or empty for an ephemeral boot key) keeps
-// token verification stable across restarts — see config.
-func New(db *pgxpool.Pool, log *slog.Logger, priv ed25519.PrivateKey, loginRatePerMin int) *Service {
-	pub := priv.Public().(ed25519.PublicKey)
+// New builds a Service. keys carries the Ed25519 signing keys; a previous key
+// keeps tokens issued before a rotation verifiable (see docs/ops/jwks-rotation.md).
+func New(db *pgxpool.Pool, log *slog.Logger, keys Keyring, loginRatePerMin int) *Service {
 	return &Service{
 		db:           db,
 		log:          log,
-		priv:         priv,
-		kid:          jwt.Kid(pub),
+		keys:         keys,
 		loginLimiter: ratelimit.New(float64(loginRatePerMin)/60.0, loginRatePerMin),
 		now:          time.Now,
 	}
 }
 
-// PublicKey returns the Ed25519 public key that verifies access tokens.
-// JWKS exposure through the gateway arrives with issue #21.
+// Jwks returns the active public keys, current first.
+func (s *Service) Jwks() []Jwk {
+	keys := []Jwk{{
+		Kid:     s.keys.Current.Kid,
+		Ed25519: s.keys.Current.Priv.Public().(ed25519.PublicKey),
+		Current: true,
+	}}
+	if s.keys.Previous != nil {
+		keys = append(keys, Jwk{
+			Kid:     s.keys.Previous.Kid,
+			Ed25519: s.keys.Previous.Priv.Public().(ed25519.PublicKey),
+			Current: false,
+		})
+	}
+	return keys
+}
+
+// PublicKey returns the current Ed25519 public key that verifies access tokens.
 func (s *Service) PublicKey() ed25519.PublicKey {
-	return s.priv.Public().(ed25519.PublicKey)
+	return s.keys.Current.Priv.Public().(ed25519.PublicKey)
 }
 
 // AccessClaims is the JWT payload carried by every access token.
@@ -304,7 +353,7 @@ func (s *Service) issuePairTx(ctx context.Context, tx dbtx, u *userRecord, roles
 		IAT:      now.Unix(),
 		EXP:      now.Add(AccessTTL).Unix(),
 	}
-	access, err := jwt.Sign(s.priv, s.kid, claims, now)
+	access, err := jwt.Sign(s.keys.Current.Priv, s.keys.Current.Kid, claims, now)
 	if err != nil {
 		return issuedRefresh{}, err
 	}

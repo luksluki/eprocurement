@@ -64,11 +64,17 @@ func run() error {
 	}
 	defer db.Close()
 
-	priv, err := signingKey(log, cfg.JWTKeySeed)
+	priv, err := signingKey(log, "IDENTITY_JWT_KEY", cfg.JWTKeySeed)
 	if err != nil {
 		return err
 	}
-	authSvc := auth.New(db, log, priv, cfg.LoginRatePerMin)
+	var previous ed25519.PrivateKey
+	if cfg.JWTKeyPrevSeed != "" {
+		if previous, err = signingKey(log, "IDENTITY_JWT_KEY_PREVIOUS", cfg.JWTKeyPrevSeed); err != nil {
+			return err
+		}
+	}
+	authSvc := auth.New(db, log, auth.NewKeyring(priv, previous), cfg.LoginRatePerMin)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -82,25 +88,24 @@ func run() error {
 	return srv.Serve(ctx, lis)
 }
 
-// signingKey resolves the Ed25519 signing key: a base64 seed from the
-// environment when provided (stable across restarts), otherwise an ephemeral
-// key per boot — access tokens then do not survive restarts, which is
-// acceptable for local development.
-func signingKey(log *slog.Logger, seedB64 string) (ed25519.PrivateKey, error) {
+// signingKey resolves one Ed25519 signing key from a base64 seed. An empty
+// value for the current key yields an ephemeral boot key (access tokens then
+// do not survive restarts — local development only).
+func signingKey(log *slog.Logger, envName, seedB64 string) (ed25519.PrivateKey, error) {
 	if seedB64 == "" {
 		_, priv, err := platformjwt.GenerateKey()
 		if err != nil {
 			return nil, fmt.Errorf("generate ephemeral signing key: %w", err)
 		}
-		log.Warn("no IDENTITY_JWT_KEY set; using an ephemeral signing key (tokens do not survive restarts)")
+		log.Warn("no " + envName + " set; using an ephemeral signing key (tokens do not survive restarts)")
 		return priv, nil
 	}
 	seed, err := base64.StdEncoding.DecodeString(seedB64)
 	if err != nil {
-		return nil, fmt.Errorf("decode IDENTITY_JWT_KEY: %w", err)
+		return nil, fmt.Errorf("decode %s: %w", envName, err)
 	}
 	if len(seed) != ed25519.SeedSize {
-		return nil, fmt.Errorf("IDENTITY_JWT_KEY must decode to %d bytes, got %d", ed25519.SeedSize, len(seed))
+		return nil, fmt.Errorf("%s must decode to %d bytes, got %d", envName, ed25519.SeedSize, len(seed))
 	}
 	return ed25519.NewKeyFromSeed(seed), nil
 }

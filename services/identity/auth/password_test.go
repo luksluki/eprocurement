@@ -40,10 +40,10 @@ func TestVerifyRejectsMalformedHashes(t *testing.T) {
 	for _, stored := range []string{
 		"",
 		"plaintext",
-		"$argon2i$v=19$m=65536,t=2,p=4$c2FsdA$aGFzaA",           // wrong variant
-		"$argon2id$v=19$m=0,t=2,p=4$c2FsdA$aGFzaA",              // zero memory
-		"$argon2id$v=19$m=65536,t=2$c2FsdA$aGFzaA",              // missing param
-		"$argon2id$v=19$m=65536,t=2,p=4$$aGFzaA",                // empty salt
+		"$argon2i$v=19$m=65536,t=2,p=4$c2FsdA$aGFzaA", // wrong variant
+		"$argon2id$v=19$m=0,t=2,p=4$c2FsdA$aGFzaA",    // zero memory
+		"$argon2id$v=19$m=65536,t=2$c2FsdA$aGFzaA",    // missing param
+		"$argon2id$v=19$m=65536,t=2,p=4$$aGFzaA",      // empty salt
 	} {
 		if _, err := VerifyPassword("x", stored); err == nil {
 			t.Errorf("expected error for malformed hash %q", stored)
