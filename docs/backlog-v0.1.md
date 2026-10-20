@@ -1,6 +1,10 @@
 # Backlog map — v0.1 (2026-10-20)
 
-Source of truth: **GitHub Issues + Project board**. This file is an orientation map, not a duplicate of every issue.
+Source of truth: **GitHub Issues + Project board**.
+
+- Repository: https://github.com/luksluki/eprocurement
+- Project: **eProcurement v0.1** — https://github.com/users/luksluki/projects/4
+- Backlog: **12 epics (#1–#12) + 54 issues (#13–#66)**, 6 milestones, 20 labels.
 
 ## Milestones
 
@@ -17,18 +21,18 @@ Source of truth: **GitHub Issues + Project board**. This file is an orientation 
 
 | # | Epic | Milestones touched |
 |---|---|---|
-| E1 | Platform & Delivery Foundation | M0 |
-| E2 | Identity & Access | M1 |
-| E3 | Vendor Management | M1 |
-| E4 | Purchase Requisitions & Approvals | M2 |
-| E5 | Purchase Orders & Goods Receipt | M3 |
-| E6 | Invoice Matching | M3 |
-| E7 | Documents, History & Audit | M2–M3 |
-| E8 | Async Platform & Jobs | M2–M3 |
-| E9 | Web Experience & Dashboard | M1–M4 |
-| E10 | Observability & Performance | M4 |
-| E11 | Testing & Quality | M4–M5 |
-| E12 | Demo, Documentation & Release | M5 |
+| #1 | Platform & Delivery Foundation | M0 |
+| #2 | Identity & Access | M1 |
+| #3 | Vendor Management | M1 |
+| #4 | Purchase Requisitions & Approvals | M2 |
+| #5 | Purchase Orders & Goods Receipt | M3 |
+| #6 | Invoice Matching | M3 |
+| #7 | Documents, History & Audit | M2–M3 |
+| #8 | Async Platform & Jobs | M2–M3 |
+| #9 | Web Experience & Dashboard | M1–M4 |
+| #10 | Observability & Performance | M4 |
+| #11 | Testing & Quality | M4–M5 |
+| #12 | Demo, Documentation & Release | M5 |
 
 ## Label taxonomy
 
@@ -42,7 +46,4 @@ Source of truth: **GitHub Issues + Project board**. This file is an orientation 
 - Branch from `develop` using `feature/<issue>-<slug>`; PR back to `develop`; squash merge.
 - Every PR links its issue and meets the Definition of Done in `CONTRIBUTING.md`.
 - Issues are sized ≤2 days; split `L` issues before starting.
-
-## Project board
-
-GitHub Project: **eProcurement v0.1** (created 2026-10-20). Columns follow the built-in **Status** field (Todo / In Progress / Done); filters by `area:*` and milestone.
+- Project Status columns: Todo / In Progress / Done (built-in field). Labels remain the source of truth for epic/area/priority/size.
