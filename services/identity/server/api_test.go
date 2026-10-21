@@ -8,6 +8,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -16,6 +17,7 @@ import (
 
 	identityv1 "github.com/luksluki/eprocurement/gen/go/identity/v1"
 	"github.com/luksluki/eprocurement/internal/platform/jwt"
+	"github.com/luksluki/eprocurement/internal/platform/tenant"
 	"github.com/luksluki/eprocurement/services/identity/auth"
 )
 
@@ -66,15 +68,22 @@ func TestGRPCEndToEndLoginRefreshLogout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hash: %v", err)
 	}
-	if _, err := db.Exec(context.Background(), `
-		INSERT INTO identity.users (tenant_id, email, display_name, password_hash)
-		VALUES ($1, $2, 'gRPC Test', $3)
-		ON CONFLICT (tenant_id, lower(email)) DO UPDATE SET password_hash = EXCLUDED.password_hash`,
-		"33333333-3333-3333-3333-333333333333", email, hash); err != nil {
+	err = tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		_, err := tx.Exec(context.Background(), `
+			INSERT INTO identity.users (tenant_id, email, display_name, password_hash)
+			VALUES ($1, $2, 'gRPC Test', $3)
+			ON CONFLICT (tenant_id, lower(email)) DO UPDATE SET password_hash = EXCLUDED.password_hash`,
+			"33333333-3333-3333-3333-333333333333", email, hash)
+		return err
+	})
+	if err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
 	t.Cleanup(func() {
-		_, _ = db.Exec(context.Background(), `DELETE FROM identity.users WHERE email = $1`, email)
+		_ = tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+			_, err := tx.Exec(context.Background(), `DELETE FROM identity.users WHERE email = $1`, email)
+			return err
+		})
 	})
 
 	// Login.
