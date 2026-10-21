@@ -18,6 +18,7 @@ import (
 
 	identityv1 "github.com/luksluki/eprocurement/gen/go/identity/v1"
 	"github.com/luksluki/eprocurement/internal/platform/logger"
+	"github.com/luksluki/eprocurement/internal/platform/rbac"
 	"github.com/luksluki/eprocurement/services/identity/auth"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -69,6 +70,11 @@ func New(log *slog.Logger, pinger Pinger, opts ...Option) *Server {
 
 	s.grpc = grpc.NewServer(grpc.ChainUnaryInterceptor(
 		traceInterceptor,
+		// Service-layer RBAC re-check (defense in depth). Login/Refresh/
+		// Logout/GetJwks are pre-auth or internal, so no method maps to a
+		// permission yet; user-facing RPCs (ListUsers, AssignRoles, ...)
+		// register theirs here when they arrive.
+		rbac.UnaryInterceptor(rbac.MethodPermissions{}),
 		s.loggingInterceptor,
 		s.recoveryInterceptor,
 	))
