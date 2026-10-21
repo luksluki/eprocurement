@@ -19,6 +19,7 @@ import (
 
 	"github.com/luksluki/eprocurement/internal/platform/jwt"
 	"github.com/luksluki/eprocurement/internal/platform/ratelimit"
+	"github.com/luksluki/eprocurement/internal/platform/tenant"
 )
 
 // Token lifetimes per PRD §17: access 15 minutes, refresh 7 days.
@@ -177,14 +178,31 @@ func (s *Service) Login(ctx context.Context, email, password, rateKey string) (T
 
 // Refresh exchanges a valid refresh token for a new pair and rotates the old
 // token. Presenting a rotated token revokes the entire family (theft signal).
+// The flow spans tenants by design (a token identifies its user, not a tenant
+// context), so it runs under the RLS bypass.
 func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, error) {
-	sum := sha256.Sum256([]byte(refreshToken))
-
-	tx, err := s.db.Begin(ctx)
+	var pair TokenPair
+	err := tenant.WithBypass(ctx, s.db, func(tx pgx.Tx) error {
+		p, err := s.refreshTx(ctx, tx, refreshToken)
+		if p != (TokenPair{}) {
+			pair = p
+		}
+		return err
+	})
 	if err != nil {
 		return TokenPair{}, err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	if pair == (TokenPair{}) {
+		return TokenPair{}, ErrInvalidRefreshToken
+	}
+	return pair, nil
+}
+
+// refreshTx implements Refresh inside an open transaction. It returns a nil
+// error together with an empty pair for every invalid-token outcome, so the
+// transaction commits (persisting, e.g., the family revocation).
+func (s *Service) refreshTx(ctx context.Context, tx pgx.Tx, refreshToken string) (TokenPair, error) {
+	sum := sha256.Sum256([]byte(refreshToken))
 
 	var (
 		id        string
@@ -193,13 +211,13 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, 
 		rotatedTo *string
 		revokedAt *time.Time
 	)
-	err = tx.QueryRow(ctx, `
+	err := tx.QueryRow(ctx, `
 		SELECT id, user_id, expires_at, rotated_to, revoked_at
 		FROM identity.refresh_tokens
 		WHERE token_hash = $1
 		FOR UPDATE`, sum[:]).Scan(&id, &userID, &expiresAt, &rotatedTo, &revokedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return TokenPair{}, ErrInvalidRefreshToken
+		return TokenPair{}, nil
 	}
 	if err != nil {
 		return TokenPair{}, err
@@ -207,7 +225,7 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, 
 
 	now := s.now()
 	if revokedAt != nil || expiresAt.Before(now) {
-		return TokenPair{}, ErrInvalidRefreshToken
+		return TokenPair{}, nil
 	}
 	if rotatedTo != nil {
 		// Reuse of an already-rotated token: revoke the whole family.
@@ -222,11 +240,8 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, 
 			WHERE id IN (SELECT id FROM family) AND revoked_at IS NULL`, id, now); err != nil {
 			return TokenPair{}, err
 		}
-		if err := tx.Commit(ctx); err != nil {
-			return TokenPair{}, err
-		}
 		s.log.WarnContext(ctx, "refresh token reuse detected; token family revoked", "token_id", id)
-		return TokenPair{}, ErrInvalidRefreshToken
+		return TokenPair{}, nil // commit the revocation
 	}
 
 	u, roles, err := s.loadUserByID(ctx, tx, userID)
@@ -234,31 +249,30 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (TokenPair, 
 		return TokenPair{}, err
 	}
 	if u == nil || u.Status != "active" {
-		return TokenPair{}, ErrInvalidRefreshToken
+		return TokenPair{}, nil
 	}
 
-	pair, err := s.issuePairTx(ctx, tx, u, roles)
+	issued, err := s.issuePairTx(ctx, tx, u, roles)
 	if err != nil {
 		return TokenPair{}, err
 	}
 	if _, err := tx.Exec(ctx, `
-		UPDATE identity.refresh_tokens SET rotated_to = $1 WHERE id = $2`, pair.id, id); err != nil {
+		UPDATE identity.refresh_tokens SET rotated_to = $1 WHERE id = $2`, issued.id, id); err != nil {
 		return TokenPair{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return TokenPair{}, err
-	}
-	return pair.pair, nil
+	return issued.pair, nil
 }
 
 // Logout revokes the given refresh token. It is idempotent and returns the
 // same result whether or not the token existed.
 func (s *Service) Logout(ctx context.Context, refreshToken string) error {
 	sum := sha256.Sum256([]byte(refreshToken))
-	_, err := s.db.Exec(ctx, `
-		UPDATE identity.refresh_tokens SET revoked_at = $1
-		WHERE token_hash = $2 AND revoked_at IS NULL`, s.now(), sum[:])
-	return err
+	return tenant.WithBypass(ctx, s.db, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			UPDATE identity.refresh_tokens SET revoked_at = $1
+			WHERE token_hash = $2 AND revoked_at IS NULL`, s.now(), sum[:])
+		return err
+	})
 }
 
 type issuedRefresh struct {
@@ -274,40 +288,51 @@ type dbtx interface {
 
 // loadUser returns the single active-schema user for the email plus its
 // roles, or nil when the email is unknown or ambiguous (the schema allows the
-// same address in several tenants).
+// same address in several tenants). The lookup spans tenants by design, so it
+// runs under the RLS bypass.
 func (s *Service) loadUser(ctx context.Context, email string) (*userRecord, []string, error) {
-	rows, err := s.db.Query(ctx, `
-		SELECT u.id, u.tenant_id, u.status, u.password_hash,
-		       COALESCE(array_agg(r.code ORDER BY r.code) FILTER (WHERE r.code IS NOT NULL), '{}')
-		FROM identity.users u
-		LEFT JOIN identity.user_roles ur ON ur.user_id = u.id
-		LEFT JOIN identity.roles r ON r.id = ur.role_id
-		WHERE lower(u.email) = lower($1)
-		GROUP BY u.id`, email)
+	var (
+		found *userRecord
+		roles []string
+	)
+	err := tenant.WithBypass(ctx, s.db, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			SELECT u.id, u.tenant_id, u.status, u.password_hash,
+			       COALESCE(array_agg(r.code ORDER BY r.code) FILTER (WHERE r.code IS NOT NULL), '{}')
+			FROM identity.users u
+			LEFT JOIN identity.user_roles ur ON ur.user_id = u.id
+			LEFT JOIN identity.roles r ON r.id = ur.role_id
+			WHERE lower(u.email) = lower($1)
+			GROUP BY u.id`, email)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		var users []*userRecord
+		var roleSets [][]string
+		for rows.Next() {
+			var u userRecord
+			var rs []string
+			if err := rows.Scan(&u.ID, &u.TenantID, &u.Status, &u.PasswordHash, &rs); err != nil {
+				return err
+			}
+			users = append(users, &u)
+			roleSets = append(roleSets, rs)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if len(users) == 1 {
+			found = users[0]
+			roles = roleSets[0]
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, nil, err
 	}
-	defer rows.Close()
-
-	var users []*userRecord
-	var roleSets [][]string
-	for rows.Next() {
-		var u userRecord
-		var roles []string
-		if err := rows.Scan(&u.ID, &u.TenantID, &u.Status, &u.PasswordHash, &roles); err != nil {
-			return nil, nil, err
-		}
-		users = append(users, &u)
-		roleSets = append(roleSets, roles)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, nil, err
-	}
-	if len(users) != 1 {
-		// Zero matches or the same address in several tenants: no user.
-		return nil, nil, nil
-	}
-	return users[0], roleSets[0], nil
+	return found, roles, nil
 }
 
 func (s *Service) loadUserByID(ctx context.Context, tx pgx.Tx, userID string) (*userRecord, []string, error) {
@@ -333,8 +358,13 @@ func (s *Service) loadUserByID(ctx context.Context, tx pgx.Tx, userID string) (*
 }
 
 func (s *Service) issuePair(ctx context.Context, u *userRecord, roles []string) (TokenPair, error) {
-	issued, err := s.issuePairTx(ctx, s.db, u, roles)
-	return issued.pair, err
+	var pair TokenPair
+	err := tenant.WithBypass(ctx, s.db, func(tx pgx.Tx) error {
+		issued, err := s.issuePairTx(ctx, tx, u, roles)
+		pair = issued.pair
+		return err
+	})
+	return pair, err
 }
 
 func (s *Service) issuePairTx(ctx context.Context, tx dbtx, u *userRecord, roles []string) (issuedRefresh, error) {

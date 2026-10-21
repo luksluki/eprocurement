@@ -7,9 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/luksluki/eprocurement/internal/platform/jwt"
+	"github.com/luksluki/eprocurement/internal/platform/tenant"
 )
 
 func testService(t *testing.T) (*Service, *pgxpool.Pool) {
@@ -32,35 +34,45 @@ func testService(t *testing.T) (*Service, *pgxpool.Pool) {
 }
 
 // seedUser inserts a user with a real argon2id hash and the given role codes,
-// returning the user id.
-func seedUser(t *testing.T, db *pgxpool.Pool, tenant, email, password string, status string, roles ...string) string {
+// returning the user id. Test fixtures span tenants, so they run under the
+// RLS bypass.
+func seedUser(t *testing.T, db *pgxpool.Pool, tenantID, email, password string, status string, roles ...string) string {
 	t.Helper()
 	hash, err := HashPassword(password)
 	if err != nil {
 		t.Fatalf("hash: %v", err)
 	}
 	var id string
-	if err := db.QueryRow(t.Context(), `
-		INSERT INTO identity.users (tenant_id, email, display_name, password_hash, status)
-		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (tenant_id, lower(email)) DO UPDATE SET password_hash = EXCLUDED.password_hash, status = EXCLUDED.status
-		RETURNING id`, tenant, email, "Test User", hash, status).Scan(&id); err != nil {
-		t.Fatalf("seed user: %v", err)
-	}
-	for _, role := range roles {
-		if _, err := db.Exec(t.Context(), `
-			INSERT INTO identity.user_roles (user_id, role_id)
-			SELECT $1, id FROM identity.roles WHERE code = $2
-			ON CONFLICT DO NOTHING`, id, role); err != nil {
-			t.Fatalf("grant role: %v", err)
+	err = tenant.WithBypass(t.Context(), db, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(t.Context(), `
+			INSERT INTO identity.users (tenant_id, email, display_name, password_hash, status)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (tenant_id, lower(email)) DO UPDATE SET password_hash = EXCLUDED.password_hash, status = EXCLUDED.status
+			RETURNING id`, tenantID, email, "Test User", hash, status).Scan(&id); err != nil {
+			return err
 		}
+		for _, role := range roles {
+			if _, err := tx.Exec(t.Context(), `
+				INSERT INTO identity.user_roles (user_id, role_id)
+				SELECT $1, id FROM identity.roles WHERE code = $2
+				ON CONFLICT DO NOTHING`, id, role); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed user: %v", err)
 	}
 	return id
 }
 
 func cleanupUser(t *testing.T, db *pgxpool.Pool, email string) {
 	t.Helper()
-	_, _ = db.Exec(t.Context(), `DELETE FROM identity.users WHERE email = $1`, email)
+	_ = tenant.WithBypass(t.Context(), db, func(tx pgx.Tx) error {
+		_, err := tx.Exec(t.Context(), `DELETE FROM identity.users WHERE email = $1`, email)
+		return err
+	})
 }
 
 const (
@@ -245,10 +257,14 @@ func TestRefreshExpiredTokenRejected(t *testing.T) {
 	userID := seedUser(t, db, tenantA, email, "s3cret!", "active")
 
 	// Insert a refresh token that expired a minute ago.
-	if _, err := db.Exec(t.Context(), `
-		INSERT INTO identity.refresh_tokens (user_id, token_hash, expires_at, created_at)
-		VALUES ($1, digest('expired-token', 'sha256'), now() - interval '8 days', now() - interval '8 days')
-		ON CONFLICT DO NOTHING`, userID); err != nil {
+	err := tenant.WithBypass(t.Context(), db, func(tx pgx.Tx) error {
+		_, err := tx.Exec(t.Context(), `
+			INSERT INTO identity.refresh_tokens (user_id, token_hash, expires_at, created_at)
+			VALUES ($1, digest('expired-token', 'sha256'), now() - interval '8 days', now() - interval '8 days')
+			ON CONFLICT DO NOTHING`, userID)
+		return err
+	})
+	if err != nil {
 		// pgcrypto may be unavailable; emulate with a computed hash instead.
 		t.Skipf("digest() unavailable: %v", err)
 	}

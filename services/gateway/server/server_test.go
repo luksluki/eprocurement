@@ -29,7 +29,7 @@ func (f *staticFetcher) FetchKeys(ctx context.Context) ([]token.Key, error) {
 	return f.keys, nil
 }
 
-func newTestApp(t *testing.T) (*fiber.App, ed25519.PrivateKey, string) {
+func newTestApp(t *testing.T) (*fiber.App, *token.Verifier, ed25519.PrivateKey, string) {
 	t.Helper()
 	pub, priv, _ := jwt.GenerateKey()
 	kid := jwt.Kid(pub)
@@ -39,7 +39,7 @@ func newTestApp(t *testing.T) (*fiber.App, ed25519.PrivateKey, string) {
 	app := New(log, verifier)
 
 	t.Cleanup(func() { _ = app.Shutdown() })
-	return app, priv, kid
+	return app, verifier, priv, kid
 }
 
 func do(t *testing.T, app *fiber.App, method, path, authHeader string) (*http.Response, map[string]any) {
@@ -58,7 +58,7 @@ func do(t *testing.T, app *fiber.App, method, path, authHeader string) (*http.Re
 }
 
 func TestHealthz(t *testing.T) {
-	app, _, _ := newTestApp(t)
+	app, _, _, _ := newTestApp(t)
 	resp, body := do(t, app, "GET", "/healthz", "")
 	if resp.StatusCode != fiber.StatusOK || body["status"] != "ok" {
 		t.Fatalf("healthz = %d %v", resp.StatusCode, body)
@@ -66,7 +66,7 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestJwksShape(t *testing.T) {
-	app, _, kid := newTestApp(t)
+	app, _, _, kid := newTestApp(t)
 	resp, body := do(t, app, "GET", "/.well-known/jwks.json", "")
 	if resp.StatusCode != fiber.StatusOK {
 		t.Fatalf("jwks status = %d", resp.StatusCode)
@@ -88,7 +88,7 @@ func TestJwksShape(t *testing.T) {
 }
 
 func TestMeRequiresValidToken(t *testing.T) {
-	app, _, _ := newTestApp(t)
+	app, _, _, _ := newTestApp(t)
 
 	for name, header := range map[string]string{
 		"no token":     "",
@@ -105,7 +105,7 @@ func TestMeRequiresValidToken(t *testing.T) {
 // AC: gateway verifies tokens using JWKS — mint an identity-claims token and
 // verify it end-to-end through the fiber stack.
 func TestMeVerifiesToken(t *testing.T) {
-	app, priv, kid := newTestApp(t)
+	app, _, priv, kid := newTestApp(t)
 
 	now := time.Now()
 	claims := auth.AccessClaims{
