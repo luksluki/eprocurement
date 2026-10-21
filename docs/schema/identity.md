@@ -75,7 +75,9 @@ The `kid` header identifies the signing key (first 8 bytes of the public key's s
 
 ## Tenancy
 
-`tenant_id` is the scoping key on every user query; the service layer always filters by it, and cross-tenant requests must fail with 404/403 (FR-01). The per-tenant email uniqueness means two tenants may legitimately share an address. PostgreSQL RLS as defense-in-depth (ADR-0001) arrives with the query layer in a later issue, together with cross-tenant denial tests.
+`tenant_id` is the scoping key on every user query; the service layer always filters by it, and cross-tenant requests must fail with 404/403 (FR-01). The per-tenant email uniqueness means two tenants may legitimately share an address.
+
+**Row-level security (migration 0002 + 0003).** `users`, `user_roles`, and `refresh_tokens` run under `ENABLE/FORCE ROW LEVEL SECURITY`. Policies compare `tenant_id` against the transaction-local `app.tenant_id` set by `internal/platform/tenant.WithTenant` — the only way application code reaches tenant data; inserts of another tenant's rows violate the `WITH CHECK` clause. Child rows are visible exactly when their parent user is. Because superusers bypass RLS even with `FORCE`, every tenant-helper transaction also switches to the non-superuser role `eproc_app` (migration 0003); the bootstrap superuser remains for migrations/DDL only. The auth flows (login email lookup, refresh, logout) legitimately span tenants and run under `WithBypass`, a transaction-scoped `app.rls_bypass` flag — application-controlled, never client-visible.
 
 ## Planned follow-ups
 

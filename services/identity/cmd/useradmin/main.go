@@ -13,8 +13,10 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/luksluki/eprocurement/internal/platform/tenant"
 	"github.com/luksluki/eprocurement/services/identity/auth"
 	identityconfig "github.com/luksluki/eprocurement/services/identity/config"
 )
@@ -46,33 +48,29 @@ func main() {
 	}
 
 	ctx := context.Background()
-	tx, err := db.Begin(ctx)
-	if err != nil {
-		fatal(err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
 	var userID string
-	err = tx.QueryRow(ctx, `
-		INSERT INTO identity.users (tenant_id, email, display_name, password_hash)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (tenant_id, lower(email)) DO UPDATE SET password_hash = EXCLUDED.password_hash
-		RETURNING id`, *tenantID, *email, *name, hash).Scan(&userID)
+	err = tenant.WithBypass(ctx, db, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO identity.users (tenant_id, email, display_name, password_hash)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (tenant_id, lower(email)) DO UPDATE SET password_hash = EXCLUDED.password_hash
+			RETURNING id`, *tenantID, *email, *name, hash).Scan(&userID); err != nil {
+			return fmt.Errorf("upsert user: %w (is -tenant-id a uuid?)", err)
+		}
+		for _, role := range *roles {
+			var roleID string
+			if err := tx.QueryRow(ctx, `SELECT id FROM identity.roles WHERE code = $1`, role).Scan(&roleID); err != nil {
+				return fmt.Errorf("unknown role %q", role)
+			}
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO identity.user_roles (user_id, role_id) VALUES ($1, $2)
+				ON CONFLICT DO NOTHING`, userID, roleID); err != nil {
+				return fmt.Errorf("grant role %s: %w", role, err)
+			}
+		}
+		return nil
+	})
 	if err != nil {
-		fatal(fmt.Errorf("upsert user: %w (is -tenant-id a uuid?)", err))
-	}
-	for _, role := range *roles {
-		var roleID string
-		if err := tx.QueryRow(ctx, `SELECT id FROM identity.roles WHERE code = $1`, role).Scan(&roleID); err != nil {
-			fatal(fmt.Errorf("unknown role %q", role))
-		}
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO identity.user_roles (user_id, role_id) VALUES ($1, $2)
-			ON CONFLICT DO NOTHING`, userID, roleID); err != nil {
-			fatal(fmt.Errorf("grant role %s: %w", role, err))
-		}
-	}
-	if err := tx.Commit(ctx); err != nil {
 		fatal(err)
 	}
 	fmt.Printf("user %s ready (email=%s roles=%v)\n", userID, *email, *roles)

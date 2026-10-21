@@ -40,7 +40,7 @@ Read permissions are broad by design (everyone in the tenant sees the flow they 
    - protected method called without caller metadata → `Unauthenticated` (`auth context missing`)
    - roles insufficient → `PermissionDenied` (`permission_denied: requires <permission>`)
 
-3. **PostgreSQL RLS** — third layer keyed on `tenant_id`, arriving with #23.
+3. **PostgreSQL RLS** — tenant tables run under `FORCE ROW LEVEL SECURITY`; policies key on the transaction-local `app.tenant_id` set by `internal/platform/tenant.WithTenant` (#23). The gateway injects the token's `tid` into gRPC metadata (`rbac.OutgoingContext`), services read it back (`rbac.FromMetadata`), and every tenant-scoped query runs through `WithTenant` as the non-superuser `eproc_app` role.
 
 The gateway never sees credentials and the services never see the JWT — only the verified claims, so neither layer can be bypassed by the other trusting too much.
 

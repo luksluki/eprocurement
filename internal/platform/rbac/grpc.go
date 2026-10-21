@@ -68,6 +68,19 @@ type AuthContext struct {
 	Roles    []string
 }
 
+// OutgoingContext attaches the verified caller's identity to ctx as outgoing
+// gRPC metadata — the gateway side of the propagation. The service side reads
+// it back with FromMetadata / UnaryInterceptor.
+func OutgoingContext(ctx context.Context, userID, tenantID string, roles []string) context.Context {
+	md := metadata.Pairs(MDUserID, userID, MDTenantID, tenantID)
+	for _, r := range roles {
+		if r = strings.TrimSpace(r); r != "" {
+			md.Append(MDRole, r)
+		}
+	}
+	return metadata.NewOutgoingContext(ctx, md)
+}
+
 // FromMetadata returns the caller identity, or nil when the call carries none
 // (e.g. service-to-service or pre-auth calls).
 func FromMetadata(ctx context.Context) *AuthContext {
