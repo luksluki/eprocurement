@@ -21,6 +21,11 @@ service Procurement {
   // DeactivateVendor soft-deletes a vendor: it stays readable for history but
   // cannot be used in new purchase orders.
   rpc DeactivateVendor(DeactivateVendorRequest) returns (Vendor);
+  // ListVendors returns one page of the caller's vendors ordered by code.
+  // query matches a code prefix or a name substring (case-insensitive);
+  // status and query combine. total is the number of matching rows across
+  // all pages.
+  rpc ListVendors(ListVendorsRequest) returns (ListVendorsResponse);
 }
 
 message Vendor {
@@ -58,4 +63,21 @@ message UpdateVendorRequest {
 
 message DeactivateVendorRequest {
   string id = 1;
+}
+
+message ListVendorsRequest {
+  // Free-text match: code prefix or name substring, case-insensitive.
+  // Empty means no text filter. LIKE wildcards in the input are literal.
+  string query = 1;
+  // "active" | "deactivated" | "" (all).
+  string status = 2;
+  int32 page = 3;      // 1-based; default 1
+  int32 page_size = 4; // default 20, max 100
+}
+
+message ListVendorsResponse {
+  repeated Vendor vendors = 1;
+  int32 total = 2;      // matching rows across all pages
+  int32 page = 3;       // normalized values actually applied
+  int32 page_size = 4;
 }

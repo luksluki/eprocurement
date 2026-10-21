@@ -15,7 +15,7 @@ Owned by the `procurement` service per [ADR-0001](../adr/0001-architecture.md). 
 | `status` | text | `active` \| `deactivated` — soft delete, rows are never removed |
 | `created_at`/`created_by`, `updated_at`/`updated_by` | timestamptz / uuid | audit fields; `*_by` = the acting user from the propagated auth context |
 
-Indexes: `vendors_tenant_code_uidx UNIQUE (tenant_id, code)`; `vendors_tenant_idx (tenant_id)`; `vendors_tenant_status_idx (tenant_id, status)`.
+Indexes: `vendors_tenant_code_uidx UNIQUE (tenant_id, code)`; `vendors_tenant_idx (tenant_id)`; `vendors_tenant_status_code_idx (tenant_id, status, code)`; `vendors_name_trgm_idx GIN (name gin_trgm_ops)` — see the list section below.
 
 **RLS**: same pattern as identity — `ENABLE/FORCE ROW LEVEL SECURITY`, policy on `app.tenant_id` with the transaction-scoped `app.rls_bypass` escape used only by auth flows; all vendor queries run through `internal/platform/tenant.WithTenant` as the non-superuser `eproc_app` role. See [identity schema — tenancy](identity.md#tenancy) for the mechanics.
 
@@ -32,6 +32,62 @@ Indexes: `vendors_tenant_code_uidx UNIQUE (tenant_id, code)`; `vendors_tenant_id
 
 ## Planned follow-ups
 
-- #26: attachments via presigned uploads.
-- #27: list/search/filter/pagination.
+- #26: attachments via presigned uploads (done).
+- #27: list/search/filter/pagination (done).
 - Requisitions, approvals, POs, GRNs, invoices + transactional outbox (M2–M3).
+
+## Vendor list — filters, pagination, query plans (#27)
+
+`ListVendors` (`vendor:read`, REST `GET /api/v1/vendors`) returns one page
+ordered by `code` plus the total number of matching rows:
+
+- `q` — code prefix **or** name substring, case-insensitive. LIKE wildcards
+  in the input (`%`, `_`, `\`) are escaped, so they match literally.
+- `status` — `active` | `deactivated` | empty (all); combines with `q`.
+- `page` (1-based, default 1) / `page_size` (default 20, max 100). Responses
+  echo the normalized values; `total` counts matches across all pages. A
+  page past the end is empty but still reports the true `total` (an
+  explicit COUNT fallback covers the case where the window function emits
+  no rows).
+
+### Indexes (migration 0002)
+
+- `vendors_tenant_status_code_idx (tenant_id, status, code)` — replaces
+  0001's `(tenant_id, status)`; serves status-filtered, code-ordered pages.
+- `vendors_name_trgm_idx GIN (name gin_trgm_ops)` (`pg_trgm`) — name
+  substring search.
+- Code prefixes use the existing `vendors_tenant_code_uidx (tenant_id, code)`.
+
+### Measured plans at 100k rows (the #27 budget test)
+
+`TestStoreListScale100k` seeds 100,000 vendors in one tenant (10% with a
+shared name word, 10% deactivated), ANALYZEs, then runs every filter shape
+20× under the real RLS context. Budget: **p95 < 300 ms** per query,
+mirroring the PRD's performance bar. Measured on the dev machine:
+
+| Shape | median | p95 |
+|---|---|---|
+| unfiltered page 1 | ~73 ms | ~78 ms |
+| status = deactivated (10% of rows) | ~15 ms | ~16 ms |
+| code prefix (~1k rows) | ~57 ms | ~62 ms |
+| name substring (~10k rows) | ~63 ms | ~66 ms |
+| status + name substring combined | ~61 ms | ~74 ms |
+
+All shapes pass with >4× headroom. Two facts from the EXPLAIN output
+(captured in the test log) are worth knowing:
+
+1. **The planner prefers (parallel) sequential scans at this scale — by
+   design, not by accident.** `total` rides along as `count(*) OVER()`, so
+   every matching row is visited no matter how small the page; and reading
+   the ~1,500-page heap is cheaper than index+heap lookups at 100k rows.
+   The same plans appear even without RLS. The btree/trigram indexes above
+   exist for the shapes where they pay off: deeper pages, more selective
+   prefixes, and scales where the heap stops fitting in cache.
+2. **The RLS policy's bypass arm keeps tenant-leading index quals
+   unavailable.** `tenant_id = current_setting(...) OR app.rls_bypass='on'`
+   cannot be planned as an index constraint (the planner cannot prove
+   tenant selectivity), so tenant scoping always executes as a filter.
+   That is the documented trade-off of #23's single-policy design; if list
+   latency ever matters more than the shared policy, the follow-up is a
+   per-service read role or policy reshaping — a platform decision, not a
+   vendor-list tweak.

@@ -22,6 +22,7 @@ var methodPermissions = rbac.MethodPermissions{
 	"/procurement.v1.Procurement/GetVendor":        rbac.VendorRead,
 	"/procurement.v1.Procurement/UpdateVendor":     rbac.VendorWrite,
 	"/procurement.v1.Procurement/DeactivateVendor": rbac.VendorWrite,
+	"/procurement.v1.Procurement/ListVendors":      rbac.VendorRead,
 }
 
 // New returns a grpcserver.Server with the procurement API registered.

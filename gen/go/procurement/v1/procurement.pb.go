@@ -370,6 +370,145 @@ func (x *DeactivateVendorRequest) GetId() string {
 	return ""
 }
 
+type ListVendorsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Free-text match: code prefix or name substring, case-insensitive.
+	// Empty means no text filter. LIKE wildcards in the input are literal.
+	Query string `protobuf:"bytes,1,opt,name=query,proto3" json:"query,omitempty"`
+	// "active" | "deactivated" | "" (all).
+	Status        string `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"`
+	Page          int32  `protobuf:"varint,3,opt,name=page,proto3" json:"page,omitempty"`                         // 1-based; default 1
+	PageSize      int32  `protobuf:"varint,4,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"` // default 20, max 100
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListVendorsRequest) Reset() {
+	*x = ListVendorsRequest{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListVendorsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListVendorsRequest) ProtoMessage() {}
+
+func (x *ListVendorsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListVendorsRequest.ProtoReflect.Descriptor instead.
+func (*ListVendorsRequest) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *ListVendorsRequest) GetQuery() string {
+	if x != nil {
+		return x.Query
+	}
+	return ""
+}
+
+func (x *ListVendorsRequest) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *ListVendorsRequest) GetPage() int32 {
+	if x != nil {
+		return x.Page
+	}
+	return 0
+}
+
+func (x *ListVendorsRequest) GetPageSize() int32 {
+	if x != nil {
+		return x.PageSize
+	}
+	return 0
+}
+
+type ListVendorsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Vendors       []*Vendor              `protobuf:"bytes,1,rep,name=vendors,proto3" json:"vendors,omitempty"`
+	Total         int32                  `protobuf:"varint,2,opt,name=total,proto3" json:"total,omitempty"` // matching rows across all pages
+	Page          int32                  `protobuf:"varint,3,opt,name=page,proto3" json:"page,omitempty"`   // normalized values actually applied
+	PageSize      int32                  `protobuf:"varint,4,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListVendorsResponse) Reset() {
+	*x = ListVendorsResponse{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListVendorsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListVendorsResponse) ProtoMessage() {}
+
+func (x *ListVendorsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListVendorsResponse.ProtoReflect.Descriptor instead.
+func (*ListVendorsResponse) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *ListVendorsResponse) GetVendors() []*Vendor {
+	if x != nil {
+		return x.Vendors
+	}
+	return nil
+}
+
+func (x *ListVendorsResponse) GetTotal() int32 {
+	if x != nil {
+		return x.Total
+	}
+	return 0
+}
+
+func (x *ListVendorsResponse) GetPage() int32 {
+	if x != nil {
+		return x.Page
+	}
+	return 0
+}
+
+func (x *ListVendorsResponse) GetPageSize() int32 {
+	if x != nil {
+		return x.PageSize
+	}
+	return 0
+}
+
 var File_procurement_v1_procurement_proto protoreflect.FileDescriptor
 
 const file_procurement_v1_procurement_proto_rawDesc = "" +
@@ -405,12 +544,23 @@ const file_procurement_v1_procurement_proto_rawDesc = "" +
 	"\rcontact_email\x18\x03 \x01(\tR\fcontactEmail\x12\x15\n" +
 	"\x06tax_id\x18\x04 \x01(\tR\x05taxId\")\n" +
 	"\x17DeactivateVendorRequest\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id2\xc3\x02\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"s\n" +
+	"\x12ListVendorsRequest\x12\x14\n" +
+	"\x05query\x18\x01 \x01(\tR\x05query\x12\x16\n" +
+	"\x06status\x18\x02 \x01(\tR\x06status\x12\x12\n" +
+	"\x04page\x18\x03 \x01(\x05R\x04page\x12\x1b\n" +
+	"\tpage_size\x18\x04 \x01(\x05R\bpageSize\"\x8e\x01\n" +
+	"\x13ListVendorsResponse\x120\n" +
+	"\avendors\x18\x01 \x03(\v2\x16.procurement.v1.VendorR\avendors\x12\x14\n" +
+	"\x05total\x18\x02 \x01(\x05R\x05total\x12\x12\n" +
+	"\x04page\x18\x03 \x01(\x05R\x04page\x12\x1b\n" +
+	"\tpage_size\x18\x04 \x01(\x05R\bpageSize2\x9b\x03\n" +
 	"\vProcurement\x12K\n" +
 	"\fCreateVendor\x12#.procurement.v1.CreateVendorRequest\x1a\x16.procurement.v1.Vendor\x12E\n" +
 	"\tGetVendor\x12 .procurement.v1.GetVendorRequest\x1a\x16.procurement.v1.Vendor\x12K\n" +
 	"\fUpdateVendor\x12#.procurement.v1.UpdateVendorRequest\x1a\x16.procurement.v1.Vendor\x12S\n" +
-	"\x10DeactivateVendor\x12'.procurement.v1.DeactivateVendorRequest\x1a\x16.procurement.v1.VendorBFZDgithub.com/luksluki/eprocurement/gen/go/procurement/v1;procurementv1b\x06proto3"
+	"\x10DeactivateVendor\x12'.procurement.v1.DeactivateVendorRequest\x1a\x16.procurement.v1.Vendor\x12V\n" +
+	"\vListVendors\x12\".procurement.v1.ListVendorsRequest\x1a#.procurement.v1.ListVendorsResponseBFZDgithub.com/luksluki/eprocurement/gen/go/procurement/v1;procurementv1b\x06proto3"
 
 var (
 	file_procurement_v1_procurement_proto_rawDescOnce sync.Once
@@ -424,28 +574,33 @@ func file_procurement_v1_procurement_proto_rawDescGZIP() []byte {
 	return file_procurement_v1_procurement_proto_rawDescData
 }
 
-var file_procurement_v1_procurement_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_procurement_v1_procurement_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_procurement_v1_procurement_proto_goTypes = []any{
 	(*Vendor)(nil),                  // 0: procurement.v1.Vendor
 	(*CreateVendorRequest)(nil),     // 1: procurement.v1.CreateVendorRequest
 	(*GetVendorRequest)(nil),        // 2: procurement.v1.GetVendorRequest
 	(*UpdateVendorRequest)(nil),     // 3: procurement.v1.UpdateVendorRequest
 	(*DeactivateVendorRequest)(nil), // 4: procurement.v1.DeactivateVendorRequest
+	(*ListVendorsRequest)(nil),      // 5: procurement.v1.ListVendorsRequest
+	(*ListVendorsResponse)(nil),     // 6: procurement.v1.ListVendorsResponse
 }
 var file_procurement_v1_procurement_proto_depIdxs = []int32{
-	1, // 0: procurement.v1.Procurement.CreateVendor:input_type -> procurement.v1.CreateVendorRequest
-	2, // 1: procurement.v1.Procurement.GetVendor:input_type -> procurement.v1.GetVendorRequest
-	3, // 2: procurement.v1.Procurement.UpdateVendor:input_type -> procurement.v1.UpdateVendorRequest
-	4, // 3: procurement.v1.Procurement.DeactivateVendor:input_type -> procurement.v1.DeactivateVendorRequest
-	0, // 4: procurement.v1.Procurement.CreateVendor:output_type -> procurement.v1.Vendor
-	0, // 5: procurement.v1.Procurement.GetVendor:output_type -> procurement.v1.Vendor
-	0, // 6: procurement.v1.Procurement.UpdateVendor:output_type -> procurement.v1.Vendor
-	0, // 7: procurement.v1.Procurement.DeactivateVendor:output_type -> procurement.v1.Vendor
-	4, // [4:8] is the sub-list for method output_type
-	0, // [0:4] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	0, // 0: procurement.v1.ListVendorsResponse.vendors:type_name -> procurement.v1.Vendor
+	1, // 1: procurement.v1.Procurement.CreateVendor:input_type -> procurement.v1.CreateVendorRequest
+	2, // 2: procurement.v1.Procurement.GetVendor:input_type -> procurement.v1.GetVendorRequest
+	3, // 3: procurement.v1.Procurement.UpdateVendor:input_type -> procurement.v1.UpdateVendorRequest
+	4, // 4: procurement.v1.Procurement.DeactivateVendor:input_type -> procurement.v1.DeactivateVendorRequest
+	5, // 5: procurement.v1.Procurement.ListVendors:input_type -> procurement.v1.ListVendorsRequest
+	0, // 6: procurement.v1.Procurement.CreateVendor:output_type -> procurement.v1.Vendor
+	0, // 7: procurement.v1.Procurement.GetVendor:output_type -> procurement.v1.Vendor
+	0, // 8: procurement.v1.Procurement.UpdateVendor:output_type -> procurement.v1.Vendor
+	0, // 9: procurement.v1.Procurement.DeactivateVendor:output_type -> procurement.v1.Vendor
+	6, // 10: procurement.v1.Procurement.ListVendors:output_type -> procurement.v1.ListVendorsResponse
+	6, // [6:11] is the sub-list for method output_type
+	1, // [1:6] is the sub-list for method input_type
+	1, // [1:1] is the sub-list for extension type_name
+	1, // [1:1] is the sub-list for extension extendee
+	0, // [0:1] is the sub-list for field type_name
 }
 
 func init() { file_procurement_v1_procurement_proto_init() }
@@ -459,7 +614,7 @@ func file_procurement_v1_procurement_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_procurement_v1_procurement_proto_rawDesc), len(file_procurement_v1_procurement_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   5,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

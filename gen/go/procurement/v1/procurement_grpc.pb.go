@@ -23,6 +23,7 @@ const (
 	Procurement_GetVendor_FullMethodName        = "/procurement.v1.Procurement/GetVendor"
 	Procurement_UpdateVendor_FullMethodName     = "/procurement.v1.Procurement/UpdateVendor"
 	Procurement_DeactivateVendor_FullMethodName = "/procurement.v1.Procurement/DeactivateVendor"
+	Procurement_ListVendors_FullMethodName      = "/procurement.v1.Procurement/ListVendors"
 )
 
 // ProcurementClient is the client API for Procurement service.
@@ -46,6 +47,11 @@ type ProcurementClient interface {
 	// DeactivateVendor soft-deletes a vendor: it stays readable for history but
 	// cannot be used in new purchase orders.
 	DeactivateVendor(ctx context.Context, in *DeactivateVendorRequest, opts ...grpc.CallOption) (*Vendor, error)
+	// ListVendors returns one page of the caller's vendors ordered by code.
+	// query matches a code prefix or a name substring (case-insensitive);
+	// status and query combine. total is the number of matching rows across
+	// all pages.
+	ListVendors(ctx context.Context, in *ListVendorsRequest, opts ...grpc.CallOption) (*ListVendorsResponse, error)
 }
 
 type procurementClient struct {
@@ -96,6 +102,16 @@ func (c *procurementClient) DeactivateVendor(ctx context.Context, in *Deactivate
 	return out, nil
 }
 
+func (c *procurementClient) ListVendors(ctx context.Context, in *ListVendorsRequest, opts ...grpc.CallOption) (*ListVendorsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListVendorsResponse)
+	err := c.cc.Invoke(ctx, Procurement_ListVendors_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ProcurementServer is the server API for Procurement service.
 // All implementations must embed UnimplementedProcurementServer
 // for forward compatibility.
@@ -117,6 +133,11 @@ type ProcurementServer interface {
 	// DeactivateVendor soft-deletes a vendor: it stays readable for history but
 	// cannot be used in new purchase orders.
 	DeactivateVendor(context.Context, *DeactivateVendorRequest) (*Vendor, error)
+	// ListVendors returns one page of the caller's vendors ordered by code.
+	// query matches a code prefix or a name substring (case-insensitive);
+	// status and query combine. total is the number of matching rows across
+	// all pages.
+	ListVendors(context.Context, *ListVendorsRequest) (*ListVendorsResponse, error)
 	mustEmbedUnimplementedProcurementServer()
 }
 
@@ -138,6 +159,9 @@ func (UnimplementedProcurementServer) UpdateVendor(context.Context, *UpdateVendo
 }
 func (UnimplementedProcurementServer) DeactivateVendor(context.Context, *DeactivateVendorRequest) (*Vendor, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method DeactivateVendor not implemented")
+}
+func (UnimplementedProcurementServer) ListVendors(context.Context, *ListVendorsRequest) (*ListVendorsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListVendors not implemented")
 }
 func (UnimplementedProcurementServer) mustEmbedUnimplementedProcurementServer() {}
 func (UnimplementedProcurementServer) testEmbeddedByValue()                     {}
@@ -232,6 +256,24 @@ func _Procurement_DeactivateVendor_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Procurement_ListVendors_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListVendorsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProcurementServer).ListVendors(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Procurement_ListVendors_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProcurementServer).ListVendors(ctx, req.(*ListVendorsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Procurement_ServiceDesc is the grpc.ServiceDesc for Procurement service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -254,6 +296,10 @@ var Procurement_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeactivateVendor",
 			Handler:    _Procurement_DeactivateVendor_Handler,
+		},
+		{
+			MethodName: "ListVendors",
+			Handler:    _Procurement_ListVendors_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

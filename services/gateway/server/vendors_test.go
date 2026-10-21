@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -28,6 +29,18 @@ type fakeVendorClient struct {
 	lastCalled string
 	err        error
 	vendor     *procurementv1.Vendor
+
+	listReq *procurementv1.ListVendorsRequest
+	listRes *procurementv1.ListVendorsResponse
+	listErr error
+}
+
+func (f *fakeVendorClient) ListVendors(ctx context.Context, in *procurementv1.ListVendorsRequest, opts ...grpc.CallOption) (*procurementv1.ListVendorsResponse, error) {
+	f.lastCtx, f.lastCalled, f.listReq = ctx, "list", in
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.listRes, nil
 }
 
 func (f *fakeVendorClient) CreateVendor(ctx context.Context, in *procurementv1.CreateVendorRequest, opts ...grpc.CallOption) (*procurementv1.Vendor, error) {
@@ -145,5 +158,77 @@ func TestVendorRoutesErrorMapping(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(body), `"code":"vendor_duplicate_code"`) {
 		t.Fatalf("body = %s, want machine code preserved", body)
+	}
+}
+
+func TestVendorListRoute(t *testing.T) {
+	fake := &fakeVendorClient{
+		listRes: &procurementv1.ListVendorsResponse{
+			Vendors: []*procurementv1.Vendor{
+				{Id: "v-1", Code: "A-01", Name: "PT Satu", Status: "active"},
+				{Id: "v-2", Code: "A-02", Name: "PT Dua", Status: "deactivated"},
+			},
+			Total: 42, Page: 2, PageSize: 2,
+		},
+	}
+	app, verifier, priv, kid := newTestApp(t)
+	registerVendorRoutes(app, verifier, fake, nil)
+
+	now := time.Now()
+	token, _ := jwt.Sign(priv, kid, auth.AccessClaims{
+		Sub: "u", TenantID: "t", Roles: []string{rbac.RoleViewer},
+		IAT: now.Unix(), EXP: now.Add(time.Minute).Unix(),
+	}, now)
+
+	req := httptest.NewRequest("GET", "/api/v1/vendors?q=pt&status=active&page=2&page_size=2", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := app.Test(req, 5000)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list status = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	var out struct {
+		Vendors  []map[string]any `json:"vendors"`
+		Total    float64          `json:"total"`
+		Page     float64          `json:"page"`
+		PageSize float64          `json:"page_size"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("unmarshal %s: %v", body, err)
+	}
+	if len(out.Vendors) != 2 || out.Total != 42 || out.Page != 2 || out.PageSize != 2 {
+		t.Fatalf("body = %s", body)
+	}
+	if out.Vendors[0]["code"] != "A-01" {
+		t.Fatalf("vendor JSON wrong: %s", body)
+	}
+
+	// Query params were forwarded to procurement.
+	if fake.listReq.GetQuery() != "pt" || fake.listReq.GetStatus() != "active" ||
+		fake.listReq.GetPage() != 2 || fake.listReq.GetPageSize() != 2 {
+		t.Fatalf("forwarded request = %+v", fake.listReq)
+	}
+	md, ok := metadata.FromOutgoingContext(fake.lastCtx)
+	if !ok || len(md.Get(rbac.MDTenantID)) != 1 || md.Get(rbac.MDTenantID)[0] != "t" {
+		t.Fatal("tenant metadata not propagated on list")
+	}
+
+	// Invalid status from procurement maps to 400 with the machine code.
+	fake.listErr = status.Error(codes.InvalidArgument, "vendor_status_invalid")
+	badReq := httptest.NewRequest("GET", "/api/v1/vendors?status=paused", nil)
+	badReq.Header.Set("Authorization", "Bearer "+token)
+	resp, err = app.Test(badReq, 5000)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid status = %d, want 400", resp.StatusCode)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), `"code":"vendor_status_invalid"`) {
+		t.Fatalf("body = %s", body)
 	}
 }
