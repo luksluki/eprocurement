@@ -27,7 +27,7 @@ bin/
 tmp/
 *.test
 *.out
-vendor/
+/vendor/
 
 # Local data
 data/
