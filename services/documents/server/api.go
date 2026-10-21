@@ -1,0 +1,237 @@
+package server
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"io"
+	"log/slog"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	documentsv1 "github.com/luksluki/eprocurement/gen/go/documents/v1"
+	"github.com/luksluki/eprocurement/internal/platform/rbac"
+	"github.com/luksluki/eprocurement/services/documents/attachment"
+)
+
+// presignTTL bounds both upload and download URL validity.
+const presignTTL = 15 * time.Minute
+
+// api adapts the attachment domain to the documents.v1 gRPC contract.
+// Every method reads the caller identity the gateway propagated (tenant
+// scoping, audit ids); the RBAC interceptor has already re-checked the
+// permission.
+type api struct {
+	documentsv1.UnimplementedDocumentsServer
+	store   *attachment.Store
+	storage attachment.Storage
+	limits  attachment.Limits
+	now     func() time.Time
+	log     *slog.Logger
+}
+
+// authTenant returns the caller's auth context, rejecting calls that
+// reached this far without one.
+func authTenant(ctx context.Context) (*rbac.AuthContext, error) {
+	auth := rbac.FromMetadata(ctx)
+	if auth == nil || auth.TenantID == "" {
+		return nil, status.Error(codes.Unauthenticated, "auth context missing: no caller tenant")
+	}
+	return auth, nil
+}
+
+func (a *api) CreateUpload(ctx context.Context, req *documentsv1.CreateUploadRequest) (*documentsv1.CreateUploadResponse, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	filename := strings.TrimSpace(req.GetFilename())
+	mime, checksum := attachment.NormalizeCanonical(req.GetMimeType(), req.GetChecksumSha256())
+	if err := attachment.ValidateCreate(a.limits, req.GetEntityType(), req.GetEntityId(),
+		filename, mime, req.GetSizeBytes(), checksum); err != nil {
+		return nil, mapAttachmentError(err)
+	}
+	att := attachment.Attachment{
+		ID:             uuid.NewString(),
+		TenantID:       auth.TenantID,
+		EntityType:     req.GetEntityType(),
+		EntityID:       req.GetEntityId(),
+		Filename:       filename,
+		MimeType:       mime,
+		SizeBytes:      req.GetSizeBytes(),
+		ChecksumSHA256: checksum,
+		Status:         attachment.StatusPending,
+		ObjectKey:      attachment.ObjectKey(auth.TenantID, req.GetEntityType(), ""),
+		CreatedBy:      auth.UserID,
+		CreatedAt:      a.now(),
+	}
+	att.ObjectKey = attachment.ObjectKey(auth.TenantID, att.EntityType, att.ID)
+	if err := a.store.Insert(ctx, att); err != nil {
+		return nil, status.Error(codes.Internal, "internal error")
+	}
+	uploadURL, _, err := a.storage.PresignPut(ctx, att.ObjectKey, presignTTL)
+	if err != nil {
+		_ = a.store.Delete(ctx, att.TenantID, att.ID) // unusable URL: drop the pending metadata
+		a.log.Error("presign upload failed", "error", err)
+		return nil, status.Error(codes.Internal, "internal error")
+	}
+	return &documentsv1.CreateUploadResponse{
+		Attachment: attachmentPB(att),
+		UploadUrl:  uploadURL,
+		Method:     "PUT",
+		ExpiresAt:  att.CreatedAt.Add(presignTTL).UTC().Format(time.RFC3339),
+	}, nil
+}
+
+func (a *api) CompleteUpload(ctx context.Context, req *documentsv1.CompleteUploadRequest) (*documentsv1.Attachment, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	att, err := a.store.Get(ctx, auth.TenantID, req.GetAttachmentId())
+	if err != nil {
+		return nil, mapAttachmentError(err)
+	}
+	if att.Status == attachment.StatusReady {
+		return attachmentPB(att), nil // idempotent re-complete
+	}
+	info, err := a.storage.Stat(ctx, att.ObjectKey)
+	if err != nil {
+		if errors.Is(err, attachment.ErrObjectMissing) {
+			return nil, status.Error(codes.FailedPrecondition, attachment.ErrObjectMissing.Error())
+		}
+		a.log.Error("stat object failed", "error", err)
+		return nil, status.Error(codes.Internal, "internal error")
+	}
+	if info.Size != att.SizeBytes {
+		a.removeObject(att)
+		return nil, status.Error(codes.FailedPrecondition, attachment.ErrSizeMismatch.Error())
+	}
+	if !attachment.AllowedMimes[info.ContentType] {
+		a.removeObject(att)
+		return nil, status.Error(codes.FailedPrecondition, attachment.ErrMimeMismatch.Error())
+	}
+	sum, err := a.hashObject(ctx, att.ObjectKey)
+	if err != nil {
+		a.log.Error("read object failed", "error", err)
+		return nil, status.Error(codes.Internal, "internal error")
+	}
+	if sum != att.ChecksumSHA256 {
+		a.removeObject(att)
+		return nil, status.Error(codes.FailedPrecondition, attachment.ErrChecksumMismatch.Error())
+	}
+	if err := a.store.MarkReady(ctx, auth.TenantID, att.ID, info.Size, a.now()); err != nil {
+		return nil, mapAttachmentError(err)
+	}
+	att.Status = attachment.StatusReady
+	att.SizeBytes = info.Size
+	att.UploadedAt = a.now()
+	return attachmentPB(att), nil
+}
+
+func (a *api) ListAttachments(ctx context.Context, req *documentsv1.ListAttachmentsRequest) (*documentsv1.ListAttachmentsResponse, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	list, err := a.store.List(ctx, auth.TenantID, req.GetEntityType(), req.GetEntityId())
+	if err != nil {
+		return nil, mapAttachmentError(err)
+	}
+	out := &documentsv1.ListAttachmentsResponse{}
+	for _, att := range list {
+		out.Attachments = append(out.Attachments, attachmentPB(att))
+	}
+	return out, nil
+}
+
+func (a *api) GetDownloadUrl(ctx context.Context, req *documentsv1.GetDownloadUrlRequest) (*documentsv1.GetDownloadUrlResponse, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	att, err := a.store.Get(ctx, auth.TenantID, req.GetAttachmentId())
+	if err != nil {
+		return nil, mapAttachmentError(err)
+	}
+	if att.Status != attachment.StatusReady {
+		return nil, status.Error(codes.FailedPrecondition, attachment.ErrNotReady.Error())
+	}
+	downloadURL, expiresAt, err := a.storage.PresignGet(ctx, att.ObjectKey, presignTTL)
+	if err != nil {
+		a.log.Error("presign download failed", "error", err)
+		return nil, status.Error(codes.Internal, "internal error")
+	}
+	return &documentsv1.GetDownloadUrlResponse{
+		Attachment:  attachmentPB(att),
+		DownloadUrl: downloadURL,
+		ExpiresAt:   expiresAt.UTC().Format(time.RFC3339),
+	}, nil
+}
+
+// removeObject drops bytes that failed verification; the metadata stays
+// pending so the caller can upload correct bytes and complete again.
+func (a *api) removeObject(att attachment.Attachment) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := a.storage.Remove(ctx, att.ObjectKey); err != nil {
+		a.log.Warn("remove mismatched object failed", "object_key", att.ObjectKey, "error", err)
+	}
+}
+
+// hashObject streams the stored object once to compute its sha256 hex sum.
+func (a *api) hashObject(ctx context.Context, key string) (string, error) {
+	reader, err := a.storage.Read(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	defer reader.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, reader); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+// mapAttachmentError keeps the machine code (the gRPC message) intact and
+// picks the gRPC code: validation failures → InvalidArgument, missing →
+// NotFound, lifecycle violations → FailedPrecondition.
+func mapAttachmentError(err error) error {
+	switch {
+	case errors.Is(err, attachment.ErrEntityInvalid),
+		errors.Is(err, attachment.ErrFilenameInvalid),
+		errors.Is(err, attachment.ErrMimeInvalid),
+		errors.Is(err, attachment.ErrTooLarge),
+		errors.Is(err, attachment.ErrChecksumInvalid),
+		errors.Is(err, attachment.ErrIDInvalid):
+		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, attachment.ErrNotFound):
+		return status.Error(codes.NotFound, err.Error())
+	case errors.Is(err, attachment.ErrNotReady),
+		errors.Is(err, attachment.ErrObjectMissing),
+		errors.Is(err, attachment.ErrSizeMismatch),
+		errors.Is(err, attachment.ErrMimeMismatch),
+		errors.Is(err, attachment.ErrChecksumMismatch):
+		return status.Error(codes.FailedPrecondition, err.Error())
+	default:
+		return status.Error(codes.Internal, "internal error")
+	}
+}
+
+func attachmentPB(a attachment.Attachment) *documentsv1.Attachment {
+	pb := &documentsv1.Attachment{
+		Id: a.ID, TenantId: a.TenantID, EntityType: a.EntityType, EntityId: a.EntityID,
+		Filename: a.Filename, MimeType: a.MimeType, SizeBytes: a.SizeBytes,
+		ChecksumSha256: a.ChecksumSHA256, Status: a.Status, ObjectKey: a.ObjectKey,
+		CreatedBy: a.CreatedBy, CreatedAt: a.CreatedAt.UTC().Format(time.RFC3339),
+	}
+	if !a.UploadedAt.IsZero() {
+		pb.UploadedAt = a.UploadedAt.UTC().Format(time.RFC3339)
+	}
+	return pb
+}

@@ -1,0 +1,195 @@
+package server
+
+import (
+	"context"
+	"strings"
+
+	"github.com/gofiber/fiber/v2"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	documentsv1 "github.com/luksluki/eprocurement/gen/go/documents/v1"
+	procurementv1 "github.com/luksluki/eprocurement/gen/go/procurement/v1"
+	"github.com/luksluki/eprocurement/internal/platform/rbac"
+	"github.com/luksluki/eprocurement/services/gateway/token"
+)
+
+// DocumentsClient is the documents surface the gateway proxies. The
+// generated gRPC client satisfies it; tests substitute a fake.
+type DocumentsClient interface {
+	CreateUpload(ctx context.Context, in *documentsv1.CreateUploadRequest, opts ...grpc.CallOption) (*documentsv1.CreateUploadResponse, error)
+	CompleteUpload(ctx context.Context, in *documentsv1.CompleteUploadRequest, opts ...grpc.CallOption) (*documentsv1.Attachment, error)
+	ListAttachments(ctx context.Context, in *documentsv1.ListAttachmentsRequest, opts ...grpc.CallOption) (*documentsv1.ListAttachmentsResponse, error)
+	GetDownloadUrl(ctx context.Context, in *documentsv1.GetDownloadUrlRequest, opts ...grpc.CallOption) (*documentsv1.GetDownloadUrlResponse, error)
+}
+
+// registerAttachmentRoutes wires /api/v1/vendors/:id/attachments under the
+// vendors group. The vendor's existence is checked against procurement
+// before any documents call, so attachments cannot dangle on unknown ids.
+func registerAttachmentRoutes(vendors fiber.Router, verifier *token.Verifier, vendorClient VendorClient, documents DocumentsClient) {
+	vendors.Post("/:id/attachments", RequirePermission(rbac.VendorWrite), createAttachment(vendorClient, documents))
+	vendors.Post("/:id/attachments/:attachmentId/complete", RequirePermission(rbac.VendorWrite), completeAttachment(documents))
+	vendors.Get("/:id/attachments/:attachmentId/download", RequirePermission(rbac.VendorRead), downloadAttachment(documents))
+}
+
+type attachmentBody struct {
+	Filename       string `json:"filename"`
+	MimeType       string `json:"mime_type"`
+	SizeBytes      int64  `json:"size_bytes"`
+	ChecksumSHA256 string `json:"checksum_sha256"`
+}
+
+func createAttachment(vendorClient VendorClient, documents DocumentsClient) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		claims, ok := claimsOf(c)
+		if !ok {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "missing bearer token"})
+		}
+		var body attachmentBody
+		if err := c.BodyParser(&body); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid JSON body", "code": "body_invalid"})
+		}
+		// The attachment must belong to an existing vendor of this tenant.
+		if _, err := vendorClient.GetVendor(forwardContext(c, claims),
+			&procurementv1.GetVendorRequest{Id: c.Params("id")}); err != nil {
+			return vendorError(c, err)
+		}
+		resp, err := documents.CreateUpload(forwardContext(c, claims), &documentsv1.CreateUploadRequest{
+			EntityType:     "vendor",
+			EntityId:       c.Params("id"),
+			Filename:       strings.TrimSpace(body.Filename),
+			MimeType:       body.MimeType,
+			SizeBytes:      body.SizeBytes,
+			ChecksumSha256: body.ChecksumSHA256,
+		})
+		if err != nil {
+			return attachmentError(c, err)
+		}
+		out := attachmentJSON(resp.GetAttachment())
+		out["upload"] = fiber.Map{
+			"url":        resp.GetUploadUrl(),
+			"method":     resp.GetMethod(),
+			"expires_at": resp.GetExpiresAt(),
+			"headers":    fiber.Map{"Content-Type": resp.GetAttachment().GetMimeType()},
+		}
+		return c.Status(fiber.StatusCreated).JSON(out)
+	}
+}
+
+func completeAttachment(documents DocumentsClient) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		claims, ok := claimsOf(c)
+		if !ok {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "missing bearer token"})
+		}
+		att, err := documents.CompleteUpload(forwardContext(c, claims),
+			&documentsv1.CompleteUploadRequest{AttachmentId: c.Params("attachmentId")})
+		if err != nil {
+			return attachmentError(c, err)
+		}
+		if att.GetEntityId() != c.Params("id") {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "attachment not found", "code": "attachment_not_found"})
+		}
+		return c.JSON(attachmentJSON(att))
+	}
+}
+
+func downloadAttachment(documents DocumentsClient) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		claims, ok := claimsOf(c)
+		if !ok {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "missing bearer token"})
+		}
+		resp, err := documents.GetDownloadUrl(forwardContext(c, claims),
+			&documentsv1.GetDownloadUrlRequest{AttachmentId: c.Params("attachmentId")})
+		if err != nil {
+			return attachmentError(c, err)
+		}
+		if resp.GetAttachment().GetEntityId() != c.Params("id") {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "attachment not found", "code": "attachment_not_found"})
+		}
+		out := attachmentJSON(resp.GetAttachment())
+		out["download"] = fiber.Map{"url": resp.GetDownloadUrl(), "expires_at": resp.GetExpiresAt()}
+		return c.JSON(out)
+	}
+}
+
+// listVendorAttachments powers the vendor-detail aggregation: metadata for
+// every attachment of this vendor, pending and ready.
+func listVendorAttachments(ctx context.Context, vendorID string, documents DocumentsClient) ([]fiber.Map, error) {
+	resp, err := documents.ListAttachments(ctx, &documentsv1.ListAttachmentsRequest{
+		EntityType: "vendor", EntityId: vendorID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]fiber.Map, 0, len(resp.GetAttachments()))
+	for _, att := range resp.GetAttachments() {
+		out = append(out, attachmentJSON(att))
+	}
+	return out, nil
+}
+
+// attachmentMessages renders the machine code (the gRPC message) as a
+// human sentence; unknown messages pass through verbatim.
+var attachmentMessages = map[string]string{
+	"attachment_entity_invalid":    "attachment owner must be a vendor",
+	"attachment_filename_invalid":  "filename must be 1-255 characters without path separators",
+	"attachment_mime_invalid":      "mime type is not allowed (pdf, png, jpeg, webp, docx, xlsx)",
+	"attachment_too_large":         "file exceeds the size limit",
+	"attachment_checksum_invalid":  "checksum must be a sha256 hex string",
+	"attachment_id_invalid":        "attachment id is malformed",
+	"attachment_not_found":         "attachment not found",
+	"attachment_not_ready":         "attachment is still pending and not downloadable",
+	"attachment_object_missing":    "uploaded file not found — upload it first",
+	"attachment_size_mismatch":     "uploaded size differs from the declared size",
+	"attachment_mime_mismatch":     "uploaded content type is not allowed",
+	"attachment_checksum_mismatch": "uploaded content does not match the declared checksum",
+}
+
+// attachmentError maps documents' gRPC failures to HTTP with the machine
+// code preserved (same shape as vendorError).
+func attachmentError(c *fiber.Ctx, err error) error {
+	st, _ := status.FromError(err)
+	message, human := attachmentMessages[st.Message()]
+	if !human {
+		message = st.Message()
+	}
+	body := fiber.Map{"error": message, "code": st.Message()}
+	switch st.Code() {
+	case codes.InvalidArgument:
+		return c.Status(fiber.StatusBadRequest).JSON(body)
+	case codes.NotFound:
+		return c.Status(fiber.StatusNotFound).JSON(body)
+	case codes.AlreadyExists:
+		return c.Status(fiber.StatusConflict).JSON(body)
+	case codes.FailedPrecondition:
+		return c.Status(fiber.StatusPreconditionFailed).JSON(body)
+	case codes.Unauthenticated:
+		return c.Status(fiber.StatusUnauthorized).JSON(body)
+	case codes.PermissionDenied:
+		return c.Status(fiber.StatusForbidden).JSON(body)
+	default:
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "documents unavailable"})
+	}
+}
+
+// attachmentJSON is the REST shape of attachment metadata; object_key stays
+// internal (clients use the presigned URLs instead).
+func attachmentJSON(a *documentsv1.Attachment) fiber.Map {
+	return fiber.Map{
+		"id":              a.GetId(),
+		"tenant_id":       a.GetTenantId(),
+		"entity_type":     a.GetEntityType(),
+		"entity_id":       a.GetEntityId(),
+		"filename":        a.GetFilename(),
+		"mime_type":       a.GetMimeType(),
+		"size_bytes":      a.GetSizeBytes(),
+		"checksum_sha256": a.GetChecksumSha256(),
+		"status":          a.GetStatus(),
+		"created_by":      a.GetCreatedBy(),
+		"created_at":      a.GetCreatedAt(),
+		"uploaded_at":     a.GetUploadedAt(),
+	}
+}

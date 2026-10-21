@@ -61,7 +61,7 @@ func TestVendorRoutesHappyPathAndPropagation(t *testing.T) {
 	}}
 
 	app, verifier, priv, kid := newTestApp(t)
-	registerVendorRoutes(app, verifier, fake)
+	registerVendorRoutes(app, verifier, fake, nil)
 
 	now := time.Now()
 	token, err := jwt.Sign(priv, kid, auth.AccessClaims{
@@ -102,7 +102,7 @@ func TestVendorRoutesHappyPathAndPropagation(t *testing.T) {
 func TestVendorRoutesRequirePermission(t *testing.T) {
 	fake := &fakeVendorClient{vendor: &procurementv1.Vendor{Id: "v-1"}}
 	app, verifier, priv, kid := newTestApp(t)
-	registerVendorRoutes(app, verifier, fake)
+	registerVendorRoutes(app, verifier, fake, nil)
 
 	now := time.Now()
 	viewerToken, _ := jwt.Sign(priv, kid, auth.AccessClaims{
@@ -124,7 +124,7 @@ func TestVendorRoutesRequirePermission(t *testing.T) {
 func TestVendorRoutesErrorMapping(t *testing.T) {
 	fake := &fakeVendorClient{err: status.Error(codes.AlreadyExists, "vendor_duplicate_code")}
 	app, verifier, priv, kid := newTestApp(t)
-	registerVendorRoutes(app, verifier, fake)
+	registerVendorRoutes(app, verifier, fake, nil)
 
 	now := time.Now()
 	token, _ := jwt.Sign(priv, kid, auth.AccessClaims{

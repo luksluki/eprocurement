@@ -23,11 +23,19 @@ type Option func(*gatewayOptions)
 
 type gatewayOptions struct {
 	procurement VendorClient
+	documents   DocumentsClient
 }
 
 // WithProcurement proxies the procurement vendor API under /api/v1/vendors.
 func WithProcurement(client VendorClient) Option {
 	return func(o *gatewayOptions) { o.procurement = client }
+}
+
+// WithDocuments adds attachment upload/download under
+// /api/v1/vendors/:id/attachments and embeds attachment metadata in vendor
+// detail responses. Requires WithProcurement.
+func WithDocuments(client DocumentsClient) Option {
+	return func(o *gatewayOptions) { o.documents = client }
 }
 
 // New builds the fiber app.
@@ -57,7 +65,7 @@ func New(log *slog.Logger, verifier *token.Verifier, opts ...Option) *fiber.App 
 	v1 := app.Group("/api/v1", bearerAuth(verifier))
 	v1.Get("/me", me)
 	if o.procurement != nil {
-		registerVendorRoutes(app, verifier, o.procurement)
+		registerVendorRoutes(app, verifier, o.procurement, o.documents)
 	}
 
 	return app

@@ -61,8 +61,10 @@ reset: ## Drop volumes and recreate the local stack
 PROTOC := $(shell command -v .tools/protoc/bin/protoc 2>/dev/null || command -v protoc 2>/dev/null)
 
 # Reads DATABASE_URL from .env (the compose stack) when TEST_DATABASE_URL is
-# not set in the environment.
+# not set in the environment. Same pattern for the documents test stores.
 TEST_DATABASE_URL ?= $(shell sed -n 's/^DATABASE_URL=//p' .env 2>/dev/null)
+TEST_MONGO_URI ?= $(shell sed -n 's/^MONGO_URI=//p' .env 2>/dev/null)
+TEST_S3_ENDPOINT ?= $(shell sed -n 's/^S3_ENDPOINT=//p' .env 2>/dev/null)
 IDENTITY_COVERAGE_THRESHOLD ?= 80
 
 gen-proto: ## Regenerate gen/go from proto/
@@ -81,5 +83,6 @@ cover: ## Identity-domain coverage with enforced threshold (compose stack must b
 	@go tool cover -func=coverage.out | awk -v t=$(IDENTITY_COVERAGE_THRESHOLD) \
 		'/^total:/ {gsub("%","",$$3); if ($$3+0 < t) {print "FAIL: identity coverage " $$3 "% is below the " t "% threshold"; exit 1} print "OK: identity coverage " $$3 "% meets the " t "% threshold"}'
 
-test-integration: ## Full go test ./... against the compose database
-	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test ./... -count=1
+test-integration: ## Full go test ./... against the compose database and object store
+	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" TEST_MONGO_URI="$(TEST_MONGO_URI)" \
+	TEST_S3_ENDPOINT="$(TEST_S3_ENDPOINT)" go test ./... -count=1

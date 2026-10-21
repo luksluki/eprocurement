@@ -72,6 +72,7 @@ make help              # all targets
 | OTel collector (gRPC / HTTP / health) | `localhost:4317` / `localhost:4318` / http://localhost:13133 |
 | identity (gRPC + health) | `localhost:8081` |
 | procurement (gRPC + health) | `localhost:8082` |
+| documents (gRPC + health) | `localhost:8083` — attachments: MongoDB `document_meta` + MinIO presigned uploads |
 | gateway (REST) | http://localhost:8080 (`/healthz`, `/.well-known/jwks.json`) |
 
 Reset the local stack (drops volumes): `make reset`.

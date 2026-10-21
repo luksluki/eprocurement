@@ -51,7 +51,7 @@ Success: `Done in ...s` with no `--frozen-lockfile` error.
 make compose-up     # docker compose up -d --wait
 ```
 
-This starts PostgreSQL, MongoDB, Redis, RabbitMQ, MinIO, the OTel collector, and the `identity` + `procurement` + `gateway` services (built from source on the first run), and **waits until every service is healthy**. First run pulls images and builds the Go services (~2–3 min); later runs take seconds.
+This starts PostgreSQL, MongoDB, Redis, RabbitMQ, MinIO, the OTel collector, and the `identity` + `procurement` + `documents` + `gateway` services (built from source on the first run), and **waits until every service is healthy**. First run pulls images and builds the Go services (~2–3 min); later runs take seconds.
 
 > After changing Go code, rebuild the service images first: `docker compose build`, then `make compose-up` — plain `up` keeps the previously built image.
 
@@ -108,14 +108,14 @@ make lint && make test
 
 These are the same gates CI runs. They must pass before you push.
 
-**Unit vs integration.** Plain `go test ./...` runs the unit tests; the DB-backed integration tests (auth flows, RLS, migrations) skip unless `TEST_DATABASE_URL` is set. With the compose stack up:
+**Unit vs integration.** Plain `go test ./...` runs the unit tests; the DB-backed integration tests (auth flows, RLS, migrations) skip unless `TEST_DATABASE_URL` is set, and the documents attachment tests skip unless `TEST_MONGO_URI` + `TEST_S3_ENDPOINT` are set. With the compose stack up:
 
 ```bash
 make test-integration   # full go test ./... against the compose database
 make cover              # identity-domain coverage; fails below the 80% threshold
 ```
 
-CI runs the same suite with `TEST_DATABASE_URL` pointing at a Postgres service container and enforces the coverage threshold — so a change that only passes without the database never merges.
+CI runs the same suite with `TEST_DATABASE_URL` pointing at a Postgres service container (plus MongoDB and MinIO containers for the attachment flow) and enforces the coverage threshold — so a change that only passes without the dependencies never merges.
 
 You now have a working environment. Head to [CONTRIBUTING.md](../CONTRIBUTING.md) for the Git Flow workflow, or [`AGENTS.md`](../AGENTS.md) if you are an AI coding agent.
 
@@ -135,6 +135,7 @@ You now have a working environment. Head to [CONTRIBUTING.md](../CONTRIBUTING.md
 | `OTEL_GRPC_PORT` / `OTEL_HTTP_PORT` / `OTEL_HEALTH_PORT` | `4317` / `4318` / `13133` |
 | `IDENTITY_PORT` | `8081` |
 | `PROCUREMENT_PORT` | `8082` |
+| `DOCUMENTS_PORT` | `8083` |
 | `GATEWAY_PORT` | `8080` |
 
 **Credentials** (local development only — all default to `eprocurement`): `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `MONGO_ROOT_USER`, `MONGO_ROOT_PASSWORD`, `MONGO_DB`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`.
@@ -147,10 +148,10 @@ You now have a working environment. Head to [CONTRIBUTING.md](../CONTRIBUTING.md
 | `MONGO_URI` | `mongodb://eprocurement:eprocurement@localhost:27017/eprocurement?authSource=admin` |
 | `REDIS_URL` | `redis://localhost:6379/0` |
 | `RABBITMQ_URL` | `amqp://eprocurement:eprocurement@localhost:5672/` |
-| `S3_ENDPOINT` | `http://localhost:9000` |
+| `S3_ENDPOINT` | `localhost:9000` (host:port, no scheme — the documents service talks to MinIO directly; `S3_USE_SSL` switches to TLS) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` |
 
-**Application services** (optional; safe to omit): `APP_ENV` (default `local`) and `LOG_LEVEL` (default `info`). Each Go service also reads a `PORT` env with its own default — `identity` defaults to `8081`, `gateway` to `8080`; inside compose the ports are fixed and published as `IDENTITY_PORT` / `GATEWAY_PORT`. The `identity` service also takes `IDENTITY_LOGIN_RATE_PER_MIN` (default `5`) and optional `IDENTITY_JWT_KEY` / `IDENTITY_JWT_KEY_PREVIOUS` seeds (rotation runbook: [`docs/ops/jwks-rotation.md`](ops/jwks-rotation.md)). The `gateway` takes `IDENTITY_ADDR` (default `localhost:8081`) and `JWKS_CACHE_TTL` (default `5m`). The `identity` schema and token semantics are documented in [`docs/schema/identity.md`](schema/identity.md).
+**Application services** (optional; safe to omit): `APP_ENV` (default `local`) and `LOG_LEVEL` (default `info`). Each Go service also reads a `PORT` env with its own default — `identity` defaults to `8081`, `gateway` to `8080`; inside compose the ports are fixed and published as `IDENTITY_PORT` / `GATEWAY_PORT`. The `identity` service also takes `IDENTITY_LOGIN_RATE_PER_MIN` (default `5`) and optional `IDENTITY_JWT_KEY` / `IDENTITY_JWT_KEY_PREVIOUS` seeds (rotation runbook: [`docs/ops/jwks-rotation.md`](ops/jwks-rotation.md)). The `gateway` takes `IDENTITY_ADDR` (default `localhost:8081`) and `JWKS_CACHE_TTL` (default `5m`). The `identity` schema and token semantics are documented in [`docs/schema/identity.md`](schema/identity.md). The `documents` service (attachments via presigned MinIO uploads) is documented in [`docs/schema/documents.md`](schema/documents.md).
 
 > **Port overrides have two halves.** Compose only maps ports — it does not rewrite connection strings. If you set `POSTGRES_PORT=55432`, you must also change the port inside `DATABASE_URL`, or `make seed` will keep dialing 5432. The same applies to `MONGO_PORT` + `MONGO_URI`, `RABBITMQ_PORT` + `RABBITMQ_URL`, `MINIO_PORT` + `S3_ENDPOINT`, and `OTEL_GRPC_PORT` + `OTEL_EXPORTER_OTLP_ENDPOINT`. After editing `.env`, recreate the stack: `make compose-down && make compose-up`.
 
