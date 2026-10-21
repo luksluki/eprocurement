@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package procurement.v1;
+
+option go_package = "github.com/luksluki/eprocurement/gen/go/procurement/v1;procurementv1";
+
+// Procurement is the internal domain API (vendors first; requisitions, POs,
+// GRNs, and invoices arrive with later issues). Reachable only inside the
+// backend network; clients go through the gateway.
+service Procurement {
+  // CreateVendor validates and inserts a vendor. The caller's tenant and user
+  // come from the auth metadata (x-tenant-id / x-user-id / x-role) injected
+  // by the gateway; vendor codes are unique per tenant.
+  rpc CreateVendor(CreateVendorRequest) returns (Vendor);
+  // GetVendor returns one vendor of the caller's tenant; other tenants'
+  // vendors are indistinguishable from missing ones.
+  rpc GetVendor(GetVendorRequest) returns (Vendor);
+  // UpdateVendor mutates mutable fields of an active vendor. Deactivated
+  // vendors are immutable (soft-deleted).
+  rpc UpdateVendor(UpdateVendorRequest) returns (Vendor);
+  // DeactivateVendor soft-deletes a vendor: it stays readable for history but
+  // cannot be used in new purchase orders.
+  rpc DeactivateVendor(DeactivateVendorRequest) returns (Vendor);
+}
+
+message Vendor {
+  string id = 1;
+  string tenant_id = 2;
+  string code = 3;            // tenant-unique, e.g. "V-0001"
+  string name = 4;
+  string contact_email = 5;
+  string tax_id = 6;
+  string status = 7;          // "active" | "deactivated"
+  string created_at = 8;      // RFC 3339
+  string created_by = 9;      // user id
+  string updated_at = 10;     // RFC 3339
+  string updated_by = 11;     // user id
+}
+
+message CreateVendorRequest {
+  string code = 1;
+  string name = 2;
+  string contact_email = 3;
+  string tax_id = 4;
+}
+
+message GetVendorRequest {
+  string id = 1;
+}
+
+message UpdateVendorRequest {
+  string id = 1;
+  // Mutable fields; empty strings keep the stored value (no field masks yet).
+  string name = 2;
+  string contact_email = 3;
+  string tax_id = 4;
+}
+
+message DeactivateVendorRequest {
+  string id = 1;
+}

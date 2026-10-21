@@ -54,6 +54,8 @@ jobs:
         run: |
           go run ./services/identity/cmd/migrate
           go run ./services/identity/cmd/migrate
+          go run ./services/procurement/cmd/migrate
+          go run ./services/procurement/cmd/migrate
 
       - name: Test
         run: go test ./...
