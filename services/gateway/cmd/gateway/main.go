@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	identityv1 "github.com/luksluki/eprocurement/gen/go/identity/v1"
+	procurementv1 "github.com/luksluki/eprocurement/gen/go/procurement/v1"
 	"github.com/luksluki/eprocurement/internal/platform/logger"
 	gatewayconfig "github.com/luksluki/eprocurement/services/gateway/config"
 	"github.com/luksluki/eprocurement/services/gateway/server"
@@ -48,8 +49,17 @@ func run() error {
 		cfg.JWKSCacheTTL,
 	)
 
-	app := server.New(log, verifier)
-	log.Info("starting gateway", "port", cfg.Port, "identity_addr", cfg.IdentityAddr)
+	procurementConn, err := grpc.NewClient(cfg.ProcurementAddr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return fmt.Errorf("dial procurement %s: %w", cfg.ProcurementAddr, err)
+	}
+	defer func() { _ = procurementConn.Close() }()
+
+	app := server.New(log, verifier,
+		server.WithProcurement(procurementv1.NewProcurementClient(procurementConn)))
+	log.Info("starting gateway", "port", cfg.Port,
+		"identity_addr", cfg.IdentityAddr, "procurement_addr", cfg.ProcurementAddr)
 
 	go func() {
 		<-ctx.Done()

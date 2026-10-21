@@ -8,21 +8,23 @@ import (
 
 // Config holds the gateway runtime configuration.
 type Config struct {
-	Env          string        // APP_ENV (default "local")
-	Port         string        // PORT — HTTP listen port (default "8080")
-	IdentityAddr string        // IDENTITY_ADDR — identity gRPC host:port
-	JWKSCacheTTL time.Duration // JWKS_CACHE_TTL (default 5m)
-	LogLevel     string        // LOG_LEVEL (default "info")
+	Env             string        // APP_ENV (default "local")
+	Port            string        // PORT — HTTP listen port (default "8080")
+	IdentityAddr    string        // IDENTITY_ADDR — identity gRPC host:port
+	ProcurementAddr string        // PROCUREMENT_ADDR — procurement gRPC host:port
+	JWKSCacheTTL    time.Duration // JWKS_CACHE_TTL (default 5m)
+	LogLevel        string        // LOG_LEVEL (default "info")
 }
 
 // Load reads the configuration from the environment.
 func Load() Config {
 	return Config{
-		Env:          envOr("APP_ENV", "local"),
-		Port:         envOr("PORT", "8080"),
-		IdentityAddr: envOr("IDENTITY_ADDR", "localhost:8081"),
-		JWKSCacheTTL: envDuration("JWKS_CACHE_TTL", 5*time.Minute),
-		LogLevel:     envOr("LOG_LEVEL", "info"),
+		Env:             envOr("APP_ENV", "local"),
+		Port:            envOr("PORT", "8080"),
+		IdentityAddr:    envOr("IDENTITY_ADDR", "localhost:8081"),
+		ProcurementAddr: envOr("PROCUREMENT_ADDR", "localhost:8082"),
+		JWKSCacheTTL:    envDuration("JWKS_CACHE_TTL", 5*time.Minute),
+		LogLevel:        envOr("LOG_LEVEL", "info"),
 	}
 }
 

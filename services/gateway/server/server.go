@@ -18,8 +18,25 @@ import (
 	"github.com/luksluki/eprocurement/services/identity/auth"
 )
 
+// Option adds a proxied service to the gateway.
+type Option func(*gatewayOptions)
+
+type gatewayOptions struct {
+	procurement VendorClient
+}
+
+// WithProcurement proxies the procurement vendor API under /api/v1/vendors.
+func WithProcurement(client VendorClient) Option {
+	return func(o *gatewayOptions) { o.procurement = client }
+}
+
 // New builds the fiber app.
-func New(log *slog.Logger, verifier *token.Verifier) *fiber.App {
+func New(log *slog.Logger, verifier *token.Verifier, opts ...Option) *fiber.App {
+	var o gatewayOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	app := fiber.New(fiber.Config{
 		AppName: "eprocurement-gateway",
 		ErrorHandler: func(c *fiber.Ctx, err error) error {
@@ -39,6 +56,9 @@ func New(log *slog.Logger, verifier *token.Verifier) *fiber.App {
 
 	v1 := app.Group("/api/v1", bearerAuth(verifier))
 	v1.Get("/me", me)
+	if o.procurement != nil {
+		registerVendorRoutes(app, verifier, o.procurement)
+	}
 
 	return app
 }
