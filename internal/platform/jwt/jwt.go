@@ -110,6 +110,27 @@ func Parse(pub ed25519.PublicKey, token string, out any, now time.Time) error {
 	return nil
 }
 
+// PeekKid returns the kid header of a token without verifying it — used to
+// select the verification key before checking the signature.
+func PeekKid(token string) (string, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return "", ErrMalformed
+	}
+	hdrBytes, err := unb64(parts[0])
+	if err != nil {
+		return "", ErrMalformed
+	}
+	var hdr header
+	if err := json.Unmarshal(hdrBytes, &hdr); err != nil {
+		return "", ErrMalformed
+	}
+	if hdr.Kid == "" {
+		return "", ErrMalformed
+	}
+	return hdr.Kid, nil
+}
+
 func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 
 func unb64(s string) ([]byte, error) { return base64.RawURLEncoding.DecodeString(s) }

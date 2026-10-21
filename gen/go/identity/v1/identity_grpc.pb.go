@@ -22,6 +22,7 @@ const (
 	Identity_Login_FullMethodName   = "/identity.v1.Identity/Login"
 	Identity_Refresh_FullMethodName = "/identity.v1.Identity/Refresh"
 	Identity_Logout_FullMethodName  = "/identity.v1.Identity/Logout"
+	Identity_GetJwks_FullMethodName = "/identity.v1.Identity/GetJwks"
 )
 
 // IdentityClient is the client API for Identity service.
@@ -41,6 +42,9 @@ type IdentityClient interface {
 	Refresh(ctx context.Context, in *RefreshRequest, opts ...grpc.CallOption) (*LoginResponse, error)
 	// Logout revokes a refresh token. Idempotent.
 	Logout(ctx context.Context, in *LogoutRequest, opts ...grpc.CallOption) (*LogoutResponse, error)
+	// GetJwks returns the active signing keys (current + previous during
+	// rotation) so callers can verify access tokens without sharing secrets.
+	GetJwks(ctx context.Context, in *GetJwksRequest, opts ...grpc.CallOption) (*GetJwksResponse, error)
 }
 
 type identityClient struct {
@@ -81,6 +85,16 @@ func (c *identityClient) Logout(ctx context.Context, in *LogoutRequest, opts ...
 	return out, nil
 }
 
+func (c *identityClient) GetJwks(ctx context.Context, in *GetJwksRequest, opts ...grpc.CallOption) (*GetJwksResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetJwksResponse)
+	err := c.cc.Invoke(ctx, Identity_GetJwks_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // IdentityServer is the server API for Identity service.
 // All implementations must embed UnimplementedIdentityServer
 // for forward compatibility.
@@ -98,6 +112,9 @@ type IdentityServer interface {
 	Refresh(context.Context, *RefreshRequest) (*LoginResponse, error)
 	// Logout revokes a refresh token. Idempotent.
 	Logout(context.Context, *LogoutRequest) (*LogoutResponse, error)
+	// GetJwks returns the active signing keys (current + previous during
+	// rotation) so callers can verify access tokens without sharing secrets.
+	GetJwks(context.Context, *GetJwksRequest) (*GetJwksResponse, error)
 	mustEmbedUnimplementedIdentityServer()
 }
 
@@ -116,6 +133,9 @@ func (UnimplementedIdentityServer) Refresh(context.Context, *RefreshRequest) (*L
 }
 func (UnimplementedIdentityServer) Logout(context.Context, *LogoutRequest) (*LogoutResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Logout not implemented")
+}
+func (UnimplementedIdentityServer) GetJwks(context.Context, *GetJwksRequest) (*GetJwksResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetJwks not implemented")
 }
 func (UnimplementedIdentityServer) mustEmbedUnimplementedIdentityServer() {}
 func (UnimplementedIdentityServer) testEmbeddedByValue()                  {}
@@ -192,6 +212,24 @@ func _Identity_Logout_Handler(srv interface{}, ctx context.Context, dec func(int
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Identity_GetJwks_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetJwksRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdentityServer).GetJwks(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Identity_GetJwks_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdentityServer).GetJwks(ctx, req.(*GetJwksRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Identity_ServiceDesc is the grpc.ServiceDesc for Identity service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -210,6 +248,10 @@ var Identity_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Logout",
 			Handler:    _Identity_Logout_Handler,
+		},
+		{
+			MethodName: "GetJwks",
+			Handler:    _Identity_GetJwks_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

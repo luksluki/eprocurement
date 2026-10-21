@@ -49,6 +49,21 @@ func (a *api) Logout(ctx context.Context, req *identityv1.LogoutRequest) (*ident
 	return &identityv1.LogoutResponse{}, nil
 }
 
+// GetJwks returns the active public keys for token verification. Callers
+// refresh when a token carries a kid they do not know (rotation window).
+func (a *api) GetJwks(ctx context.Context, _ *identityv1.GetJwksRequest) (*identityv1.GetJwksResponse, error) {
+	keys := a.svc.Jwks()
+	out := &identityv1.GetJwksResponse{Keys: make([]*identityv1.Jwk, 0, len(keys))}
+	for _, k := range keys {
+		out.Keys = append(out.Keys, &identityv1.Jwk{
+			Kid:     k.Kid,
+			Ed25519: []byte(k.Ed25519),
+			Current: k.Current,
+		})
+	}
+	return out, nil
+}
+
 func mapAuthError(err error) error {
 	switch {
 	case errors.Is(err, auth.ErrInvalidCredentials):

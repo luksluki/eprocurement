@@ -28,7 +28,7 @@ func testService(t *testing.T) (*Service, *pgxpool.Pool) {
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
-	return New(db, slog.Default(), priv, 1000), db // effectively unlimited rate for flow tests
+	return New(db, slog.Default(), NewKeyring(priv, nil), 1000), db // effectively unlimited rate for flow tests
 }
 
 // seedUser inserts a user with a real argon2id hash and the given role codes,
@@ -138,7 +138,7 @@ func TestLoginRateLimited(t *testing.T) {
 	db, _ := pgxpool.New(context.Background(), dsn)
 	t.Cleanup(db.Close)
 	_, priv, _ := jwt.GenerateKey()
-	svc := New(db, slog.Default(), priv, 2) // 2/min
+	svc := New(db, slog.Default(), NewKeyring(priv, nil), 2) // 2/min
 
 	email := "rate@login.test"
 	defer cleanupUser(t, db, email)

@@ -98,7 +98,7 @@ services:
     networks: [backend]
 
   # Observability profile (Jaeger + Prometheus/Grafana) arrives with #54.
-  # Remaining application services (gateway/procurement/documents/worker) join in later issues.
+  # Remaining application services (procurement/documents/worker) join in later issues.
 
   identity:
     build:
@@ -112,6 +112,7 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       IDENTITY_LOGIN_RATE_PER_MIN: ${IDENTITY_LOGIN_RATE_PER_MIN:-5}
       IDENTITY_JWT_KEY: ${IDENTITY_JWT_KEY:-}
+      IDENTITY_JWT_KEY_PREVIOUS: ${IDENTITY_JWT_KEY_PREVIOUS:-}
       # Inside the compose network the database is reached by service name,
       # not by the host-local URL in .env.
       DATABASE_URL: postgres://${POSTGRES_USER:-eprocurement}:${POSTGRES_PASSWORD:-eprocurement}@postgres:5432/${POSTGRES_DB:-eprocurement}?sslmode=disable
@@ -122,6 +123,30 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "/bin/grpc-health-probe", "-addr=localhost:8081", "-service=identity"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks: [backend]
+
+  gateway:
+    build:
+      context: .
+      dockerfile: deploy/docker/service.Dockerfile
+      args:
+        SERVICE: gateway
+    environment:
+      APP_ENV: ${APP_ENV:-local}
+      PORT: "8080"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      IDENTITY_ADDR: identity:8081
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+    depends_on:
+      identity:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 12
