@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
 	"log/slog"
 	"os"
 	"testing"
@@ -250,26 +251,75 @@ func TestLogoutRevokesRefreshToken(t *testing.T) {
 	}
 }
 
+// The token's expiry is evaluated against an injected clock — no dependence
+// on wall-time races, and no pgcrypto (the hash is computed in Go).
 func TestRefreshExpiredTokenRejected(t *testing.T) {
 	svc, db := testService(t)
 	email := "expired@login.test"
 	defer cleanupUser(t, db, email)
 	userID := seedUser(t, db, tenantA, email, "s3cret!", "active")
 
-	// Insert a refresh token that expired a minute ago.
+	fixedNow := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	svc.now = func() time.Time { return fixedNow }
+	sum := sha256.Sum256([]byte("expired-token"))
 	err := tenant.WithBypass(t.Context(), db, func(tx pgx.Tx) error {
 		_, err := tx.Exec(t.Context(), `
 			INSERT INTO identity.refresh_tokens (user_id, token_hash, expires_at, created_at)
-			VALUES ($1, digest('expired-token', 'sha256'), now() - interval '8 days', now() - interval '8 days')
-			ON CONFLICT DO NOTHING`, userID)
+			VALUES ($1, $2, $3, $4)`,
+			userID, sum[:], fixedNow.Add(-time.Minute), fixedNow.Add(-8*24*time.Hour))
 		return err
 	})
 	if err != nil {
-		// pgcrypto may be unavailable; emulate with a computed hash instead.
-		t.Skipf("digest() unavailable: %v", err)
+		t.Fatalf("seed expired token: %v", err)
 	}
 	if _, err := svc.Refresh(t.Context(), "expired-token"); err != ErrInvalidRefreshToken {
 		t.Fatalf("err = %v, want ErrInvalidRefreshToken", err)
+	}
+}
+
+// A refresh token whose user was disabled after login must stop working.
+func TestRefreshRejectedWhenUserDisabled(t *testing.T) {
+	svc, db := testService(t)
+	email := "disabled-refresh@login.test"
+	defer cleanupUser(t, db, email)
+	seedUser(t, db, tenantA, email, "s3cret!", "active")
+
+	pair, err := svc.Login(t.Context(), email, "s3cret!", "k|1")
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	if err := tenant.WithBypass(t.Context(), db, func(tx pgx.Tx) error {
+		_, err := tx.Exec(t.Context(), `UPDATE identity.users SET status = 'disabled' WHERE email = $1`, email)
+		return err
+	}); err != nil {
+		t.Fatalf("disable user: %v", err)
+	}
+
+	if _, err := svc.Refresh(t.Context(), pair.RefreshToken); err != ErrInvalidRefreshToken {
+		t.Fatalf("err = %v, want ErrInvalidRefreshToken", err)
+	}
+}
+
+// A corrupted stored hash must produce the same generic credential error as
+// any other login failure — never an internal error or a leak.
+func TestLoginMalformedStoredHashFailsClosed(t *testing.T) {
+	svc, db := testService(t)
+	email := "corrupt-hash@login.test"
+	defer cleanupUser(t, db, email)
+	seedUser(t, db, tenantA, email, "s3cret!", "active")
+
+	err := tenant.WithBypass(t.Context(), db, func(tx pgx.Tx) error {
+		_, err := tx.Exec(t.Context(), `UPDATE identity.users SET password_hash = 'not-a-phc-hash' WHERE email = $1`, email)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("corrupt hash: %v", err)
+	}
+
+	_, err = svc.Login(t.Context(), email, "s3cret!", "k|1")
+	if err == nil || err.Error() != ErrInvalidCredentials.Error() {
+		t.Fatalf("err = %v, want the shared invalid-credentials error", err)
 	}
 }
 

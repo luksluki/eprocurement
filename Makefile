@@ -1,20 +1,22 @@
-.PHONY: help install build lint test fmt compose-up compose-down compose-logs compose-ps seed seed-reset reset gen-proto
+.PHONY: help install build lint test fmt compose-up compose-down compose-logs compose-ps seed seed-reset reset gen-proto cover test-integration
 
 help: ## Show available targets
 	@echo "Available targets:"
-	@echo "  install       Install JS workspace dependencies (pnpm install)"
-	@echo "  build         Build Go services and JS packages"
-	@echo "  lint          Run Go vet and JS lint placeholders"
-	@echo "  test          Run Go and JS test placeholders"
-	@echo "  fmt           Format Go code (gofmt)"
-	@echo "  compose-up    Start local stack and wait for healthy services"
-	@echo "  compose-down  Stop local stack (keeps volumes)"
-	@echo "  compose-logs  Follow local stack logs"
-	@echo "  compose-ps    Show service health"
-	@echo "  seed          Reset demo data and generate the dataset"
-	@echo "  seed-reset    Wipe demo data (PostgreSQL + MongoDB)"
-	@echo "  reset         Drop volumes and recreate the local stack"
-	@echo "  gen-proto     Regenerate gen/go from proto/ (needs protoc; see docs/onboarding.md)"
+	@echo "  install          Install JS workspace dependencies (pnpm install)"
+	@echo "  build            Build Go services and JS packages"
+	@echo "  lint             Run Go vet and JS lint placeholders"
+	@echo "  test             Run Go and JS test placeholders"
+	@echo "  fmt              Format Go code (gofmt)"
+	@echo "  compose-up       Start local stack and wait for healthy services"
+	@echo "  compose-down     Stop local stack (keeps volumes)"
+	@echo "  compose-logs     Follow local stack logs"
+	@echo "  compose-ps       Show service health"
+	@echo "  seed             Reset demo data and generate the dataset"
+	@echo "  seed-reset       Wipe demo data (PostgreSQL + MongoDB)"
+	@echo "  reset            Drop volumes and recreate the local stack"
+	@echo "  gen-proto        Regenerate gen/go from proto/ (needs protoc; see docs/onboarding.md)"
+	@echo "  cover            Identity-domain coverage, enforced threshold (stack must be up)"
+	@echo "  test-integration Full go test ./... against the compose database"
 
 install: ## Install JS workspace dependencies
 	pnpm install
@@ -58,6 +60,11 @@ reset: ## Drop volumes and recreate the local stack
 
 PROTOC := $(shell command -v .tools/protoc/bin/protoc 2>/dev/null || command -v protoc 2>/dev/null)
 
+# Reads DATABASE_URL from .env (the compose stack) when TEST_DATABASE_URL is
+# not set in the environment.
+TEST_DATABASE_URL ?= $(shell sed -n 's/^DATABASE_URL=//p' .env 2>/dev/null)
+IDENTITY_COVERAGE_THRESHOLD ?= 80
+
 gen-proto: ## Regenerate gen/go from proto/
 	@test -n "$(PROTOC)" || (echo "protoc not found: install it into .tools/protoc (see docs/onboarding.md)" && exit 1)
 	PATH="$$PATH:$$(go env GOPATH)/bin" $(PROTOC) \
@@ -65,3 +72,14 @@ gen-proto: ## Regenerate gen/go from proto/
 		--go_out=. --go_opt=module=github.com/luksluki/eprocurement \
 		--go-grpc_out=. --go-grpc_opt=module=github.com/luksluki/eprocurement \
 		$$(find proto -name '*.proto')
+
+cover: ## Identity-domain coverage with enforced threshold (compose stack must be up)
+	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test ./services/identity/... -count=1 \
+		-coverprofile=coverage.out \
+		-coverpkg=./services/identity/auth,./services/identity/server,./services/identity/config
+	go tool cover -func=coverage.out | tail -1
+	@go tool cover -func=coverage.out | awk -v t=$(IDENTITY_COVERAGE_THRESHOLD) \
+		'/^total:/ {gsub("%","",$$3); if ($$3+0 < t) {print "FAIL: identity coverage " $$3 "% is below the " t "% threshold"; exit 1} print "OK: identity coverage " $$3 "% meets the " t "% threshold"}'
+
+test-integration: ## Full go test ./... against the compose database
+	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test ./... -count=1

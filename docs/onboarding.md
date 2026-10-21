@@ -107,6 +107,15 @@ make lint && make test
 
 These are the same gates CI runs. They must pass before you push.
 
+**Unit vs integration.** Plain `go test ./...` runs the unit tests; the DB-backed integration tests (auth flows, RLS, migrations) skip unless `TEST_DATABASE_URL` is set. With the compose stack up:
+
+```bash
+make test-integration   # full go test ./... against the compose database
+make cover              # identity-domain coverage; fails below the 80% threshold
+```
+
+CI runs the same suite with `TEST_DATABASE_URL` pointing at a Postgres service container and enforces the coverage threshold — so a change that only passes without the database never merges.
+
 You now have a working environment. Head to [CONTRIBUTING.md](../CONTRIBUTING.md) for the Git Flow workflow, or [`AGENTS.md`](../AGENTS.md) if you are an AI coding agent.
 
 ## 3. Environment variables
