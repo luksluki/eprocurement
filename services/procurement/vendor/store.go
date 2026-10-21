@@ -174,3 +174,64 @@ func mapWriteError(err error, what string) error {
 
 // RFC3339 renders a timestamp for API responses.
 func RFC3339(t time.Time) string { return t.UTC().Format(time.RFC3339) }
+
+// listPredicates is the shared WHERE clause of the list query and its
+// count fallback.
+const listPredicates = `WHERE ($1::text = '' OR status = $1::text)
+			  AND ($2::text = '' OR code LIKE $2::text || '%' OR name ILIKE '%' || $2::text || '%')`
+
+// List returns one page of vendors ordered by code plus the total number of
+// matching rows (across pages). Filters: status equality and a text query
+// that matches a code prefix or a name substring — escaped so user input
+// with % or _ is literal. The filter must come from ValidateList. The total
+// rides along as a window count; when the page is past the last row (no
+// rows emitted) an explicit COUNT recovers it.
+func (s *Store) List(ctx context.Context, tenantID string, f ListFilter) ([]Vendor, int, error) {
+	var (
+		vendors []Vendor
+		total   int
+	)
+	err := tenant.WithTenant(ctx, s.db, tenantID, func(tx pgx.Tx) error {
+		offset := (int(f.Page) - 1) * int(f.PageSize)
+		rows, err := tx.Query(ctx, `
+			SELECT `+vendorColumns+`, count(*) OVER() AS total_count
+			FROM procurement.vendors
+			`+listPredicates+`
+			ORDER BY code
+			LIMIT $3 OFFSET $4`,
+			f.Status, f.Query, f.PageSize, offset)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var v Vendor
+			var createdBy, updatedBy *string
+			if err := rows.Scan(&v.ID, &v.TenantID, &v.Code, &v.Name, &v.ContactEmail, &v.TaxID, &v.Status,
+				&v.CreatedAt, &createdBy, &v.UpdatedAt, &updatedBy, &total); err != nil {
+				return err
+			}
+			if createdBy != nil {
+				v.CreatedBy = *createdBy
+			}
+			if updatedBy != nil {
+				v.UpdatedBy = *updatedBy
+			}
+			vendors = append(vendors, v)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if len(vendors) == 0 {
+			// Past-the-end page: the window emitted nothing; count matches
+			// explicitly so callers still see the real total.
+			return tx.QueryRow(ctx,
+				`SELECT count(*) FROM procurement.vendors `+listPredicates, f.Status, f.Query).Scan(&total)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, 0, fmt.Errorf("vendor: list: %w", err)
+	}
+	return vendors, total, nil
+}

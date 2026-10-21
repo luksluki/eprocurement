@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"strconv"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -22,6 +23,7 @@ type VendorClient interface {
 	GetVendor(ctx context.Context, in *procurementv1.GetVendorRequest, opts ...grpc.CallOption) (*procurementv1.Vendor, error)
 	UpdateVendor(ctx context.Context, in *procurementv1.UpdateVendorRequest, opts ...grpc.CallOption) (*procurementv1.Vendor, error)
 	DeactivateVendor(ctx context.Context, in *procurementv1.DeactivateVendorRequest, opts ...grpc.CallOption) (*procurementv1.Vendor, error)
+	ListVendors(ctx context.Context, in *procurementv1.ListVendorsRequest, opts ...grpc.CallOption) (*procurementv1.ListVendorsResponse, error)
 }
 
 // registerVendorRoutes wires /api/v1/vendors: Bearer auth, RBAC, and the
@@ -31,6 +33,7 @@ type VendorClient interface {
 func registerVendorRoutes(app *fiber.App, verifier *token.Verifier, client VendorClient, documents DocumentsClient) {
 	vendors := app.Group("/api/v1/vendors", bearerAuth(verifier))
 
+	vendors.Get("/", RequirePermission(rbac.VendorRead), listVendors(client))
 	vendors.Post("/", RequirePermission(rbac.VendorWrite), createVendor(client))
 	vendors.Get("/:id", RequirePermission(rbac.VendorRead), getVendor(client, documents))
 	vendors.Patch("/:id", RequirePermission(rbac.VendorWrite), updateVendor(client))
@@ -150,6 +153,8 @@ var vendorMessages = map[string]string{
 	"vendor_code_invalid":   "vendor code must be 2-32 chars of A-Z, 0-9, -",
 	"vendor_name_invalid":   "vendor name must be 2-200 characters",
 	"vendor_email_invalid":  "contact email is not a valid address",
+	"vendor_status_invalid": "status must be active, deactivated, or empty",
+	"vendor_page_invalid":   "page is out of range",
 }
 
 // vendorError maps procurement's gRPC failures to HTTP with the machine code
@@ -193,5 +198,38 @@ func vendorJSON(v *procurementv1.Vendor) fiber.Map {
 		"created_by":    v.GetCreatedBy(),
 		"updated_at":    v.GetUpdatedAt(),
 		"updated_by":    v.GetUpdatedBy(),
+	}
+}
+
+// listVendors serves GET /api/v1/vendors: query params q (code prefix or
+// name substring), status, page, page_size — normalized and validated in
+// procurement.
+func listVendors(client VendorClient) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		claims, ok := claimsOf(c)
+		if !ok {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "missing bearer token"})
+		}
+		page, _ := strconv.Atoi(c.Query("page"))
+		pageSize, _ := strconv.Atoi(c.Query("page_size"))
+		resp, err := client.ListVendors(forwardContext(c, claims), &procurementv1.ListVendorsRequest{
+			Query:    strings.TrimSpace(c.Query("q")),
+			Status:   strings.TrimSpace(c.Query("status")),
+			Page:     int32(page),
+			PageSize: int32(pageSize),
+		})
+		if err != nil {
+			return vendorError(c, err)
+		}
+		out := make([]fiber.Map, 0, len(resp.GetVendors()))
+		for _, v := range resp.GetVendors() {
+			out = append(out, vendorJSON(v))
+		}
+		return c.JSON(fiber.Map{
+			"vendors":   out,
+			"total":     resp.GetTotal(),
+			"page":      resp.GetPage(),
+			"page_size": resp.GetPageSize(),
+		})
 	}
 }

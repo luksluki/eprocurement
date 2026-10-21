@@ -182,3 +182,85 @@ func TestVendorGRPCValidation(t *testing.T) {
 		t.Fatalf("no metadata: code = %v, want Unauthenticated", status.Code(err))
 	}
 }
+
+// ListVendors through the full gRPC wiring: pagination, filters, defaults,
+// validation, and cross-tenant isolation.
+func TestVendorGRPCList(t *testing.T) {
+	client, db, cleanup := startProcurement(t)
+	defer cleanup()
+
+	// Seed a small, exact set (cleaned by prefix).
+	seed := func(tenant, code, name string) {
+		t.Helper()
+		_, err := client.CreateVendor(callerCtx(tenant, rbac.RoleBuyer),
+			&procurementv1.CreateVendorRequest{Code: code, Name: name})
+		if err != nil {
+			t.Fatalf("create %s: %v", code, err)
+		}
+	}
+	seed(gTenantA, "L27-A", "PT Athaya Nusantara")
+	seed(gTenantA, "L27-B", "PT Bunda Sejahtera")
+	seed(gTenantA, "L27-C", "PT Cempaka Nusantara")
+	seed(gTenantB, "L27-A", "PT Athaya Nusantara") // other tenant, invisible
+	t.Cleanup(func() {
+		_ = tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+			_, err := tx.Exec(context.Background(),
+				`DELETE FROM procurement.vendors WHERE code LIKE 'L27-%'`)
+			return err
+		})
+	})
+
+	// Page defaults with a code-prefix query (the prefix also keeps the
+	// assertion independent of unrelated rows in the shared test tenants):
+	// page 1, page size 20; ordered by code; other tenant's row never
+	// appears.
+	resp, err := client.ListVendors(callerCtx(gTenantA, rbac.RoleViewer),
+		&procurementv1.ListVendorsRequest{Query: "l27-"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if resp.GetPage() != 1 || resp.GetPageSize() != 20 || resp.GetTotal() != 3 {
+		t.Fatalf("defaults: page=%d size=%d total=%d", resp.GetPage(), resp.GetPageSize(), resp.GetTotal())
+	}
+	if len(resp.GetVendors()) != 3 || resp.GetVendors()[0].GetCode() != "L27-A" {
+		t.Fatalf("vendors = %v", resp.GetVendors())
+	}
+
+	// Combined filters: name substring + status, still tenant-scoped.
+	resp, err = client.ListVendors(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.ListVendorsRequest{Query: "nusantara", Status: "active", Page: 1, PageSize: 2})
+	if err != nil {
+		t.Fatalf("combined: %v", err)
+	}
+	if resp.GetTotal() != 2 || len(resp.GetVendors()) != 2 || resp.GetPageSize() != 2 {
+		t.Fatalf("combined: total=%d rows=%d size=%d", resp.GetTotal(), len(resp.GetVendors()), resp.GetPageSize())
+	}
+
+	// Cross-tenant listing: tenant B sees only its own row.
+	resp, err = client.ListVendors(callerCtx(gTenantB, rbac.RoleViewer),
+		&procurementv1.ListVendorsRequest{Query: "l27-", PageSize: 50})
+	if err != nil {
+		t.Fatalf("tenantB list: %v", err)
+	}
+	if resp.GetTotal() != 1 || resp.GetVendors()[0].GetTenantId() != gTenantB {
+		t.Fatalf("tenantB sees %+v", resp.GetVendors())
+	}
+
+	// Validation: unknown status and absurd page are InvalidArgument with
+	// machine codes.
+	for _, req := range []*procurementv1.ListVendorsRequest{
+		{Status: "paused"},
+		{Page: 2000000},
+	} {
+		_, err := client.ListVendors(callerCtx(gTenantA, rbac.RoleViewer), req)
+		if status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("validation %+v: code = %v, want InvalidArgument", req, status.Code(err))
+		}
+	}
+
+	// No auth metadata: Unauthenticated.
+	if _, err := client.ListVendors(context.Background(),
+		&procurementv1.ListVendorsRequest{}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("anonymous: code = %v, want Unauthenticated", status.Code(err))
+	}
+}

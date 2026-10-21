@@ -99,7 +99,9 @@ func mapVendorError(err error) error {
 	case errors.Is(err, vendor.ErrCodeInvalid),
 		errors.Is(err, vendor.ErrNameInvalid),
 		errors.Is(err, vendor.ErrEmailInvalid),
-		errors.Is(err, vendor.ErrIDInvalid):
+		errors.Is(err, vendor.ErrIDInvalid),
+		errors.Is(err, vendor.ErrStatusInvalid),
+		errors.Is(err, vendor.ErrPageInvalid):
 		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, vendor.ErrDuplicateCode):
 		return status.Error(codes.AlreadyExists, err.Error())
@@ -119,4 +121,30 @@ func vendorPB(v vendor.Vendor) *procurementv1.Vendor {
 		CreatedAt: vendor.RFC3339(v.CreatedAt), CreatedBy: v.CreatedBy,
 		UpdatedAt: vendor.RFC3339(v.UpdatedAt), UpdatedBy: v.UpdatedBy,
 	}
+}
+
+func (a *api) ListVendors(ctx context.Context, req *procurementv1.ListVendorsRequest) (*procurementv1.ListVendorsResponse, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	filter, err := vendor.ValidateList(vendor.ListFilter{
+		Query: req.GetQuery(), Status: req.GetStatus(),
+		Page: req.GetPage(), PageSize: req.GetPageSize(),
+	})
+	if err != nil {
+		return nil, mapVendorError(err)
+	}
+	vendors, total, err := a.store.List(ctx, auth.TenantID, filter)
+	if err != nil {
+		return nil, mapVendorError(err)
+	}
+	out := &procurementv1.ListVendorsResponse{
+		Total: int32(total), Page: filter.Page, PageSize: filter.PageSize,
+		Vendors: make([]*procurementv1.Vendor, 0, len(vendors)),
+	}
+	for _, v := range vendors {
+		out.Vendors = append(out.Vendors, vendorPB(v))
+	}
+	return out, nil
 }

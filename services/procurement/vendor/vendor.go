@@ -37,6 +37,8 @@ var (
 	ErrDuplicateCode = errors.New("vendor_duplicate_code")
 	ErrNotFound      = errors.New("vendor_not_found")
 	ErrDeactivated   = errors.New("vendor_deactivated")
+	ErrStatusInvalid = errors.New("vendor_status_invalid")
+	ErrPageInvalid   = errors.New("vendor_page_invalid")
 )
 
 var (
@@ -71,4 +73,59 @@ func ValidateUpdate(name, email string) error {
 		return ErrEmailInvalid
 	}
 	return nil
+}
+
+// Vendor lifecycle statuses.
+const (
+	StatusActive      = "active"
+	StatusDeactivated = "deactivated"
+)
+
+// List bounds for pagination.
+const (
+	DefaultPageSize = 20
+	MaxPageSize     = 100
+	MaxPage         = 1000000
+)
+
+// ListFilter is the vendor-list query: a free-text match (code prefix or
+// name substring), an optional status, and server-side pagination. Zero
+// values fall back to the defaults; ordering is fixed by code ascending.
+type ListFilter struct {
+	Query    string
+	Status   string
+	Page     int32
+	PageSize int32
+}
+
+// ValidateList normalizes and validates the filter: status must be a known
+// value (or empty), page/page_size are clamped into range, and the query is
+// trimmed and uppercased (codes are stored uppercase) with LIKE wildcards
+// escaped so user input matches literally.
+func ValidateList(f ListFilter) (ListFilter, error) {
+	f.Status = strings.TrimSpace(f.Status)
+	if f.Status != "" && f.Status != StatusActive && f.Status != StatusDeactivated {
+		return f, ErrStatusInvalid
+	}
+	if f.Page < 1 {
+		f.Page = 1
+	}
+	if f.Page > MaxPage {
+		return f, ErrPageInvalid
+	}
+	if f.PageSize < 1 {
+		f.PageSize = DefaultPageSize
+	}
+	if f.PageSize > MaxPageSize {
+		f.PageSize = MaxPageSize
+	}
+	f.Query = escapeLike(strings.ToUpper(strings.TrimSpace(f.Query)))
+	return f, nil
+}
+
+// escapeLike neutralizes LIKE/ILIKE wildcards so a query containing %, _,
+// or \ matches those literal characters.
+func escapeLike(s string) string {
+	r := strings.NewReplacer(`\`, `\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
 }
