@@ -33,8 +33,36 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
+      mongo:
+        image: mongo:7.0
+        env:
+          MONGO_INITDB_ROOT_USERNAME: eprocurement
+          MONGO_INITDB_ROOT_PASSWORD: eprocurement
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ ping: 1 }).ok' | grep 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+      minio:
+        image: bitnamilegacy/minio:2025.7.23-debian-12-r5
+        env:
+          MINIO_ROOT_USER: eprocurement
+          MINIO_ROOT_PASSWORD: eprocurement
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
     env:
       TEST_DATABASE_URL: postgres://eprocurement:eprocurement@localhost:5432/eprocurement?sslmode=disable
+      TEST_MONGO_URI: mongodb://eprocurement:eprocurement@localhost:27017/?authSource=admin
+      TEST_S3_ENDPOINT: localhost:9000
+      TEST_S3_ACCESS_KEY: eprocurement
+      TEST_S3_SECRET_KEY: eprocurement
     steps:
       - uses: actions/checkout@v4
 

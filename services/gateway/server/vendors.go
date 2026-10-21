@@ -25,14 +25,19 @@ type VendorClient interface {
 }
 
 // registerVendorRoutes wires /api/v1/vendors: Bearer auth, RBAC, and the
-// verified claims propagated to procurement as gRPC metadata.
-func registerVendorRoutes(app *fiber.App, verifier *token.Verifier, client VendorClient) {
+// verified claims propagated to procurement as gRPC metadata. When the
+// documents client is present, attachment routes are added and vendor
+// detail responses embed attachment metadata.
+func registerVendorRoutes(app *fiber.App, verifier *token.Verifier, client VendorClient, documents DocumentsClient) {
 	vendors := app.Group("/api/v1/vendors", bearerAuth(verifier))
 
 	vendors.Post("/", RequirePermission(rbac.VendorWrite), createVendor(client))
-	vendors.Get("/:id", RequirePermission(rbac.VendorRead), getVendor(client))
+	vendors.Get("/:id", RequirePermission(rbac.VendorRead), getVendor(client, documents))
 	vendors.Patch("/:id", RequirePermission(rbac.VendorWrite), updateVendor(client))
 	vendors.Post("/:id/deactivate", RequirePermission(rbac.VendorWrite), deactivateVendor(client))
+	if documents != nil {
+		registerAttachmentRoutes(vendors, verifier, client, documents)
+	}
 }
 
 // forwardContext attaches the verified claims as outgoing gRPC metadata —
@@ -76,7 +81,7 @@ func createVendor(client VendorClient) fiber.Handler {
 	}
 }
 
-func getVendor(client VendorClient) fiber.Handler {
+func getVendor(client VendorClient, documents DocumentsClient) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		claims, ok := claimsOf(c)
 		if !ok {
@@ -86,7 +91,15 @@ func getVendor(client VendorClient) fiber.Handler {
 		if err != nil {
 			return vendorError(c, err)
 		}
-		return c.JSON(vendorJSON(v))
+		out := vendorJSON(v)
+		if documents != nil {
+			attachments, err := listVendorAttachments(forwardContext(c, claims), v.GetId(), documents)
+			if err != nil {
+				return attachmentError(c, err)
+			}
+			out["attachments"] = attachments
+		}
+		return c.JSON(out)
 	}
 }
 

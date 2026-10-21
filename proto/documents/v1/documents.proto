@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package documents.v1;
+
+option go_package = "github.com/luksluki/eprocurement/gen/go/documents/v1;documentsv1";
+
+// Documents owns attachment metadata (MongoDB document_meta) and the MinIO
+// object lifecycle (presigned upload/download, verification, orphan
+// cleanup). Reachable only inside the backend network; clients go through
+// the gateway. Callers upload bytes directly to the presigned URL — files
+// never stream through gateway or this service.
+service Documents {
+  // CreateUpload validates the declaration (mime allowlist, size limit,
+  // sha256 checksum) and returns a presigned PUT URL plus pending
+  // attachment metadata. The caller's tenant and user come from the auth
+  // metadata (x-tenant-id / x-user-id / x-role) injected by the gateway.
+  rpc CreateUpload(CreateUploadRequest) returns (CreateUploadResponse);
+  // CompleteUpload verifies the uploaded object (size, content type, sha256
+  // checksum) and marks the attachment ready. On mismatch the object is
+  // deleted, the metadata stays pending, and a typed error comes back — the
+  // caller may upload correct bytes and complete again.
+  rpc CompleteUpload(CompleteUploadRequest) returns (Attachment);
+  // ListAttachments returns the attachments of one owner (e.g. a vendor),
+  // pending and ready, oldest first.
+  rpc ListAttachments(ListAttachmentsRequest) returns (ListAttachmentsResponse);
+  // GetDownloadUrl returns a presigned GET URL for a ready attachment.
+  rpc GetDownloadUrl(GetDownloadUrlRequest) returns (GetDownloadUrlResponse);
+}
+
+message Attachment {
+  string id = 1;
+  string tenant_id = 2;
+  string entity_type = 3;    // owner kind, "vendor" today
+  string entity_id = 4;      // owner id, e.g. the vendor uuid
+  string filename = 5;       // display name
+  string mime_type = 6;
+  int64 size_bytes = 7;      // declared at create, verified at complete
+  string checksum_sha256 = 8; // lowercase hex
+  string status = 9;         // "pending" | "ready"
+  string object_key = 10;    // attachments/{tenant}/{entity}/{uuid}
+  string created_by = 11;    // user id
+  string created_at = 12;    // RFC 3339
+  string uploaded_at = 13;   // RFC 3339, set when ready
+}
+
+message CreateUploadRequest {
+  string entity_type = 1;
+  string entity_id = 2;
+  string filename = 3;
+  string mime_type = 4;
+  int64 size_bytes = 5;
+  string checksum_sha256 = 6;
+}
+
+message CreateUploadResponse {
+  Attachment attachment = 1;
+  string upload_url = 2;  // presigned PUT target on MinIO
+  string method = 3;      // always "PUT"
+  string expires_at = 4;  // RFC 3339
+}
+
+message CompleteUploadRequest {
+  string attachment_id = 1;
+}
+
+message ListAttachmentsRequest {
+  string entity_type = 1;
+  string entity_id = 2;
+}
+
+message ListAttachmentsResponse {
+  repeated Attachment attachments = 1;
+}
+
+message GetDownloadUrlRequest {
+  string attachment_id = 1;
+}
+
+message GetDownloadUrlResponse {
+  Attachment attachment = 1;
+  string download_url = 2; // presigned GET target on MinIO
+  string expires_at = 3;   // RFC 3339
+}
