@@ -58,6 +58,14 @@ jobs:
       - name: Test
         run: go test ./...
 
+      - name: Coverage (identity domain, threshold 80%)
+        run: |
+          go test ./services/identity/... -count=1 \
+            -coverprofile=coverage.out \
+            -coverpkg=./services/identity/auth,./services/identity/server,./services/identity/config
+          go tool cover -func=coverage.out | tail -1
+          go tool cover -func=coverage.out | awk '/^total:/ {gsub("%","",$3); if ($3+0 < 80) {print "identity coverage "$3"% is below the 80% threshold"; exit 1}}'
+
   web:
     name: Web · install · build · lint · test
     runs-on: ubuntu-latest

@@ -54,3 +54,23 @@ func TestVerifyRejectsMalformedHashes(t *testing.T) {
 func TestDummyVerifyIsSafe(t *testing.T) {
 	DummyVerify("anything") // must not panic; cost only
 }
+
+// A fixed PHC vector pins the hashing parameters: any accidental change to
+// time/memory/threads or the encoding breaks existing stored hashes, and this
+// test fails before a single user is written with the new parameters.
+func TestPasswordHashVector(t *testing.T) {
+	const vector = "$argon2id$v=19$m=65536,t=2,p=4$wuAo39rHwgFKqUYm6dEypw$B2Ff0RNOx+eLm5c/8wg7Zxymh3VGfVMIP3IBeN3vTZs"
+
+	ok, err := VerifyPassword("vector-password-2026", vector)
+	if err != nil {
+		t.Fatalf("vector verify error: %v", err)
+	}
+	if !ok {
+		t.Fatal("fixed vector no longer verifies — hashing parameters changed?")
+	}
+
+	ok, _ = VerifyPassword("wrong", vector)
+	if ok {
+		t.Fatal("wrong password accepted against vector")
+	}
+}

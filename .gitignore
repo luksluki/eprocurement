@@ -36,3 +36,4 @@ data/
 # OS temp
 .openclaw/
 .tools/
+coverage.out
