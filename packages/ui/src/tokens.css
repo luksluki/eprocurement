@@ -1,0 +1,43 @@
+/* Design tokens for @eprocurement/ui (Tailwind v4 @theme).
+   Imported by apps/web/src/app/globals.css; utilities generated from these
+   tokens are used by the components in this package. Text token contrast is
+   WCAG-AA checked against their intended surfaces — computed ratios are
+   recorded in docs/dev-notes/051-design-system-tables-i18n.md. */
+
+@theme {
+  /* Surfaces */
+  --color-canvas: #f8fafc; /* slate-50, page background */
+  --color-surface: #ffffff; /* cards and tables */
+  --color-line: #e2e8f0; /* slate-200, card/table borders */
+  --color-line-soft: #f1f5f9; /* slate-100, row separators */
+  --color-line-strong: #cbd5e1; /* slate-300, input borders */
+
+  /* Text (AA on canvas and surface — see dev note 051 for ratios) */
+  --color-ink: #0f172a; /* slate-900, headings and body */
+  --color-ink-muted: #334155; /* slate-700, secondary text */
+  --color-ink-subtle: #475569; /* slate-600, table headers and muted text */
+
+  /* Brand actions */
+  --color-brand: #0f172a; /* primary button background, white label */
+  --color-brand-strong: #1e293b; /* primary hover state */
+
+  /* Feedback */
+  --color-success-bg: #ecfdf5; /* emerald-50 */
+  --color-success-fg: #047857; /* emerald-700 */
+  --color-danger-bg: #fef2f2; /* red-50 */
+  --color-danger-fg: #b91c1c; /* red-700 */
+
+  /* Keyboard focus ring (non-text UI component: WCAG 1.4.11, 3:1 minimum) */
+  --color-ring: #1d4ed8; /* blue-700 */
+}
+
+/* Keyboard focus ring for interactive design-system components. Applied on
+   :focus-visible only, so pointer interactions stay visually clean while
+   keyboard focus is always visible (PRD §19 accessibility). This utility is
+   the marker asserted by apps/web/scripts/assert-ui-css.mjs. */
+@utility focus-ring {
+  &:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+}

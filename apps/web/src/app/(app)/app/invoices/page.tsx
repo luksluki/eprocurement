@@ -1,13 +1,9 @@
 import PlaceholderPage from "../../PlaceholderPage";
+import { getDictionary } from "@/i18n/server";
 
 export const dynamic = "force-dynamic";
 
-export default function InvoicesPage() {
-  return (
-    <PlaceholderPage
-      title="Invoices"
-      description="Invoice list and detail with 3-way match results and tolerance configuration."
-      milestone="M3 — invoice matching"
-    />
-  );
+export default async function InvoicesPage() {
+  const p = (await getDictionary()).pages.invoices;
+  return <PlaceholderPage title={p.title} description={p.description} milestone={p.milestone} />;
 }

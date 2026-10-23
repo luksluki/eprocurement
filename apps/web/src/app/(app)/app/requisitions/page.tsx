@@ -1,13 +1,9 @@
 import PlaceholderPage from "../../PlaceholderPage";
+import { getDictionary } from "@/i18n/server";
 
 export const dynamic = "force-dynamic";
 
-export default function RequisitionsPage() {
-  return (
-    <PlaceholderPage
-      title="Requisitions"
-      description="Purchase requisition list with filters and pagination, plus the multi-step create form (details → items → attachments → review)."
-      milestone="M2 — PR CRUD & approval engine"
-    />
-  );
+export default async function RequisitionsPage() {
+  const p = (await getDictionary()).pages.requisitions;
+  return <PlaceholderPage title={p.title} description={p.description} milestone={p.milestone} />;
 }
