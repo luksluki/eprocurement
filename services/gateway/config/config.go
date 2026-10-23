@@ -3,6 +3,7 @@ package config
 
 import (
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -15,6 +16,7 @@ type Config struct {
 	DocumentsAddr   string        // DOCUMENTS_ADDR — documents gRPC host:port
 	JWKSCacheTTL    time.Duration // JWKS_CACHE_TTL (default 5m)
 	LogLevel        string        // LOG_LEVEL (default "info")
+	LoginRatePerMin int           // GATEWAY_LOGIN_RATE_PER_MIN — per-IP login limiter budget (default 30)
 }
 
 // Load reads the configuration from the environment.
@@ -27,6 +29,7 @@ func Load() Config {
 		DocumentsAddr:   envOr("DOCUMENTS_ADDR", "localhost:8083"),
 		JWKSCacheTTL:    envDuration("JWKS_CACHE_TTL", 5*time.Minute),
 		LogLevel:        envOr("LOG_LEVEL", "info"),
+		LoginRatePerMin: envInt("GATEWAY_LOGIN_RATE_PER_MIN", 30),
 	}
 }
 
@@ -41,6 +44,15 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			return d
+		}
+	}
+	return fallback
+}
+
+func envInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
 		}
 	}
 	return fallback

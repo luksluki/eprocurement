@@ -36,6 +36,8 @@ type ProcurementClient interface {
 type gatewayOptions struct {
 	procurement ProcurementClient
 	documents   DocumentsClient
+	identity    IdentityClient
+	loginLimit  *loginLimiter
 }
 
 // WithProcurement proxies the procurement API under /api/v1/vendors and
@@ -49,6 +51,16 @@ func WithProcurement(client ProcurementClient) Option {
 // detail responses. Requires WithProcurement.
 func WithDocuments(client DocumentsClient) Option {
 	return func(o *gatewayOptions) { o.documents = client }
+}
+
+// WithIdentity proxies identity's auth API under the public /api/v1/auth
+// routes (login/refresh/logout, no Bearer required). loginRatePerMin bounds
+// login per client IP; <=0 falls back to the default budget.
+func WithIdentity(client IdentityClient, loginRatePerMin int) Option {
+	return func(o *gatewayOptions) {
+		o.identity = client
+		o.loginLimit = newLoginLimiter(loginRatePerMin)
+	}
 }
 
 // New builds the fiber app.
@@ -75,8 +87,17 @@ func New(log *slog.Logger, verifier *token.Verifier, opts ...Option) *fiber.App 
 	app.Get("/healthz", healthz(verifier))
 	app.Get("/.well-known/jwks.json", jwks(verifier))
 
-	v1 := app.Group("/api/v1", bearerAuth(verifier))
-	v1.Get("/me", me)
+	// /api/v1/me stays behind Bearer auth. Note: a group-level middleware
+	// here (app.Group("/api/v1", bearerAuth(...))) would also swallow the
+	// public /api/v1/auth/* routes — Fiber group middleware matches by
+	// prefix — so protected routes attach the verifier per route/group of
+	// their own (see vendors/requisitions/auth registrations).
+	app.Get("/api/v1/me", bearerAuth(verifier), me)
+	if o.identity != nil {
+		// Public auth routes: no Bearer required (ADR-0001 — login is the
+		// only identity surface exposed to clients).
+		registerAuthRoutes(app, o.identity, o.loginLimit)
+	}
 	if o.procurement != nil {
 		registerVendorRoutes(app, verifier, o.procurement, o.documents)
 		registerRequisitionRoutes(app, verifier, o.procurement)

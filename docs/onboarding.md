@@ -210,6 +210,52 @@ go run ./scripts/seed --tenants 2 --requisitions 10000 --events 100000
 
 All flags: `--dsn`, `--mongo-uri`, `--mongo-db`, `--tenants`, `--vendors-per-tenant`, `--requisitions`, `--events`, `--seed`, `--reset`.
 
+### 5.1 Demo tenant admins, the web shell, and tenant-scoped app data
+
+The seed only writes the isolated `demo` schema — `identity.users` and `procurement.vendors` start **empty**, so the web shell (issue #50) needs a one-time manual setup. Full env reference: `apps/web/.env.example`.
+
+1. **Create two tenant admins with *different* emails** via `cmd/useradmin` (tenant UUIDs are manual — there is no tenants table or endpoint):
+
+   ```bash
+   go run ./services/identity/cmd/useradmin \
+     -email admin@acme.example -password 'demo-password' \
+     -tenant-id 11111111-1111-1111-1111-111111111111 -role admin -name "Acme Admin"
+   go run ./services/identity/cmd/useradmin \
+     -email admin@glow.example -password 'demo-password' \
+     -tenant-id 22222222-2222-2222-2222-222222222222 -role admin -name "Glow Admin"
+   ```
+
+   > **Emails must be unique across tenants.** The schema allows the same address in two tenants, but login then matches two users and identity deliberately fails those logins with the same generic `invalid email or password` error (anti-enumeration, `docs/schema/identity.md`) — it looks like a bug in the switcher but is not.
+
+2. **Log in once per tenant and seed a few vendors each** (the web app is a BFF — scripts may not call it directly; use the gateway):
+
+   ```bash
+   # tenant A
+   curl -s -X POST localhost:8080/api/v1/auth/login \
+     -H 'content-type: application/json' \
+     -d '{"email":"admin@acme.example","password":"demo-password"}'
+   curl -s -X POST localhost:8080/api/v1/vendors \
+     -H "authorization: Bearer $TOKEN_A" -H 'content-type: application/json' \
+     -d '{"code":"ACME-01","name":"PT Acme Supplies","contact_email":"sales@acme.example","tax_id":"01.111.111.1-011.111"}'
+   # tenant B — different codes (codes are unique per tenant, so the same code
+   # in both tenants is also fine, but distinct codes make the demo clearer)
+   ```
+
+   Rerunning a create with the same code returns `409 vendor_duplicate_code` — safe to ignore. Admins implicitly hold every permission (`docs/rbac.md`), so no extra roles are needed.
+
+3. **Run the web app** against the local gateway:
+
+   ```bash
+   cp apps/web/.env.example apps/web/.env.local
+   # edit apps/web/.env.local: DEMO_TENANTS=acme=admin@acme.example,glow=admin@glow.example
+   # and DEMO_ADMIN_PASSWORD=demo-password
+   pnpm dev    # http://localhost:3000
+   ```
+
+4. **Verify tenant isolation:** sign in as one admin, open *Vendors*, then use the header's tenant switcher — the vendor list must change to the other tenant's data (acceptance criterion of #50).
+
+> **Two rate-limit traps while demoing.** Identity throttles logins to 5/min per email (all switcher re-logins share the gateway's address from identity's point of view), so switching tenants more than ~5 times in a minute yields a 429 — wait a minute. Separately, the gateway throttles login per IP at `GATEWAY_LOGIN_RATE_PER_MIN` (default 30/min), which the BFF shares; both limits reset on their own.
+
 ## 6. Troubleshooting
 
 **`make: command not found` (Windows)** — install GNU Make (`scoop install make`, `choco install make`, or `sudo apt install make` in WSL2), then run from Git Bash or WSL2. Verify with `make --version`.

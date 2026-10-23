@@ -1,3 +1,9 @@
 packages:
   - "apps/*"
   - "packages/*"
+
+# Build-script review (pnpm 11+ allowBuilds). unrs-resolver (pulled in via
+# eslint-config-next) ships prebuilt platform bindings as optionalDependencies;
+# its postinstall is a legacy fallback we explicitly decline to run.
+allowBuilds:
+  unrs-resolver: false

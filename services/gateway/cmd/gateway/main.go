@@ -65,11 +65,12 @@ func run() error {
 	defer func() { _ = documentsConn.Close() }()
 
 	app := server.New(log, verifier,
+		server.WithIdentity(identityv1.NewIdentityClient(conn), cfg.LoginRatePerMin),
 		server.WithProcurement(procurementv1.NewProcurementClient(procurementConn)),
 		server.WithDocuments(documentsv1.NewDocumentsClient(documentsConn)))
 	log.Info("starting gateway", "port", cfg.Port,
 		"identity_addr", cfg.IdentityAddr, "procurement_addr", cfg.ProcurementAddr,
-		"documents_addr", cfg.DocumentsAddr)
+		"documents_addr", cfg.DocumentsAddr, "login_rate_per_min", cfg.LoginRatePerMin)
 
 	go func() {
 		<-ctx.Done()
