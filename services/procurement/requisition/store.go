@@ -215,7 +215,14 @@ func (s *Store) UpdateItems(ctx context.Context, tenantID, id string, items []It
 // is recorded in the same transaction as the transition; a key already used
 // by a different requisition of the tenant trips the partial unique index
 // (23505 → ErrIdempotencyKeyConflict).
-func (s *Store) Submit(ctx context.Context, tenantID, id, actor, idempotencyKey string) (Requisition, error) {
+//
+// materialize runs inside the same transaction right after the successful
+// draft → submitted UPDATE (never on a replay): the approval engine (#30)
+// evaluates the tenant's rules and inserts the materialized approval steps
+// here, so a submit without applicable rules (approval.ErrRulesMissing) rolls
+// the whole submit back — status stays draft and the idempotency key is not
+// recorded. It is nil in tests that exercise the requisition store alone.
+func (s *Store) Submit(ctx context.Context, tenantID, id, actor, idempotencyKey string, materialize func(tx pgx.Tx, r Requisition) error) (Requisition, error) {
 	if _, err := uuid.Parse(id); err != nil {
 		return Requisition{}, ErrIDInvalid
 	}
@@ -250,6 +257,11 @@ func (s *Store) Submit(ctx context.Context, tenantID, id, actor, idempotencyKey 
 			}
 			return mapSubmitWriteError(err)
 		}
+		if materialize != nil {
+			if err := materialize(tx, updated); err != nil {
+				return err // rolls the whole submit back with the steps
+			}
+		}
 		updated.Items = append([]Item(nil), agg.Items...)
 		out = updated
 		return nil
@@ -258,6 +270,15 @@ func (s *Store) Submit(ctx context.Context, tenantID, id, actor, idempotencyKey 
 		return Requisition{}, wrap("submit", err)
 	}
 	return out, nil
+}
+
+// LoadForUpdate loads one requisition (header plus items) inside tx under
+// the row lock. Exported for the approval store (#30), whose Decide runs in
+// a transaction that serializes on the same requisition row lock as
+// submit/edit; RLS makes other tenants' rows invisible (ErrNotFound).
+func LoadForUpdate(ctx context.Context, tx pgx.Tx, id string) (Requisition, error) {
+	stored, err := loadForUpdate(ctx, tx, id, true)
+	return stored.Requisition, err
 }
 
 // wrap adds context to unexpected failures but passes the machine-code

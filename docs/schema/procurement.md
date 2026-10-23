@@ -94,6 +94,97 @@ submit fails with 23505 and maps to `requisition_idempotency_key_conflict`
 covers tables created later; the explicit `GRANT SELECT, INSERT, UPDATE` is
 the same belt-and-braces as 0003.
 
+## Migration 0005 — `procurement.approval_rules` / `procurement.approval_steps` (#30)
+
+The storage mirror of the `approval` domain package. Rules are the live
+per-tenant configuration; steps are the per-requisition **snapshot** a
+submit takes of the rules that matched — replacing rules never rewrites
+steps that already exist.
+
+`procurement.approval_rules` (one row per rule; the tenant's whole set is
+replaced atomically by the configure API):
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | `gen_random_uuid()` |
+| `tenant_id` | uuid NOT NULL | RLS scoping key |
+| `currency` | text NOT NULL | CHECK `IDR` \| `USD` — a rule only matches a requisition in its own currency |
+| `step_no` | integer NOT NULL | CHECK `> 0`; `UNIQUE (tenant_id, currency, step_no)` — position in that currency's chain |
+| `role_required` | text NOT NULL | CHECK one of the six fixed roles — deciders must hold it (see below) |
+| `threshold_cents` | bigint NOT NULL | CHECK `>= 0`; the rule applies when `total_cents >= threshold_cents` (inclusive lower bound) |
+| `created_at`/`updated_at` | timestamptz | |
+
+`procurement.approval_steps` (no `tenant_id` — PRD §13; tenancy derives
+from the parent requisition, exactly like `requisition_items`):
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | `gen_random_uuid()`; the decide API's `{stepId}` |
+| `requisition_id` | uuid NOT NULL | FK → `requisitions (id)` ON DELETE CASCADE |
+| `step_no` | integer NOT NULL | CHECK `> 0`; `UNIQUE (requisition_id, step_no)` |
+| `role_required` | text NOT NULL | snapshot of the rule's role |
+| `threshold_cents` | bigint NOT NULL | snapshot of the rule's threshold |
+| `status` | text NOT NULL DEFAULT `pending` | CHECK `pending` \| `approved` \| `rejected` \| `skipped` |
+| `decided_by` | uuid NULL | the decider; empty while pending/skipped |
+| `decided_at` | timestamptz NULL | |
+| `reason` | text NOT NULL DEFAULT '' | required on reject, optional on approve |
+| `created_at` | timestamptz NOT NULL | |
+
+Indexes: `approval_rules_tenant_currency_step_uidx UNIQUE (tenant_id,
+currency, step_no)`; `approval_rules_tenant_idx (tenant_id)`;
+`approval_steps_requisition_stepno_uidx UNIQUE (requisition_id, step_no)`;
+`approval_steps_requisition_idx (requisition_id)`.
+
+**RLS**: rules carry `tenant_id` directly (0001 pattern); steps use the
+items pattern — the policy derives tenancy from the parent requisition via
+`EXISTS`, so cross-tenant step access is indistinguishable from missing
+(404 `approval_step_not_found`).
+
+### Approval lifecycle (#30)
+
+- **Rule administration** — `GET`/`PUT /api/v1/approval-rules`
+  (`approval:configure`, admin-only by matrix). PUT replaces the tenant's
+  whole set in one transaction (delete + insert); the empty set is legal.
+  Domain validation: currency ∈ {IDR, USD}, role in the six-role catalog,
+  threshold ≥ 0, step_no > 0 and unique per currency.
+- **Submit materialization (matrix model)** — submit evaluates **every**
+  tenant rule with `currency` matching the requisition and
+  `threshold_cents <= total_cents` (inclusive lower bound), not just the
+  highest threshold: each match becomes one `pending` step, ordered by
+  `step_no`. No applicable rule → `approval_rules_missing` (HTTP 412) and
+  the **whole submit transaction rolls back**: the requisition stays a
+  draft, no steps exist, and the submit idempotency key is **not** recorded
+  (it is written only by the successful UPDATE) — retrying the same key
+  after configuring rules behaves as a fresh submit. The pinned replay
+  contract for successful submits is unchanged.
+- **Steps are in-band** — the submit and decide responses embed the
+  requisition's `approval_steps` (ids included). There is no step read
+  endpoint yet (#31/#32-34 own timeline/queue); a client chains
+  submit → decide → decide purely from responses.
+- **Decide** — `POST /api/v1/approvals/{stepId}/decide`
+  (`approval:decide`): `{"decision": "approve"|"reject", "reason": "…"}`
+  (decision required; reason required on reject after trimming, optional on
+  approve, ≤ 1000 chars at the edge and the service layer). Only the
+  **current** step — the smallest pending `step_no` of a requisition in
+  `submitted` — may be decided; anything else → 409
+  `approval_step_not_current`. Authorization beyond the permission: the
+  decider must not be the requester (`approval_self_forbidden`, **no admin
+  exception**) and must hold the step's `role_required`
+  (`approval_role_forbidden`; admins excepted, mirroring `rbac.Check` and
+  the requisition ownership rule). Because `approval:decide` is
+  approver-only in the matrix, **a rule with role R can only be decided by
+  a user who holds both R and `approval:decide` (i.e. R + approver), or by
+  an admin.** A reject marks the step `rejected`, every later pending step
+  `skipped`, and the requisition `rejected` (terminal); approving the last
+  pending step approves the requisition. Decisions serialize on the parent
+  requisition row `FOR UPDATE` inside the same `tenant.WithTenant`
+  transaction as submit/edit — concurrent decides on one step yield exactly
+  one winner, the others 409.
+- **Events** — every step decision records `approval_step_approved` /
+  `approval_step_rejected` on the step aggregate; the terminal transitions
+  reuse the existing `requisition_approved` / `requisition_rejected`. All
+  flow through `Events()`/`PullEvents()` and are not persisted yet (#45).
+
 ## Requisition state machine (#28)
 
 Seven legal edges (loose cancel — maintainer decision on #28):
@@ -112,7 +203,20 @@ Error codes: `requisition_currency_invalid`, `requisition_description_invalid`,
 `requisition_idempotency_key_invalid` → 400 · `requisition_illegal_transition` → 409
 · `requisition_idempotency_key_conflict` → 409 · `requisition_not_found` → 404 ·
 `requisition_forbidden` → 403 (domain/store sentinel → gRPC code in the
-procurement server; the gateway maps `Aborted` → HTTP 409 — live since #29).
+procurement server; the gateway maps `Aborted` → HTTP 409 — live since #29) ·
+`approval_rules_missing` → 412 (#30: submit found no applicable rule and rolled
+back).
+
+Approval error codes (#30): `approval_rule_currency_invalid`,
+`approval_rule_role_invalid`, `approval_rule_threshold_invalid`,
+`approval_rule_step_no_invalid`, `approval_rule_step_no_duplicate`,
+`approval_decision_invalid`, `approval_reason_required`,
+`approval_reason_invalid` (reason over 1000 chars),
+`approval_step_id_invalid` → 400 · `approval_step_not_current` → 409 ·
+`approval_step_not_found` → 404 (also the cross-tenant answer, via the
+transitive RLS policy) · `approval_self_forbidden`,
+`approval_role_forbidden` → 403 · `approval_rules_missing` → 412. The
+gateway carries them through the shared gRPC→HTTP mapping.
 
 ## Lifecycle
 
@@ -142,14 +246,16 @@ missing (404 `requisition_not_found`).
   serialize on the row lock; the mutation also guards on `status = 'draft'`).
 - **Submit** — `POST /api/v1/requisitions/{id}/submit`: draft → submitted;
   the basket must hold at least one valid line (empty → 400
-  `requisition_items_empty`, invalid line → the line's 400 code). The
-  optional `Idempotency-Key` header (1–64 chars after trimming, else 400
-  `requisition_idempotency_key_invalid`) names the submit: replaying the same
-  key **returns the requisition's current state as-is** (no second
-  transition, no 409), whatever it has moved on to since — a contract pinned
-  for #30/#31, when submitted requisitions can advance further. Reusing the
-  key for another requisition in the tenant → 409
-  `requisition_idempotency_key_conflict`.
+  `requisition_items_empty`, invalid line → the line's 400 code) **and at
+  least one applicable approval rule must exist** (none → 412
+  `approval_rules_missing`, whole submit rolled back — see the approval
+  lifecycle above). The optional `Idempotency-Key` header (1–64 chars after
+  trimming, else 400 `requisition_idempotency_key_invalid`) names the
+  submit: replaying the same key **returns the requisition's current state
+  as-is** (no second transition, no 409), whatever it has moved on to
+  since — a contract pinned for #30/#31. Reusing the key for another
+  requisition in the tenant → 409 `requisition_idempotency_key_conflict`.
+  The response embeds the materialized `approval_steps` (ids in-band).
 
 ## Error codes
 
@@ -161,7 +267,8 @@ missing (404 `requisition_not_found`).
 - #27: list/search/filter/pagination (done).
 - #28: requisition domain + state machine + tables (done).
 - #29: requisition create/edit/submit API (done — store, number generation, idempotent submit, REST/gRPC wiring, gateway `Aborted` → 409). Read endpoints (get/list/timeline) are separate issues.
-- Approvals (#30/#31), PO conversion (#35), outbox (#45) (M2–M3).
+- #30: approval rules + sequential engine + decide API (done — matrix materialization, 412 rollback, self/role enforcement, reject-skips, admin rule configuration, steps in-band).
+- Approvals #31 (audit log, notifications, idempotent decide), read endpoints/queue #32-34, PO conversion (#35), outbox (#45) (M2–M3).
 
 ## Vendor list — filters, pagination, query plans (#27)
 

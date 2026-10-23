@@ -156,19 +156,34 @@ func requisitionJSON(r *procurementv1.Requisition) fiber.Map {
 			"category":         it.GetCategory(),
 		})
 	}
+	steps := make([]fiber.Map, 0, len(r.GetApprovalSteps()))
+	for _, s := range r.GetApprovalSteps() {
+		steps = append(steps, fiber.Map{
+			"id":              s.GetId(),
+			"requisition_id":  s.GetRequisitionId(),
+			"step_no":         s.GetStepNo(),
+			"role_required":   s.GetRoleRequired(),
+			"threshold_cents": s.GetThresholdCents(),
+			"status":          s.GetStatus(),
+			"decided_by":      s.GetDecidedBy(),
+			"decided_at":      s.GetDecidedAt(),
+			"reason":          s.GetReason(),
+		})
+	}
 	return fiber.Map{
-		"id":           r.GetId(),
-		"tenant_id":    r.GetTenantId(),
-		"number":       r.GetNumber(),
-		"requester_id": r.GetRequesterId(),
-		"status":       r.GetStatus(),
-		"currency":     r.GetCurrency(),
-		"total_cents":  r.GetTotalCents(),
-		"items":        items,
-		"submitted_at": r.GetSubmittedAt(),
-		"created_at":   r.GetCreatedAt(),
-		"created_by":   r.GetCreatedBy(),
-		"updated_at":   r.GetUpdatedAt(),
-		"updated_by":   r.GetUpdatedBy(),
+		"id":             r.GetId(),
+		"tenant_id":      r.GetTenantId(),
+		"number":         r.GetNumber(),
+		"requester_id":   r.GetRequesterId(),
+		"status":         r.GetStatus(),
+		"currency":       r.GetCurrency(),
+		"total_cents":    r.GetTotalCents(),
+		"items":          items,
+		"approval_steps": steps,
+		"submitted_at":   r.GetSubmittedAt(),
+		"created_at":     r.GetCreatedAt(),
+		"created_by":     r.GetCreatedBy(),
+		"updated_at":     r.GetUpdatedAt(),
+		"updated_by":     r.GetUpdatedBy(),
 	}
 }

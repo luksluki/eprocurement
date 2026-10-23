@@ -5,19 +5,20 @@ import "testing"
 // wantPermission is the documented matrix (docs/rbac.md) restated for the
 // test: permission -> roles that must pass (admin always passes implicitly).
 var wantPermission = map[string][]string{
-	RequisitionRead:  {RoleRequester, RoleApprover, RoleBuyer, RoleFinance, RoleViewer},
-	RequisitionWrite: {RoleRequester},
-	ApprovalDecide:   {RoleApprover},
-	VendorRead:       {RoleRequester, RoleApprover, RoleBuyer, RoleFinance, RoleViewer},
-	VendorWrite:      {RoleBuyer},
-	PORead:           {RoleRequester, RoleApprover, RoleBuyer, RoleFinance, RoleViewer},
-	POWrite:          {RoleBuyer},
-	GRNPost:          {RoleBuyer},
-	InvoiceRead:      {RoleRequester, RoleApprover, RoleBuyer, RoleFinance, RoleViewer},
-	InvoiceWrite:     {RoleFinance},
-	ExportRun:        {RoleFinance},
-	AuditRead:        {RoleViewer},
-	UsersManage:      {},
+	RequisitionRead:   {RoleRequester, RoleApprover, RoleBuyer, RoleFinance, RoleViewer},
+	RequisitionWrite:  {RoleRequester},
+	ApprovalDecide:    {RoleApprover},
+	ApprovalConfigure: {},
+	VendorRead:        {RoleRequester, RoleApprover, RoleBuyer, RoleFinance, RoleViewer},
+	VendorWrite:       {RoleBuyer},
+	PORead:            {RoleRequester, RoleApprover, RoleBuyer, RoleFinance, RoleViewer},
+	POWrite:           {RoleBuyer},
+	GRNPost:           {RoleBuyer},
+	InvoiceRead:       {RoleRequester, RoleApprover, RoleBuyer, RoleFinance, RoleViewer},
+	InvoiceWrite:      {RoleFinance},
+	ExportRun:         {RoleFinance},
+	AuditRead:         {RoleViewer},
+	UsersManage:       {},
 }
 
 // TestMatrixCoversEveryPermission guards against a permission that exists in

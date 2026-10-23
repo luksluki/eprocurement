@@ -10,20 +10,24 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/jackc/pgx/v5"
+
 	procurementv1 "github.com/luksluki/eprocurement/gen/go/procurement/v1"
 	"github.com/luksluki/eprocurement/internal/platform/rbac"
+	"github.com/luksluki/eprocurement/services/procurement/approval"
 	"github.com/luksluki/eprocurement/services/procurement/requisition"
 	"github.com/luksluki/eprocurement/services/procurement/vendor"
 )
 
-// api adapts the vendor and requisition domains to the procurement.v1 gRPC
-// contract. Every method reads the caller identity the gateway propagated
-// (tenant scoping, audit ids); the RBAC interceptor has already re-checked
-// the permission.
+// api adapts the vendor, requisition, and approval domains to the
+// procurement.v1 gRPC contract. Every method reads the caller identity the
+// gateway propagated (tenant scoping, audit ids); the RBAC interceptor has
+// already re-checked the permission.
 type api struct {
 	procurementv1.UnimplementedProcurementServer
 	store        *vendor.Store
 	requisitions *requisition.Store
+	approvals    *approval.Store
 	log          *slog.Logger
 }
 
@@ -142,6 +146,39 @@ func mapRequisitionError(err error) error {
 		return status.Error(codes.AlreadyExists, err.Error())
 	case errors.Is(err, requisition.ErrForbidden):
 		return status.Error(codes.PermissionDenied, err.Error())
+	case errors.Is(err, approval.ErrRulesMissing):
+		// Wrapped by the requisition store's submit context — the machine
+		// code is re-created here so it rides through verbatim.
+		return status.Error(codes.FailedPrecondition, approval.ErrRulesMissing.Error())
+	default:
+		return status.Error(codes.Internal, "internal error")
+	}
+}
+
+// mapApprovalError maps approval domain and store errors to gRPC codes.
+// Same contract as the vendor/requisition mappers: sentinels carry their
+// machine code verbatim in the gRPC message.
+func mapApprovalError(err error) error {
+	switch {
+	case errors.Is(err, approval.ErrRuleCurrencyInvalid),
+		errors.Is(err, approval.ErrRuleRoleInvalid),
+		errors.Is(err, approval.ErrRuleThresholdInvalid),
+		errors.Is(err, approval.ErrRuleStepNoInvalid),
+		errors.Is(err, approval.ErrRuleStepNoDuplicate),
+		errors.Is(err, approval.ErrDecisionInvalid),
+		errors.Is(err, approval.ErrReasonRequired),
+		errors.Is(err, approval.ErrReasonTooLong),
+		errors.Is(err, approval.ErrStepIDInvalid),
+		errors.Is(err, requisition.ErrIDInvalid):
+		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, approval.ErrStepNotCurrent):
+		return status.Error(codes.Aborted, err.Error())
+	case errors.Is(err, approval.ErrStepNotFound), errors.Is(err, requisition.ErrNotFound):
+		return status.Error(codes.NotFound, err.Error())
+	case errors.Is(err, approval.ErrSelfForbidden), errors.Is(err, approval.ErrRoleForbidden):
+		return status.Error(codes.PermissionDenied, err.Error())
+	case errors.Is(err, approval.ErrRulesMissing):
+		return status.Error(codes.FailedPrecondition, err.Error())
 	default:
 		return status.Error(codes.Internal, "internal error")
 	}
@@ -180,13 +217,28 @@ func itemDomain(items []*procurementv1.RequisitionItem) []requisition.Item {
 	return out
 }
 
-// requisitionPB renders the aggregate for the wire.
-func requisitionPB(r requisition.Requisition) *procurementv1.Requisition {
+// requisitionPB renders the aggregate for the wire. steps (nil for the
+// create/edit responses, which never have materialized steps) rides along
+// so submit and decide callers receive the step ids in-band — the decide
+// API's input — without a read endpoint (#31/#32-34 own those).
+func requisitionPB(r requisition.Requisition, steps []approval.Step) *procurementv1.Requisition {
 	items := make([]*procurementv1.RequisitionItem, 0, len(r.Items))
 	for _, it := range r.Items {
 		items = append(items, &procurementv1.RequisitionItem{
 			Description: it.Description, Qty: it.Qty,
 			UnitPriceCents: it.UnitPriceCents, Category: it.Category,
+		})
+	}
+	var stepsPB []*procurementv1.ApprovalStep
+	for _, st := range steps {
+		decidedAt := ""
+		if st.DecidedAt != nil {
+			decidedAt = requisition.RFC3339(*st.DecidedAt)
+		}
+		stepsPB = append(stepsPB, &procurementv1.ApprovalStep{
+			Id: st.ID, RequisitionId: st.RequisitionID, StepNo: st.StepNo,
+			RoleRequired: st.RoleRequired, ThresholdCents: st.ThresholdCents,
+			Status: st.Status, DecidedBy: st.DecidedBy, DecidedAt: decidedAt, Reason: st.Reason,
 		})
 	}
 	submittedAt := ""
@@ -196,8 +248,8 @@ func requisitionPB(r requisition.Requisition) *procurementv1.Requisition {
 	return &procurementv1.Requisition{
 		Id: r.ID, TenantId: r.TenantID, Number: r.Number, RequesterId: r.RequesterID,
 		Status: r.Status, Currency: r.Currency, TotalCents: r.TotalCents, Items: items,
-		SubmittedAt: submittedAt,
-		CreatedAt:   requisition.RFC3339(r.CreatedAt), CreatedBy: r.CreatedBy,
+		SubmittedAt: submittedAt, ApprovalSteps: stepsPB,
+		CreatedAt: requisition.RFC3339(r.CreatedAt), CreatedBy: r.CreatedBy,
 		UpdatedAt: requisition.RFC3339(r.UpdatedAt), UpdatedBy: r.UpdatedBy,
 	}
 }
@@ -218,7 +270,7 @@ func (a *api) CreateRequisition(ctx context.Context, req *procurementv1.CreateRe
 	if err != nil {
 		return nil, mapRequisitionError(err)
 	}
-	return requisitionPB(r), nil
+	return requisitionPB(r, nil), nil
 }
 
 // UpdateRequisition replaces the basket of a draft the caller owns (admins
@@ -239,12 +291,16 @@ func (a *api) UpdateRequisition(ctx context.Context, req *procurementv1.UpdateRe
 	if err != nil {
 		return nil, mapRequisitionError(err)
 	}
-	return requisitionPB(r), nil
+	return requisitionPB(r, nil), nil
 }
 
 // SubmitRequisition moves a draft the caller owns (admins excepted) to
-// submitted. A replayed idempotency key returns the requisition's current
-// state without a second transition.
+// submitted. The approval engine materializes the tenant's matching rules
+// into approval steps inside the same transaction — no applicable rule is a
+// FailedPrecondition (approval_rules_missing) and the whole submit rolls
+// back. A replayed idempotency key returns the requisition's current state
+// without a second transition. The response embeds the requisition's
+// approval steps (their ids are the decide API's input).
 func (a *api) SubmitRequisition(ctx context.Context, req *procurementv1.SubmitRequisitionRequest) (*procurementv1.Requisition, error) {
 	auth, err := authTenant(ctx)
 	if err != nil {
@@ -261,11 +317,105 @@ func (a *api) SubmitRequisition(ctx context.Context, req *procurementv1.SubmitRe
 	if err := requireOwner(current, auth); err != nil {
 		return nil, mapRequisitionError(err)
 	}
-	r, err := a.requisitions.Submit(ctx, auth.TenantID, req.GetId(), auth.UserID, key)
+	r, err := a.requisitions.Submit(ctx, auth.TenantID, req.GetId(), auth.UserID, key,
+		func(tx pgx.Tx, r requisition.Requisition) error {
+			_, err := a.approvals.MaterializeTx(ctx, tx, r)
+			return err
+		})
 	if err != nil {
 		return nil, mapRequisitionError(err)
 	}
-	return requisitionPB(r), nil
+	steps, err := a.approvals.ListSteps(ctx, auth.TenantID, r.ID)
+	if err != nil {
+		return nil, mapApprovalError(err)
+	}
+	return requisitionPB(r, steps), nil
+}
+
+// DecideApproval applies one approve/reject decision to the current approval
+// step (approval:decide at both layers). Authorization beyond the
+// permission: the decider must not be the requester (self-approval is
+// forbidden with no admin exception) and must hold the step's role_required
+// (admins excepted) — enforced in the approval domain inside the locked
+// transaction. The response carries the requisition with its latest steps.
+func (a *api) DecideApproval(ctx context.Context, req *procurementv1.DecideApprovalRequest) (*procurementv1.DecideApprovalResponse, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	reason := strings.TrimSpace(req.GetReason())
+	if len(reason) > approval.MaxReasonLen {
+		return nil, mapApprovalError(approval.ErrReasonTooLong)
+	}
+	r, steps, err := a.approvals.Decide(ctx, auth.TenantID, approval.DecideInput{
+		StepID:   strings.TrimSpace(req.GetStepId()),
+		Decision: normalizeDecision(req.GetDecision()),
+		Reason:   reason,
+		ActorID:  auth.UserID,
+		Roles:    auth.Roles,
+	})
+	if err != nil {
+		return nil, mapApprovalError(err)
+	}
+	return &procurementv1.DecideApprovalResponse{Requisition: requisitionPB(r, steps)}, nil
+}
+
+// GetApprovalRules returns the caller tenant's whole rule set
+// (approval:configure, admin-only by matrix).
+func (a *api) GetApprovalRules(ctx context.Context, _ *procurementv1.GetApprovalRulesRequest) (*procurementv1.ApprovalRulesResponse, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rules, err := a.approvals.ListRules(ctx, auth.TenantID)
+	if err != nil {
+		return nil, mapApprovalError(err)
+	}
+	return rulesPB(rules), nil
+}
+
+// ReplaceApprovalRules replaces the caller tenant's whole rule set in one
+// transaction (approval:configure, admin-only by matrix). The set may be
+// empty; steps already materialized on submitted requisitions are snapshots
+// and stay untouched.
+func (a *api) ReplaceApprovalRules(ctx context.Context, req *procurementv1.ReplaceApprovalRulesRequest) (*procurementv1.ApprovalRulesResponse, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rules := make([]approval.Rule, 0, len(req.GetRules()))
+	for _, r := range req.GetRules() {
+		rules = append(rules, approval.Rule{
+			Currency:       normalizeCurrency(r.GetCurrency()),
+			StepNo:         r.GetStepNo(),
+			RoleRequired:   normalizeRole(r.GetRoleRequired()),
+			ThresholdCents: r.GetThresholdCents(),
+		})
+	}
+	stored, err := a.approvals.ReplaceRules(ctx, auth.TenantID, rules)
+	if err != nil {
+		return nil, mapApprovalError(err)
+	}
+	return rulesPB(stored), nil
+}
+
+// normalizeDecision lowercases and trims the wire decision — the domain
+// matches {approve, reject} exactly.
+func normalizeDecision(d string) string { return strings.ToLower(strings.TrimSpace(d)) }
+
+// normalizeRole lowercases and trims a role code at the boundary — the
+// catalog matches the fixed lowercase codes exactly.
+func normalizeRole(r string) string { return strings.ToLower(strings.TrimSpace(r)) }
+
+func rulesPB(rules []approval.Rule) *procurementv1.ApprovalRulesResponse {
+	out := &procurementv1.ApprovalRulesResponse{Rules: make([]*procurementv1.ApprovalRule, 0, len(rules))}
+	for _, r := range rules {
+		out.Rules = append(out.Rules, &procurementv1.ApprovalRule{
+			Id: r.ID, Currency: r.Currency, StepNo: r.StepNo,
+			RoleRequired: r.RoleRequired, ThresholdCents: r.ThresholdCents,
+		})
+	}
+	return out
 }
 
 func vendorPB(v vendor.Vendor) *procurementv1.Vendor {
