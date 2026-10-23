@@ -10,6 +10,7 @@ import (
 
 	procurementv1 "github.com/luksluki/eprocurement/gen/go/procurement/v1"
 	"github.com/luksluki/eprocurement/internal/platform/rbac"
+	"github.com/luksluki/eprocurement/services/procurement/requisition"
 	"github.com/luksluki/eprocurement/services/procurement/vendor"
 )
 
@@ -109,6 +110,26 @@ func mapVendorError(err error) error {
 		return status.Error(codes.NotFound, err.Error())
 	case errors.Is(err, vendor.ErrDeactivated):
 		return status.Error(codes.FailedPrecondition, err.Error())
+	default:
+		return status.Error(codes.Internal, "internal error")
+	}
+}
+
+// mapRequisitionError maps requisition domain errors to gRPC codes. Pure
+// mapping, defined with the domain in #28: the REST/gRPC endpoints arrive
+// with #29, where the gateway turns codes.Aborted into HTTP 409 for illegal
+// state-machine transitions. Domain errors are bare sentinels, so err.Error()
+// carries the machine code verbatim (same contract as mapVendorError).
+func mapRequisitionError(err error) error {
+	switch {
+	case errors.Is(err, requisition.ErrCurrencyInvalid),
+		errors.Is(err, requisition.ErrDescriptionInvalid),
+		errors.Is(err, requisition.ErrQtyInvalid),
+		errors.Is(err, requisition.ErrUnitPriceInvalid),
+		errors.Is(err, requisition.ErrItemsEmpty):
+		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, requisition.ErrIllegalTransition):
+		return status.Error(codes.Aborted, err.Error())
 	default:
 		return status.Error(codes.Internal, "internal error")
 	}

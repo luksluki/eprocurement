@@ -3,6 +3,8 @@ package server
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -21,6 +23,7 @@ import (
 	"github.com/luksluki/eprocurement/internal/platform/rbac"
 	"github.com/luksluki/eprocurement/internal/platform/tenant"
 	"github.com/luksluki/eprocurement/services/procurement/migrations"
+	"github.com/luksluki/eprocurement/services/procurement/requisition"
 	"github.com/luksluki/eprocurement/services/procurement/vendor"
 )
 
@@ -262,5 +265,38 @@ func TestVendorGRPCList(t *testing.T) {
 	if _, err := client.ListVendors(context.Background(),
 		&procurementv1.ListVendorsRequest{}); status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("anonymous: code = %v, want Unauthenticated", status.Code(err))
+	}
+}
+
+// The #28 contract, as a pure unit test (no database): illegal state-machine
+// transitions map to codes.Aborted — the gateway (#29) renders Aborted as
+// HTTP 409 — and validation failures map to InvalidArgument with the machine
+// code carried verbatim in the gRPC message.
+func TestMapRequisitionError(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err  error
+		code codes.Code
+		msg  string
+	}{
+		"illegal transition":        {requisition.ErrIllegalTransition, codes.Aborted, "requisition_illegal_transition"},
+		"currency invalid":          {requisition.ErrCurrencyInvalid, codes.InvalidArgument, "requisition_currency_invalid"},
+		"description invalid":       {requisition.ErrDescriptionInvalid, codes.InvalidArgument, "requisition_description_invalid"},
+		"qty invalid":               {requisition.ErrQtyInvalid, codes.InvalidArgument, "requisition_qty_invalid"},
+		"unit price invalid":        {requisition.ErrUnitPriceInvalid, codes.InvalidArgument, "requisition_unit_price_invalid"},
+		"items empty":               {requisition.ErrItemsEmpty, codes.InvalidArgument, "requisition_items_empty"},
+		"unknown error is internal": {errors.New("boom"), codes.Internal, "internal error"},
+	} {
+		got := mapRequisitionError(tc.err)
+		if status.Code(got) != tc.code || status.Convert(got).Message() != tc.msg {
+			t.Errorf("%s: got (%v, %q), want (%v, %q)",
+				name, status.Code(got), status.Convert(got).Message(), tc.code, tc.msg)
+		}
+	}
+
+	// Wrapping the sentinel (callers add context with %w) must not change
+	// the code — errors.Is still recognizes it.
+	got := mapRequisitionError(fmt.Errorf("submit: %w", requisition.ErrIllegalTransition))
+	if status.Code(got) != codes.Aborted {
+		t.Errorf("wrapped sentinel: code = %v, want Aborted", status.Code(got))
 	}
 }
