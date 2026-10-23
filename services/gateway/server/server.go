@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"google.golang.org/grpc"
 
+	procurementv1 "github.com/luksluki/eprocurement/gen/go/procurement/v1"
 	"github.com/luksluki/eprocurement/internal/platform/logger"
 	"github.com/luksluki/eprocurement/services/gateway/token"
 	"github.com/luksluki/eprocurement/services/identity/auth"
@@ -21,13 +23,24 @@ import (
 // Option adds a proxied service to the gateway.
 type Option func(*gatewayOptions)
 
+// ProcurementClient is the full procurement surface the gateway proxies: the
+// vendor API plus the requisition create/edit/submit API. The generated gRPC
+// client satisfies it; tests substitute a fake.
+type ProcurementClient interface {
+	VendorClient
+	CreateRequisition(ctx context.Context, in *procurementv1.CreateRequisitionRequest, opts ...grpc.CallOption) (*procurementv1.Requisition, error)
+	UpdateRequisition(ctx context.Context, in *procurementv1.UpdateRequisitionRequest, opts ...grpc.CallOption) (*procurementv1.Requisition, error)
+	SubmitRequisition(ctx context.Context, in *procurementv1.SubmitRequisitionRequest, opts ...grpc.CallOption) (*procurementv1.Requisition, error)
+}
+
 type gatewayOptions struct {
-	procurement VendorClient
+	procurement ProcurementClient
 	documents   DocumentsClient
 }
 
-// WithProcurement proxies the procurement vendor API under /api/v1/vendors.
-func WithProcurement(client VendorClient) Option {
+// WithProcurement proxies the procurement API under /api/v1/vendors and
+// /api/v1/requisitions.
+func WithProcurement(client ProcurementClient) Option {
 	return func(o *gatewayOptions) { o.procurement = client }
 }
 
@@ -66,6 +79,7 @@ func New(log *slog.Logger, verifier *token.Verifier, opts ...Option) *fiber.App 
 	v1.Get("/me", me)
 	if o.procurement != nil {
 		registerVendorRoutes(app, verifier, o.procurement, o.documents)
+		registerRequisitionRoutes(app, verifier, o.procurement)
 	}
 
 	return app

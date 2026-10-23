@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
+	"strings"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -14,13 +16,15 @@ import (
 	"github.com/luksluki/eprocurement/services/procurement/vendor"
 )
 
-// api adapts the vendor domain to the procurement.v1 gRPC contract. Every
-// method reads the caller identity the gateway propagated (tenant scoping,
-// audit ids); the RBAC interceptor has already re-checked the permission.
+// api adapts the vendor and requisition domains to the procurement.v1 gRPC
+// contract. Every method reads the caller identity the gateway propagated
+// (tenant scoping, audit ids); the RBAC interceptor has already re-checked
+// the permission.
 type api struct {
 	procurementv1.UnimplementedProcurementServer
-	store *vendor.Store
-	log   *slog.Logger
+	store        *vendor.Store
+	requisitions *requisition.Store
+	log          *slog.Logger
 }
 
 // authTenant returns the caller's auth context, rejecting calls that reached
@@ -115,10 +119,10 @@ func mapVendorError(err error) error {
 	}
 }
 
-// mapRequisitionError maps requisition domain errors to gRPC codes. Pure
-// mapping, defined with the domain in #28: the REST/gRPC endpoints arrive
-// with #29, where the gateway turns codes.Aborted into HTTP 409 for illegal
-// state-machine transitions. Domain errors are bare sentinels, so err.Error()
+// mapRequisitionError maps requisition domain and store errors to gRPC codes.
+// Validation sentinels → InvalidArgument, the illegal-transition sentinel →
+// Aborted (the gateway renders Aborted as HTTP 409), IO sentinels per their
+// semantics. Domain and store errors are bare sentinels, so err.Error()
 // carries the machine code verbatim (same contract as mapVendorError).
 func mapRequisitionError(err error) error {
 	switch {
@@ -126,13 +130,142 @@ func mapRequisitionError(err error) error {
 		errors.Is(err, requisition.ErrDescriptionInvalid),
 		errors.Is(err, requisition.ErrQtyInvalid),
 		errors.Is(err, requisition.ErrUnitPriceInvalid),
-		errors.Is(err, requisition.ErrItemsEmpty):
+		errors.Is(err, requisition.ErrItemsEmpty),
+		errors.Is(err, requisition.ErrIDInvalid),
+		errors.Is(err, requisition.ErrIdempotencyKeyInvalid):
 		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, requisition.ErrIllegalTransition):
 		return status.Error(codes.Aborted, err.Error())
+	case errors.Is(err, requisition.ErrNotFound):
+		return status.Error(codes.NotFound, err.Error())
+	case errors.Is(err, requisition.ErrIdempotencyKeyConflict):
+		return status.Error(codes.AlreadyExists, err.Error())
+	case errors.Is(err, requisition.ErrForbidden):
+		return status.Error(codes.PermissionDenied, err.Error())
 	default:
 		return status.Error(codes.Internal, "internal error")
 	}
+}
+
+// requireOwner enforces the ownership rule promised in docs/rbac.md ("a
+// requester edits their own requisition"): the caller must be the
+// requisition's requester. Admins may act on any requisition of the tenant
+// (maintainer decision, 2026-10-23). requester_id is immutable, so the check
+// cannot race the mutation that follows it.
+func requireOwner(r requisition.Requisition, auth *rbac.AuthContext) error {
+	if slices.Contains(auth.Roles, rbac.RoleAdmin) || r.RequesterID == auth.UserID {
+		return nil
+	}
+	return requisition.ErrForbidden
+}
+
+// maxIdempotencyKeyLen bounds the submit Idempotency-Key (gateway re-checks
+// the same limit at the edge; this is the service-layer defense in depth).
+const maxIdempotencyKeyLen = 64
+
+// normalizeCurrency uppercases and trims the client currency at the API
+// boundary — the domain matches {IDR, USD} exactly (decision on #28: case
+// normalization is the API layer's job in #29).
+func normalizeCurrency(c string) string { return strings.ToUpper(strings.TrimSpace(c)) }
+
+// itemDomain converts wire items to domain items.
+func itemDomain(items []*procurementv1.RequisitionItem) []requisition.Item {
+	out := make([]requisition.Item, 0, len(items))
+	for _, it := range items {
+		out = append(out, requisition.Item{
+			Description: it.GetDescription(), Qty: it.GetQty(),
+			UnitPriceCents: it.GetUnitPriceCents(), Category: it.GetCategory(),
+		})
+	}
+	return out
+}
+
+// requisitionPB renders the aggregate for the wire.
+func requisitionPB(r requisition.Requisition) *procurementv1.Requisition {
+	items := make([]*procurementv1.RequisitionItem, 0, len(r.Items))
+	for _, it := range r.Items {
+		items = append(items, &procurementv1.RequisitionItem{
+			Description: it.Description, Qty: it.Qty,
+			UnitPriceCents: it.UnitPriceCents, Category: it.Category,
+		})
+	}
+	submittedAt := ""
+	if r.SubmittedAt != nil {
+		submittedAt = requisition.RFC3339(*r.SubmittedAt)
+	}
+	return &procurementv1.Requisition{
+		Id: r.ID, TenantId: r.TenantID, Number: r.Number, RequesterId: r.RequesterID,
+		Status: r.Status, Currency: r.Currency, TotalCents: r.TotalCents, Items: items,
+		SubmittedAt: submittedAt,
+		CreatedAt:   requisition.RFC3339(r.CreatedAt), CreatedBy: r.CreatedBy,
+		UpdatedAt: requisition.RFC3339(r.UpdatedAt), UpdatedBy: r.UpdatedBy,
+	}
+}
+
+// CreateRequisition creates a draft for the caller: the caller is the
+// requester, the number is generated per tenant, and the total is computed
+// server-side. Items may be empty; currency is required.
+func (a *api) CreateRequisition(ctx context.Context, req *procurementv1.CreateRequisitionRequest) (*procurementv1.Requisition, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	r, err := a.requisitions.Create(ctx, auth.TenantID, requisition.CreateInput{
+		RequesterID: auth.UserID,
+		Currency:    normalizeCurrency(req.GetCurrency()),
+		Items:       itemDomain(req.GetItems()),
+	})
+	if err != nil {
+		return nil, mapRequisitionError(err)
+	}
+	return requisitionPB(r), nil
+}
+
+// UpdateRequisition replaces the basket of a draft the caller owns (admins
+// excepted) and recomputes the total.
+func (a *api) UpdateRequisition(ctx context.Context, req *procurementv1.UpdateRequisitionRequest) (*procurementv1.Requisition, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	current, err := a.requisitions.Get(ctx, auth.TenantID, req.GetId())
+	if err != nil {
+		return nil, mapRequisitionError(err)
+	}
+	if err := requireOwner(current, auth); err != nil {
+		return nil, mapRequisitionError(err)
+	}
+	r, err := a.requisitions.UpdateItems(ctx, auth.TenantID, req.GetId(), itemDomain(req.GetItems()), auth.UserID)
+	if err != nil {
+		return nil, mapRequisitionError(err)
+	}
+	return requisitionPB(r), nil
+}
+
+// SubmitRequisition moves a draft the caller owns (admins excepted) to
+// submitted. A replayed idempotency key returns the requisition's current
+// state without a second transition.
+func (a *api) SubmitRequisition(ctx context.Context, req *procurementv1.SubmitRequisitionRequest) (*procurementv1.Requisition, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	key := strings.TrimSpace(req.GetIdempotencyKey())
+	if key != "" && len(key) > maxIdempotencyKeyLen {
+		return nil, mapRequisitionError(requisition.ErrIdempotencyKeyInvalid)
+	}
+	current, err := a.requisitions.Get(ctx, auth.TenantID, req.GetId())
+	if err != nil {
+		return nil, mapRequisitionError(err)
+	}
+	if err := requireOwner(current, auth); err != nil {
+		return nil, mapRequisitionError(err)
+	}
+	r, err := a.requisitions.Submit(ctx, auth.TenantID, req.GetId(), auth.UserID, key)
+	if err != nil {
+		return nil, mapRequisitionError(err)
+	}
+	return requisitionPB(r), nil
 }
 
 func vendorPB(v vendor.Vendor) *procurementv1.Vendor {

@@ -8,6 +8,9 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"regexp"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -31,6 +34,7 @@ const (
 	gTenantA = "dddddddd-0000-0000-0000-000000000001"
 	gTenantB = "dddddddd-0000-0000-0000-000000000002"
 	gUser    = "dddddddd-0000-0000-0000-0000000000aa"
+	gUserB   = "dddddddd-0000-0000-0000-0000000000bb"
 )
 
 // startProcurement boots the full gRPC wiring (platform server + RBAC map +
@@ -59,7 +63,7 @@ func startProcurement(t *testing.T) (procurementv1.ProcurementClient, *pgxpool.P
 	}
 
 	log := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
-	srv := New(log, db, vendor.NewStore(db))
+	srv := New(log, db, vendor.NewStore(db), requisition.NewStore(db))
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -80,7 +84,12 @@ func startProcurement(t *testing.T) (procurementv1.ProcurementClient, *pgxpool.P
 
 // callerCtx mimics the gateway: user/tenant/roles as outgoing metadata.
 func callerCtx(tenantID string, roles ...string) context.Context {
-	md := metadata.Pairs(rbac.MDUserID, gUser, rbac.MDTenantID, tenantID)
+	return callerCtxAs(gUser, tenantID, roles...)
+}
+
+// callerCtxAs is callerCtx with an explicit user id (ownership tests).
+func callerCtxAs(userID, tenantID string, roles ...string) context.Context {
+	md := metadata.Pairs(rbac.MDUserID, userID, rbac.MDTenantID, tenantID)
 	for _, r := range roles {
 		md.Append(rbac.MDRole, r)
 	}
@@ -284,6 +293,11 @@ func TestMapRequisitionError(t *testing.T) {
 		"qty invalid":               {requisition.ErrQtyInvalid, codes.InvalidArgument, "requisition_qty_invalid"},
 		"unit price invalid":        {requisition.ErrUnitPriceInvalid, codes.InvalidArgument, "requisition_unit_price_invalid"},
 		"items empty":               {requisition.ErrItemsEmpty, codes.InvalidArgument, "requisition_items_empty"},
+		"id invalid":                {requisition.ErrIDInvalid, codes.InvalidArgument, "requisition_id_invalid"},
+		"key invalid":               {requisition.ErrIdempotencyKeyInvalid, codes.InvalidArgument, "requisition_idempotency_key_invalid"},
+		"not found":                 {requisition.ErrNotFound, codes.NotFound, "requisition_not_found"},
+		"key conflict":              {requisition.ErrIdempotencyKeyConflict, codes.AlreadyExists, "requisition_idempotency_key_conflict"},
+		"forbidden":                 {requisition.ErrForbidden, codes.PermissionDenied, "requisition_forbidden"},
 		"unknown error is internal": {errors.New("boom"), codes.Internal, "internal error"},
 	} {
 		got := mapRequisitionError(tc.err)
@@ -298,5 +312,206 @@ func TestMapRequisitionError(t *testing.T) {
 	got := mapRequisitionError(fmt.Errorf("submit: %w", requisition.ErrIllegalTransition))
 	if status.Code(got) != codes.Aborted {
 		t.Errorf("wrapped sentinel: code = %v, want Aborted", status.Code(got))
+	}
+}
+
+// grpcCleanupRequisition wipes the PR rows and counters this test creates in
+// the shared test tenants (items cascade).
+func grpcCleanupRequisition(t *testing.T, db *pgxpool.Pool) {
+	t.Helper()
+	_ = tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(context.Background(),
+			`DELETE FROM procurement.requisitions WHERE tenant_id IN ($1, $2) AND number LIKE 'PR-%'`,
+			gTenantA, gTenantB); err != nil {
+			return err
+		}
+		_, err := tx.Exec(context.Background(),
+			`DELETE FROM procurement.requisition_counters WHERE tenant_id IN ($1, $2)`, gTenantA, gTenantB)
+		return err
+	})
+}
+
+func testItems() []*procurementv1.RequisitionItem {
+	return []*procurementv1.RequisitionItem{
+		{Description: "Laptop", Qty: 2, UnitPriceCents: 7500000, Category: "it"},
+		{Description: "Mouse", Qty: 3, UnitPriceCents: 150000, Category: "it"},
+	}
+}
+
+// Full requisition lifecycle through the gRPC API: RBAC, ownership, server
+// side totals/numbering, idempotent submit, and cross-tenant denial.
+func TestRequisitionGRPCLifecycle(t *testing.T) {
+	client, db, cleanup := startProcurement(t)
+	defer cleanup()
+	grpcCleanupRequisition(t, db)
+	t.Cleanup(func() { grpcCleanupRequisition(t, db) })
+
+	// A viewer cannot create (service-layer RBAC re-check).
+	_, err := client.CreateRequisition(callerCtx(gTenantA, rbac.RoleViewer),
+		&procurementv1.CreateRequisitionRequest{Currency: "IDR"})
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("viewer create: code = %v, want PermissionDenied", status.Code(err))
+	}
+
+	// Draft with no items; currency is normalized (uppercased/trimmed) at the
+	// API boundary, the number is generated per tenant, the total is 0.
+	empty, err := client.CreateRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.CreateRequisitionRequest{Currency: " idr "})
+	if err != nil {
+		t.Fatalf("create empty draft: %v", err)
+	}
+	if empty.GetStatus() != "draft" || empty.GetCurrency() != "IDR" || empty.GetTotalCents() != 0 {
+		t.Fatalf("empty draft = %+v", empty)
+	}
+	if empty.GetRequesterId() != gUser || empty.GetCreatedBy() != gUser {
+		t.Fatalf("requester/audit wrong: %+v", empty)
+	}
+	if !regexp.MustCompile(`^PR-\d{6}$`).MatchString(empty.GetNumber()) {
+		t.Fatalf("number %q not PR-%%06d", empty.GetNumber())
+	}
+
+	// Draft with items: total computed server-side (2×7,500,000 + 3×150,000).
+	basket, err := client.CreateRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.CreateRequisitionRequest{Currency: "IDR", Items: testItems()})
+	if err != nil {
+		t.Fatalf("create basket: %v", err)
+	}
+	if basket.GetTotalCents() != 15450000 {
+		t.Fatalf("total = %d, want 15450000", basket.GetTotalCents())
+	}
+	numEmpty, _ := strconv.Atoi(strings.TrimPrefix(empty.GetNumber(), "PR-"))
+	numBasket, _ := strconv.Atoi(strings.TrimPrefix(basket.GetNumber(), "PR-"))
+	if numBasket != numEmpty+1 {
+		t.Fatalf("numbers not sequential: %d then %d", numEmpty, numBasket)
+	}
+
+	// Edit replaces the basket and recomputes the total (owner).
+	edited, err := client.UpdateRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.UpdateRequisitionRequest{Id: basket.GetId(), Items: testItems()[:1]})
+	if err != nil || edited.GetTotalCents() != 15000000 || len(edited.GetItems()) != 1 {
+		t.Fatalf("edit = (%+v, %v)", edited, err)
+	}
+
+	// Ownership (maintainer decision 2026-10-23): another requester of the
+	// same tenant may not edit or submit; an admin may.
+	_, err = client.UpdateRequisition(callerCtxAs(gUserB, gTenantA, rbac.RoleRequester),
+		&procurementv1.UpdateRequisitionRequest{Id: basket.GetId(), Items: testItems()})
+	if status.Code(err) != codes.PermissionDenied || status.Convert(err).Message() != "requisition_forbidden" {
+		t.Fatalf("other requester edit: (%v, %q), want PermissionDenied requisition_forbidden", status.Code(err), status.Convert(err).Message())
+	}
+	if _, err := client.SubmitRequisition(callerCtxAs(gUserB, gTenantA, rbac.RoleRequester),
+		&procurementv1.SubmitRequisitionRequest{Id: basket.GetId()}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("other requester submit: code = %v, want PermissionDenied", status.Code(err))
+	}
+	if _, err := client.UpdateRequisition(callerCtx(gTenantA, rbac.RoleAdmin),
+		&procurementv1.UpdateRequisitionRequest{Id: basket.GetId(), Items: testItems()}); err != nil {
+		t.Fatalf("admin edit: %v", err)
+	}
+
+	// Cross-tenant edit/submit is indistinguishable from missing.
+	for name, call := range map[string]func() error{
+		"edit": func() error {
+			_, err := client.UpdateRequisition(callerCtx(gTenantB, rbac.RoleRequester),
+				&procurementv1.UpdateRequisitionRequest{Id: basket.GetId(), Items: testItems()})
+			return err
+		},
+		"submit": func() error {
+			_, err := client.SubmitRequisition(callerCtx(gTenantB, rbac.RoleRequester),
+				&procurementv1.SubmitRequisitionRequest{Id: basket.GetId()})
+			return err
+		},
+	} {
+		if err := call(); status.Code(err) != codes.NotFound || status.Convert(err).Message() != "requisition_not_found" {
+			t.Fatalf("cross-tenant %s: (%v, %q), want NotFound requisition_not_found", name, status.Code(err), status.Convert(err).Message())
+		}
+	}
+
+	// Non-UUID id fails fast with 400 instead of a database cast error.
+	_, err = client.UpdateRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.UpdateRequisitionRequest{Id: "not-a-uuid"})
+	if status.Code(err) != codes.InvalidArgument || status.Convert(err).Message() != "requisition_id_invalid" {
+		t.Fatalf("bad id: (%v, %q)", status.Code(err), status.Convert(err).Message())
+	}
+
+	// Submit requires at least one line.
+	_, err = client.SubmitRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.SubmitRequisitionRequest{Id: empty.GetId()})
+	if status.Code(err) != codes.InvalidArgument || status.Convert(err).Message() != "requisition_items_empty" {
+		t.Fatalf("empty submit: (%v, %q), want InvalidArgument requisition_items_empty", status.Code(err), status.Convert(err).Message())
+	}
+
+	// Submit with an Idempotency-Key; a replay of the same key returns the
+	// current (submitted) state, not an error.
+	submitted, err := client.SubmitRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.SubmitRequisitionRequest{Id: basket.GetId(), IdempotencyKey: "key-29-a"})
+	if err != nil || submitted.GetStatus() != "submitted" || submitted.GetSubmittedAt() == "" {
+		t.Fatalf("submit = (%+v, %v)", submitted, err)
+	}
+	replayed, err := client.SubmitRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.SubmitRequisitionRequest{Id: basket.GetId(), IdempotencyKey: "key-29-a"})
+	if err != nil || replayed.GetStatus() != "submitted" || replayed.GetId() != basket.GetId() {
+		t.Fatalf("replay = (%+v, %v)", replayed, err)
+	}
+
+	// Reusing the key for a different requisition of the tenant conflicts.
+	third, err := client.CreateRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.CreateRequisitionRequest{Currency: "IDR", Items: testItems()})
+	if err != nil {
+		t.Fatalf("create third: %v", err)
+	}
+	_, err = client.SubmitRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.SubmitRequisitionRequest{Id: third.GetId(), IdempotencyKey: "key-29-a"})
+	if status.Code(err) != codes.AlreadyExists || status.Convert(err).Message() != "requisition_idempotency_key_conflict" {
+		t.Fatalf("key reuse: (%v, %q), want AlreadyExists requisition_idempotency_key_conflict", status.Code(err), status.Convert(err).Message())
+	}
+
+	// A submitted requisition is immutable: edit and resubmit are 409s.
+	_, err = client.UpdateRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.UpdateRequisitionRequest{Id: basket.GetId(), Items: testItems()})
+	if status.Code(err) != codes.Aborted || status.Convert(err).Message() != "requisition_illegal_transition" {
+		t.Fatalf("edit submitted: (%v, %q), want Aborted requisition_illegal_transition", status.Code(err), status.Convert(err).Message())
+	}
+	if _, err := client.SubmitRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.SubmitRequisitionRequest{Id: basket.GetId(), IdempotencyKey: "key-29-b"}); status.Code(err) != codes.Aborted {
+		t.Fatalf("resubmit: code = %v, want Aborted", status.Code(err))
+	}
+
+	// Over-long idempotency key is rejected at the service layer too.
+	if _, err := client.SubmitRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.SubmitRequisitionRequest{Id: third.GetId(), IdempotencyKey: strings.Repeat("k", 65)}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("long key: code = %v, want InvalidArgument", status.Code(err))
+	}
+}
+
+// Validation failures carry the domain machine code verbatim in the gRPC
+// message (same contract as the vendor API).
+func TestRequisitionGRPCValidation(t *testing.T) {
+	client, db, cleanup := startProcurement(t)
+	defer cleanup()
+	grpcCleanupRequisition(t, db)
+	t.Cleanup(func() { grpcCleanupRequisition(t, db) })
+
+	valid := testItems()
+	for name, tc := range map[string]struct {
+		req  *procurementv1.CreateRequisitionRequest
+		code codes.Code
+		msg  string
+	}{
+		"no currency":    {&procurementv1.CreateRequisitionRequest{Items: valid}, codes.InvalidArgument, "requisition_currency_invalid"},
+		"bad currency":   {&procurementv1.CreateRequisitionRequest{Currency: "EUR", Items: valid}, codes.InvalidArgument, "requisition_currency_invalid"},
+		"bad qty":        {&procurementv1.CreateRequisitionRequest{Currency: "IDR", Items: []*procurementv1.RequisitionItem{{Description: "x", Qty: 0}}}, codes.InvalidArgument, "requisition_qty_invalid"},
+		"negative price": {&procurementv1.CreateRequisitionRequest{Currency: "IDR", Items: []*procurementv1.RequisitionItem{{Description: "x", Qty: 1, UnitPriceCents: -1}}}, codes.InvalidArgument, "requisition_unit_price_invalid"},
+		"blank desc":     {&procurementv1.CreateRequisitionRequest{Currency: "IDR", Items: []*procurementv1.RequisitionItem{{Description: "  ", Qty: 1}}}, codes.InvalidArgument, "requisition_description_invalid"},
+	} {
+		_, err := client.CreateRequisition(callerCtx(gTenantA, rbac.RoleRequester), tc.req)
+		if status.Code(err) != tc.code || status.Convert(err).Message() != tc.msg {
+			t.Errorf("%s: got (%v, %q), want (%v, %q)", name, status.Code(err), status.Convert(err).Message(), tc.code, tc.msg)
+		}
+	}
+
+	// No propagated auth metadata at all: Unauthenticated before any store hit.
+	if _, err := client.CreateRequisition(context.Background(),
+		&procurementv1.CreateRequisitionRequest{Currency: "IDR"}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("anonymous: code = %v, want Unauthenticated", status.Code(err))
 	}
 }

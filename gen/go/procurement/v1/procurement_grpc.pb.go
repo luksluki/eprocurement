@@ -19,11 +19,14 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Procurement_CreateVendor_FullMethodName     = "/procurement.v1.Procurement/CreateVendor"
-	Procurement_GetVendor_FullMethodName        = "/procurement.v1.Procurement/GetVendor"
-	Procurement_UpdateVendor_FullMethodName     = "/procurement.v1.Procurement/UpdateVendor"
-	Procurement_DeactivateVendor_FullMethodName = "/procurement.v1.Procurement/DeactivateVendor"
-	Procurement_ListVendors_FullMethodName      = "/procurement.v1.Procurement/ListVendors"
+	Procurement_CreateVendor_FullMethodName      = "/procurement.v1.Procurement/CreateVendor"
+	Procurement_GetVendor_FullMethodName         = "/procurement.v1.Procurement/GetVendor"
+	Procurement_UpdateVendor_FullMethodName      = "/procurement.v1.Procurement/UpdateVendor"
+	Procurement_DeactivateVendor_FullMethodName  = "/procurement.v1.Procurement/DeactivateVendor"
+	Procurement_ListVendors_FullMethodName       = "/procurement.v1.Procurement/ListVendors"
+	Procurement_CreateRequisition_FullMethodName = "/procurement.v1.Procurement/CreateRequisition"
+	Procurement_UpdateRequisition_FullMethodName = "/procurement.v1.Procurement/UpdateRequisition"
+	Procurement_SubmitRequisition_FullMethodName = "/procurement.v1.Procurement/SubmitRequisition"
 )
 
 // ProcurementClient is the client API for Procurement service.
@@ -52,6 +55,22 @@ type ProcurementClient interface {
 	// status and query combine. total is the number of matching rows across
 	// all pages.
 	ListVendors(ctx context.Context, in *ListVendorsRequest, opts ...grpc.CallOption) (*ListVendorsResponse, error)
+	// CreateRequisition creates a draft for the caller (the requester is the
+	// caller from the auth metadata). The PR number (PR-%06d) is generated
+	// server-side per tenant; total_cents is computed server-side. Items may
+	// be empty — a draft collects its lines before submit.
+	CreateRequisition(ctx context.Context, in *CreateRequisitionRequest, opts ...grpc.CallOption) (*Requisition, error)
+	// UpdateRequisition replaces the line items of a draft the caller owns
+	// (admins may act on any requisition) and recomputes total_cents.
+	// Non-draft requisitions are immutable.
+	UpdateRequisition(ctx context.Context, in *UpdateRequisitionRequest, opts ...grpc.CallOption) (*Requisition, error)
+	// SubmitRequisition moves a draft the caller owns (admins excepted) to
+	// submitted — the basket must hold at least one valid line. The optional
+	// idempotency_key (from the gateway's Idempotency-Key header) names the
+	// submit: replaying the same key returns the requisition's current state
+	// without a second transition; reusing it for another requisition in the
+	// tenant is rejected.
+	SubmitRequisition(ctx context.Context, in *SubmitRequisitionRequest, opts ...grpc.CallOption) (*Requisition, error)
 }
 
 type procurementClient struct {
@@ -112,6 +131,36 @@ func (c *procurementClient) ListVendors(ctx context.Context, in *ListVendorsRequ
 	return out, nil
 }
 
+func (c *procurementClient) CreateRequisition(ctx context.Context, in *CreateRequisitionRequest, opts ...grpc.CallOption) (*Requisition, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Requisition)
+	err := c.cc.Invoke(ctx, Procurement_CreateRequisition_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *procurementClient) UpdateRequisition(ctx context.Context, in *UpdateRequisitionRequest, opts ...grpc.CallOption) (*Requisition, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Requisition)
+	err := c.cc.Invoke(ctx, Procurement_UpdateRequisition_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *procurementClient) SubmitRequisition(ctx context.Context, in *SubmitRequisitionRequest, opts ...grpc.CallOption) (*Requisition, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Requisition)
+	err := c.cc.Invoke(ctx, Procurement_SubmitRequisition_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ProcurementServer is the server API for Procurement service.
 // All implementations must embed UnimplementedProcurementServer
 // for forward compatibility.
@@ -138,6 +187,22 @@ type ProcurementServer interface {
 	// status and query combine. total is the number of matching rows across
 	// all pages.
 	ListVendors(context.Context, *ListVendorsRequest) (*ListVendorsResponse, error)
+	// CreateRequisition creates a draft for the caller (the requester is the
+	// caller from the auth metadata). The PR number (PR-%06d) is generated
+	// server-side per tenant; total_cents is computed server-side. Items may
+	// be empty — a draft collects its lines before submit.
+	CreateRequisition(context.Context, *CreateRequisitionRequest) (*Requisition, error)
+	// UpdateRequisition replaces the line items of a draft the caller owns
+	// (admins may act on any requisition) and recomputes total_cents.
+	// Non-draft requisitions are immutable.
+	UpdateRequisition(context.Context, *UpdateRequisitionRequest) (*Requisition, error)
+	// SubmitRequisition moves a draft the caller owns (admins excepted) to
+	// submitted — the basket must hold at least one valid line. The optional
+	// idempotency_key (from the gateway's Idempotency-Key header) names the
+	// submit: replaying the same key returns the requisition's current state
+	// without a second transition; reusing it for another requisition in the
+	// tenant is rejected.
+	SubmitRequisition(context.Context, *SubmitRequisitionRequest) (*Requisition, error)
 	mustEmbedUnimplementedProcurementServer()
 }
 
@@ -162,6 +227,15 @@ func (UnimplementedProcurementServer) DeactivateVendor(context.Context, *Deactiv
 }
 func (UnimplementedProcurementServer) ListVendors(context.Context, *ListVendorsRequest) (*ListVendorsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListVendors not implemented")
+}
+func (UnimplementedProcurementServer) CreateRequisition(context.Context, *CreateRequisitionRequest) (*Requisition, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CreateRequisition not implemented")
+}
+func (UnimplementedProcurementServer) UpdateRequisition(context.Context, *UpdateRequisitionRequest) (*Requisition, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdateRequisition not implemented")
+}
+func (UnimplementedProcurementServer) SubmitRequisition(context.Context, *SubmitRequisitionRequest) (*Requisition, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SubmitRequisition not implemented")
 }
 func (UnimplementedProcurementServer) mustEmbedUnimplementedProcurementServer() {}
 func (UnimplementedProcurementServer) testEmbeddedByValue()                     {}
@@ -274,6 +348,60 @@ func _Procurement_ListVendors_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Procurement_CreateRequisition_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateRequisitionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProcurementServer).CreateRequisition(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Procurement_CreateRequisition_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProcurementServer).CreateRequisition(ctx, req.(*CreateRequisitionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Procurement_UpdateRequisition_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateRequisitionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProcurementServer).UpdateRequisition(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Procurement_UpdateRequisition_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProcurementServer).UpdateRequisition(ctx, req.(*UpdateRequisitionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Procurement_SubmitRequisition_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SubmitRequisitionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProcurementServer).SubmitRequisition(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Procurement_SubmitRequisition_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProcurementServer).SubmitRequisition(ctx, req.(*SubmitRequisitionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Procurement_ServiceDesc is the grpc.ServiceDesc for Procurement service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -300,6 +428,18 @@ var Procurement_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListVendors",
 			Handler:    _Procurement_ListVendors_Handler,
+		},
+		{
+			MethodName: "CreateRequisition",
+			Handler:    _Procurement_CreateRequisition_Handler,
+		},
+		{
+			MethodName: "UpdateRequisition",
+			Handler:    _Procurement_UpdateRequisition_Handler,
+		},
+		{
+			MethodName: "SubmitRequisition",
+			Handler:    _Procurement_SubmitRequisition_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -157,12 +157,21 @@ var vendorMessages = map[string]string{
 	"vendor_page_invalid":   "page is out of range",
 }
 
-// vendorError maps procurement's gRPC failures to HTTP with the machine code
-// preserved: InvalidArgument→400, NotFound→404, AlreadyExists→409,
-// FailedPrecondition→412, Unauthenticated→401, everything else→502.
+// vendorError maps procurement's gRPC failures to HTTP through the shared
+// code switch, with the vendor message table for human sentences.
 func vendorError(c *fiber.Ctx, err error) error {
+	return grpcHTTPError(c, err, vendorMessages)
+}
+
+// grpcHTTPError is the shared procurement error renderer: the machine code
+// (the gRPC message) rides through in the JSON body while messages renders it
+// as a human sentence; unknown messages pass through verbatim. Mapping:
+// InvalidArgument→400, NotFound→404, AlreadyExists→409, Aborted→409 (illegal
+// state-machine transitions), FailedPrecondition→412, Unauthenticated→401,
+// PermissionDenied→403, everything else→502.
+func grpcHTTPError(c *fiber.Ctx, err error, messages map[string]string) error {
 	st, _ := status.FromError(err)
-	message, human := vendorMessages[st.Message()]
+	message, human := messages[st.Message()]
 	if !human {
 		message = st.Message()
 	}
@@ -173,6 +182,8 @@ func vendorError(c *fiber.Ctx, err error) error {
 	case codes.NotFound:
 		return c.Status(fiber.StatusNotFound).JSON(body)
 	case codes.AlreadyExists:
+		return c.Status(fiber.StatusConflict).JSON(body)
+	case codes.Aborted:
 		return c.Status(fiber.StatusConflict).JSON(body)
 	case codes.FailedPrecondition:
 		return c.Status(fiber.StatusPreconditionFailed).JSON(body)
