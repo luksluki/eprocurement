@@ -26,6 +26,22 @@ service Procurement {
   // status and query combine. total is the number of matching rows across
   // all pages.
   rpc ListVendors(ListVendorsRequest) returns (ListVendorsResponse);
+  // CreateRequisition creates a draft for the caller (the requester is the
+  // caller from the auth metadata). The PR number (PR-%06d) is generated
+  // server-side per tenant; total_cents is computed server-side. Items may
+  // be empty — a draft collects its lines before submit.
+  rpc CreateRequisition(CreateRequisitionRequest) returns (Requisition);
+  // UpdateRequisition replaces the line items of a draft the caller owns
+  // (admins may act on any requisition) and recomputes total_cents.
+  // Non-draft requisitions are immutable.
+  rpc UpdateRequisition(UpdateRequisitionRequest) returns (Requisition);
+  // SubmitRequisition moves a draft the caller owns (admins excepted) to
+  // submitted — the basket must hold at least one valid line. The optional
+  // idempotency_key (from the gateway's Idempotency-Key header) names the
+  // submit: replaying the same key returns the requisition's current state
+  // without a second transition; reusing it for another requisition in the
+  // tenant is rejected.
+  rpc SubmitRequisition(SubmitRequisitionRequest) returns (Requisition);
 }
 
 message Vendor {
@@ -80,4 +96,47 @@ message ListVendorsResponse {
   int32 total = 2;      // matching rows across all pages
   int32 page = 3;       // normalized values actually applied
   int32 page_size = 4;
+}
+
+// Requisition is the purchase-requisition aggregate as stored: server-side
+// number, requester, status, currency, and the server-computed total.
+message Requisition {
+  string id = 1;
+  string tenant_id = 2;
+  string number = 3;          // server-generated per tenant, e.g. "PR-000042"
+  string requester_id = 4;    // user who created the PR
+  string status = 5;          // draft | submitted | approved | rejected | cancelled | closed
+  string currency = 6;        // IDR | USD
+  int64 total_cents = 7;      // server-computed sum of qty × unit_price_cents
+  repeated RequisitionItem items = 8;
+  string submitted_at = 9;    // RFC 3339, empty while draft
+  string created_at = 10;     // RFC 3339
+  string created_by = 11;     // user id
+  string updated_at = 12;     // RFC 3339
+  string updated_by = 13;     // user id
+}
+
+message RequisitionItem {
+  string description = 1;     // non-blank
+  int32 qty = 2;              // > 0
+  int64 unit_price_cents = 3; // >= 0, integer cents in the header currency
+  string category = 4;        // free-form, may be empty
+}
+
+message CreateRequisitionRequest {
+  // Currency is required: empty or a value outside {IDR, USD} after the
+  // gateway's trim+uppercase normalization is rejected. There is no default.
+  string currency = 1;
+  repeated RequisitionItem items = 2; // may be empty for a draft
+}
+
+message UpdateRequisitionRequest {
+  string id = 1;
+  repeated RequisitionItem items = 2; // replaces the whole basket
+}
+
+message SubmitRequisitionRequest {
+  string id = 1;
+  // Optional: 1-64 chars after trimming; empty means no idempotency.
+  string idempotency_key = 2;
 }

@@ -509,6 +509,375 @@ func (x *ListVendorsResponse) GetPageSize() int32 {
 	return 0
 }
 
+// Requisition is the purchase-requisition aggregate as stored: server-side
+// number, requester, status, currency, and the server-computed total.
+type Requisition struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	TenantId      string                 `protobuf:"bytes,2,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
+	Number        string                 `protobuf:"bytes,3,opt,name=number,proto3" json:"number,omitempty"`                              // server-generated per tenant, e.g. "PR-000042"
+	RequesterId   string                 `protobuf:"bytes,4,opt,name=requester_id,json=requesterId,proto3" json:"requester_id,omitempty"` // user who created the PR
+	Status        string                 `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`                              // draft | submitted | approved | rejected | cancelled | closed
+	Currency      string                 `protobuf:"bytes,6,opt,name=currency,proto3" json:"currency,omitempty"`                          // IDR | USD
+	TotalCents    int64                  `protobuf:"varint,7,opt,name=total_cents,json=totalCents,proto3" json:"total_cents,omitempty"`   // server-computed sum of qty × unit_price_cents
+	Items         []*RequisitionItem     `protobuf:"bytes,8,rep,name=items,proto3" json:"items,omitempty"`
+	SubmittedAt   string                 `protobuf:"bytes,9,opt,name=submitted_at,json=submittedAt,proto3" json:"submitted_at,omitempty"` // RFC 3339, empty while draft
+	CreatedAt     string                 `protobuf:"bytes,10,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`      // RFC 3339
+	CreatedBy     string                 `protobuf:"bytes,11,opt,name=created_by,json=createdBy,proto3" json:"created_by,omitempty"`      // user id
+	UpdatedAt     string                 `protobuf:"bytes,12,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`      // RFC 3339
+	UpdatedBy     string                 `protobuf:"bytes,13,opt,name=updated_by,json=updatedBy,proto3" json:"updated_by,omitempty"`      // user id
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Requisition) Reset() {
+	*x = Requisition{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Requisition) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Requisition) ProtoMessage() {}
+
+func (x *Requisition) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Requisition.ProtoReflect.Descriptor instead.
+func (*Requisition) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *Requisition) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Requisition) GetTenantId() string {
+	if x != nil {
+		return x.TenantId
+	}
+	return ""
+}
+
+func (x *Requisition) GetNumber() string {
+	if x != nil {
+		return x.Number
+	}
+	return ""
+}
+
+func (x *Requisition) GetRequesterId() string {
+	if x != nil {
+		return x.RequesterId
+	}
+	return ""
+}
+
+func (x *Requisition) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *Requisition) GetCurrency() string {
+	if x != nil {
+		return x.Currency
+	}
+	return ""
+}
+
+func (x *Requisition) GetTotalCents() int64 {
+	if x != nil {
+		return x.TotalCents
+	}
+	return 0
+}
+
+func (x *Requisition) GetItems() []*RequisitionItem {
+	if x != nil {
+		return x.Items
+	}
+	return nil
+}
+
+func (x *Requisition) GetSubmittedAt() string {
+	if x != nil {
+		return x.SubmittedAt
+	}
+	return ""
+}
+
+func (x *Requisition) GetCreatedAt() string {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return ""
+}
+
+func (x *Requisition) GetCreatedBy() string {
+	if x != nil {
+		return x.CreatedBy
+	}
+	return ""
+}
+
+func (x *Requisition) GetUpdatedAt() string {
+	if x != nil {
+		return x.UpdatedAt
+	}
+	return ""
+}
+
+func (x *Requisition) GetUpdatedBy() string {
+	if x != nil {
+		return x.UpdatedBy
+	}
+	return ""
+}
+
+type RequisitionItem struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Description    string                 `protobuf:"bytes,1,opt,name=description,proto3" json:"description,omitempty"`                                // non-blank
+	Qty            int32                  `protobuf:"varint,2,opt,name=qty,proto3" json:"qty,omitempty"`                                               // > 0
+	UnitPriceCents int64                  `protobuf:"varint,3,opt,name=unit_price_cents,json=unitPriceCents,proto3" json:"unit_price_cents,omitempty"` // >= 0, integer cents in the header currency
+	Category       string                 `protobuf:"bytes,4,opt,name=category,proto3" json:"category,omitempty"`                                      // free-form, may be empty
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *RequisitionItem) Reset() {
+	*x = RequisitionItem{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RequisitionItem) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RequisitionItem) ProtoMessage() {}
+
+func (x *RequisitionItem) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RequisitionItem.ProtoReflect.Descriptor instead.
+func (*RequisitionItem) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *RequisitionItem) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *RequisitionItem) GetQty() int32 {
+	if x != nil {
+		return x.Qty
+	}
+	return 0
+}
+
+func (x *RequisitionItem) GetUnitPriceCents() int64 {
+	if x != nil {
+		return x.UnitPriceCents
+	}
+	return 0
+}
+
+func (x *RequisitionItem) GetCategory() string {
+	if x != nil {
+		return x.Category
+	}
+	return ""
+}
+
+type CreateRequisitionRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Currency is required: empty or a value outside {IDR, USD} after the
+	// gateway's trim+uppercase normalization is rejected. There is no default.
+	Currency      string             `protobuf:"bytes,1,opt,name=currency,proto3" json:"currency,omitempty"`
+	Items         []*RequisitionItem `protobuf:"bytes,2,rep,name=items,proto3" json:"items,omitempty"` // may be empty for a draft
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreateRequisitionRequest) Reset() {
+	*x = CreateRequisitionRequest{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateRequisitionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateRequisitionRequest) ProtoMessage() {}
+
+func (x *CreateRequisitionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateRequisitionRequest.ProtoReflect.Descriptor instead.
+func (*CreateRequisitionRequest) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *CreateRequisitionRequest) GetCurrency() string {
+	if x != nil {
+		return x.Currency
+	}
+	return ""
+}
+
+func (x *CreateRequisitionRequest) GetItems() []*RequisitionItem {
+	if x != nil {
+		return x.Items
+	}
+	return nil
+}
+
+type UpdateRequisitionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Items         []*RequisitionItem     `protobuf:"bytes,2,rep,name=items,proto3" json:"items,omitempty"` // replaces the whole basket
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpdateRequisitionRequest) Reset() {
+	*x = UpdateRequisitionRequest{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateRequisitionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateRequisitionRequest) ProtoMessage() {}
+
+func (x *UpdateRequisitionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateRequisitionRequest.ProtoReflect.Descriptor instead.
+func (*UpdateRequisitionRequest) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *UpdateRequisitionRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *UpdateRequisitionRequest) GetItems() []*RequisitionItem {
+	if x != nil {
+		return x.Items
+	}
+	return nil
+}
+
+type SubmitRequisitionRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Id    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// Optional: 1-64 chars after trimming; empty means no idempotency.
+	IdempotencyKey string `protobuf:"bytes,2,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *SubmitRequisitionRequest) Reset() {
+	*x = SubmitRequisitionRequest{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SubmitRequisitionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SubmitRequisitionRequest) ProtoMessage() {}
+
+func (x *SubmitRequisitionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SubmitRequisitionRequest.ProtoReflect.Descriptor instead.
+func (*SubmitRequisitionRequest) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *SubmitRequisitionRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *SubmitRequisitionRequest) GetIdempotencyKey() string {
+	if x != nil {
+		return x.IdempotencyKey
+	}
+	return ""
+}
+
 var File_procurement_v1_procurement_proto protoreflect.FileDescriptor
 
 const file_procurement_v1_procurement_proto_rawDesc = "" +
@@ -554,13 +923,50 @@ const file_procurement_v1_procurement_proto_rawDesc = "" +
 	"\avendors\x18\x01 \x03(\v2\x16.procurement.v1.VendorR\avendors\x12\x14\n" +
 	"\x05total\x18\x02 \x01(\x05R\x05total\x12\x12\n" +
 	"\x04page\x18\x03 \x01(\x05R\x04page\x12\x1b\n" +
-	"\tpage_size\x18\x04 \x01(\x05R\bpageSize2\x9b\x03\n" +
+	"\tpage_size\x18\x04 \x01(\x05R\bpageSize\"\xa0\x03\n" +
+	"\vRequisition\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
+	"\ttenant_id\x18\x02 \x01(\tR\btenantId\x12\x16\n" +
+	"\x06number\x18\x03 \x01(\tR\x06number\x12!\n" +
+	"\frequester_id\x18\x04 \x01(\tR\vrequesterId\x12\x16\n" +
+	"\x06status\x18\x05 \x01(\tR\x06status\x12\x1a\n" +
+	"\bcurrency\x18\x06 \x01(\tR\bcurrency\x12\x1f\n" +
+	"\vtotal_cents\x18\a \x01(\x03R\n" +
+	"totalCents\x125\n" +
+	"\x05items\x18\b \x03(\v2\x1f.procurement.v1.RequisitionItemR\x05items\x12!\n" +
+	"\fsubmitted_at\x18\t \x01(\tR\vsubmittedAt\x12\x1d\n" +
+	"\n" +
+	"created_at\x18\n" +
+	" \x01(\tR\tcreatedAt\x12\x1d\n" +
+	"\n" +
+	"created_by\x18\v \x01(\tR\tcreatedBy\x12\x1d\n" +
+	"\n" +
+	"updated_at\x18\f \x01(\tR\tupdatedAt\x12\x1d\n" +
+	"\n" +
+	"updated_by\x18\r \x01(\tR\tupdatedBy\"\x8b\x01\n" +
+	"\x0fRequisitionItem\x12 \n" +
+	"\vdescription\x18\x01 \x01(\tR\vdescription\x12\x10\n" +
+	"\x03qty\x18\x02 \x01(\x05R\x03qty\x12(\n" +
+	"\x10unit_price_cents\x18\x03 \x01(\x03R\x0eunitPriceCents\x12\x1a\n" +
+	"\bcategory\x18\x04 \x01(\tR\bcategory\"m\n" +
+	"\x18CreateRequisitionRequest\x12\x1a\n" +
+	"\bcurrency\x18\x01 \x01(\tR\bcurrency\x125\n" +
+	"\x05items\x18\x02 \x03(\v2\x1f.procurement.v1.RequisitionItemR\x05items\"a\n" +
+	"\x18UpdateRequisitionRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x125\n" +
+	"\x05items\x18\x02 \x03(\v2\x1f.procurement.v1.RequisitionItemR\x05items\"S\n" +
+	"\x18SubmitRequisitionRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12'\n" +
+	"\x0fidempotency_key\x18\x02 \x01(\tR\x0eidempotencyKey2\xaf\x05\n" +
 	"\vProcurement\x12K\n" +
 	"\fCreateVendor\x12#.procurement.v1.CreateVendorRequest\x1a\x16.procurement.v1.Vendor\x12E\n" +
 	"\tGetVendor\x12 .procurement.v1.GetVendorRequest\x1a\x16.procurement.v1.Vendor\x12K\n" +
 	"\fUpdateVendor\x12#.procurement.v1.UpdateVendorRequest\x1a\x16.procurement.v1.Vendor\x12S\n" +
 	"\x10DeactivateVendor\x12'.procurement.v1.DeactivateVendorRequest\x1a\x16.procurement.v1.Vendor\x12V\n" +
-	"\vListVendors\x12\".procurement.v1.ListVendorsRequest\x1a#.procurement.v1.ListVendorsResponseBFZDgithub.com/luksluki/eprocurement/gen/go/procurement/v1;procurementv1b\x06proto3"
+	"\vListVendors\x12\".procurement.v1.ListVendorsRequest\x1a#.procurement.v1.ListVendorsResponse\x12Z\n" +
+	"\x11CreateRequisition\x12(.procurement.v1.CreateRequisitionRequest\x1a\x1b.procurement.v1.Requisition\x12Z\n" +
+	"\x11UpdateRequisition\x12(.procurement.v1.UpdateRequisitionRequest\x1a\x1b.procurement.v1.Requisition\x12Z\n" +
+	"\x11SubmitRequisition\x12(.procurement.v1.SubmitRequisitionRequest\x1a\x1b.procurement.v1.RequisitionBFZDgithub.com/luksluki/eprocurement/gen/go/procurement/v1;procurementv1b\x06proto3"
 
 var (
 	file_procurement_v1_procurement_proto_rawDescOnce sync.Once
@@ -574,33 +980,47 @@ func file_procurement_v1_procurement_proto_rawDescGZIP() []byte {
 	return file_procurement_v1_procurement_proto_rawDescData
 }
 
-var file_procurement_v1_procurement_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_procurement_v1_procurement_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
 var file_procurement_v1_procurement_proto_goTypes = []any{
-	(*Vendor)(nil),                  // 0: procurement.v1.Vendor
-	(*CreateVendorRequest)(nil),     // 1: procurement.v1.CreateVendorRequest
-	(*GetVendorRequest)(nil),        // 2: procurement.v1.GetVendorRequest
-	(*UpdateVendorRequest)(nil),     // 3: procurement.v1.UpdateVendorRequest
-	(*DeactivateVendorRequest)(nil), // 4: procurement.v1.DeactivateVendorRequest
-	(*ListVendorsRequest)(nil),      // 5: procurement.v1.ListVendorsRequest
-	(*ListVendorsResponse)(nil),     // 6: procurement.v1.ListVendorsResponse
+	(*Vendor)(nil),                   // 0: procurement.v1.Vendor
+	(*CreateVendorRequest)(nil),      // 1: procurement.v1.CreateVendorRequest
+	(*GetVendorRequest)(nil),         // 2: procurement.v1.GetVendorRequest
+	(*UpdateVendorRequest)(nil),      // 3: procurement.v1.UpdateVendorRequest
+	(*DeactivateVendorRequest)(nil),  // 4: procurement.v1.DeactivateVendorRequest
+	(*ListVendorsRequest)(nil),       // 5: procurement.v1.ListVendorsRequest
+	(*ListVendorsResponse)(nil),      // 6: procurement.v1.ListVendorsResponse
+	(*Requisition)(nil),              // 7: procurement.v1.Requisition
+	(*RequisitionItem)(nil),          // 8: procurement.v1.RequisitionItem
+	(*CreateRequisitionRequest)(nil), // 9: procurement.v1.CreateRequisitionRequest
+	(*UpdateRequisitionRequest)(nil), // 10: procurement.v1.UpdateRequisitionRequest
+	(*SubmitRequisitionRequest)(nil), // 11: procurement.v1.SubmitRequisitionRequest
 }
 var file_procurement_v1_procurement_proto_depIdxs = []int32{
-	0, // 0: procurement.v1.ListVendorsResponse.vendors:type_name -> procurement.v1.Vendor
-	1, // 1: procurement.v1.Procurement.CreateVendor:input_type -> procurement.v1.CreateVendorRequest
-	2, // 2: procurement.v1.Procurement.GetVendor:input_type -> procurement.v1.GetVendorRequest
-	3, // 3: procurement.v1.Procurement.UpdateVendor:input_type -> procurement.v1.UpdateVendorRequest
-	4, // 4: procurement.v1.Procurement.DeactivateVendor:input_type -> procurement.v1.DeactivateVendorRequest
-	5, // 5: procurement.v1.Procurement.ListVendors:input_type -> procurement.v1.ListVendorsRequest
-	0, // 6: procurement.v1.Procurement.CreateVendor:output_type -> procurement.v1.Vendor
-	0, // 7: procurement.v1.Procurement.GetVendor:output_type -> procurement.v1.Vendor
-	0, // 8: procurement.v1.Procurement.UpdateVendor:output_type -> procurement.v1.Vendor
-	0, // 9: procurement.v1.Procurement.DeactivateVendor:output_type -> procurement.v1.Vendor
-	6, // 10: procurement.v1.Procurement.ListVendors:output_type -> procurement.v1.ListVendorsResponse
-	6, // [6:11] is the sub-list for method output_type
-	1, // [1:6] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	0,  // 0: procurement.v1.ListVendorsResponse.vendors:type_name -> procurement.v1.Vendor
+	8,  // 1: procurement.v1.Requisition.items:type_name -> procurement.v1.RequisitionItem
+	8,  // 2: procurement.v1.CreateRequisitionRequest.items:type_name -> procurement.v1.RequisitionItem
+	8,  // 3: procurement.v1.UpdateRequisitionRequest.items:type_name -> procurement.v1.RequisitionItem
+	1,  // 4: procurement.v1.Procurement.CreateVendor:input_type -> procurement.v1.CreateVendorRequest
+	2,  // 5: procurement.v1.Procurement.GetVendor:input_type -> procurement.v1.GetVendorRequest
+	3,  // 6: procurement.v1.Procurement.UpdateVendor:input_type -> procurement.v1.UpdateVendorRequest
+	4,  // 7: procurement.v1.Procurement.DeactivateVendor:input_type -> procurement.v1.DeactivateVendorRequest
+	5,  // 8: procurement.v1.Procurement.ListVendors:input_type -> procurement.v1.ListVendorsRequest
+	9,  // 9: procurement.v1.Procurement.CreateRequisition:input_type -> procurement.v1.CreateRequisitionRequest
+	10, // 10: procurement.v1.Procurement.UpdateRequisition:input_type -> procurement.v1.UpdateRequisitionRequest
+	11, // 11: procurement.v1.Procurement.SubmitRequisition:input_type -> procurement.v1.SubmitRequisitionRequest
+	0,  // 12: procurement.v1.Procurement.CreateVendor:output_type -> procurement.v1.Vendor
+	0,  // 13: procurement.v1.Procurement.GetVendor:output_type -> procurement.v1.Vendor
+	0,  // 14: procurement.v1.Procurement.UpdateVendor:output_type -> procurement.v1.Vendor
+	0,  // 15: procurement.v1.Procurement.DeactivateVendor:output_type -> procurement.v1.Vendor
+	6,  // 16: procurement.v1.Procurement.ListVendors:output_type -> procurement.v1.ListVendorsResponse
+	7,  // 17: procurement.v1.Procurement.CreateRequisition:output_type -> procurement.v1.Requisition
+	7,  // 18: procurement.v1.Procurement.UpdateRequisition:output_type -> procurement.v1.Requisition
+	7,  // 19: procurement.v1.Procurement.SubmitRequisition:output_type -> procurement.v1.Requisition
+	12, // [12:20] is the sub-list for method output_type
+	4,  // [4:12] is the sub-list for method input_type
+	4,  // [4:4] is the sub-list for extension type_name
+	4,  // [4:4] is the sub-list for extension extendee
+	0,  // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_procurement_v1_procurement_proto_init() }
@@ -614,7 +1034,7 @@ func file_procurement_v1_procurement_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_procurement_v1_procurement_proto_rawDesc), len(file_procurement_v1_procurement_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   7,
+			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

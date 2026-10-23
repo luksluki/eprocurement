@@ -26,7 +26,7 @@ Fixed catalog (seeded in `identity.roles`): **admin, requester, approver, buyer,
 | `audit:read` | | | | | ✓ |
 | `users:manage` | | | | | |
 
-Read permissions are broad by design (everyone in the tenant sees the flow they participate in); writes are narrow. Ownership rules ("a requester edits *their own* requisition", "an approver decides *their assigned* step") are domain checks on top of RBAC, arriving with the procurement services.
+Read permissions are broad by design (everyone in the tenant sees the flow they participate in); writes are narrow. Ownership rules are domain checks on top of RBAC, enforced inside the owning service. Landed so far: **requisition edit/submit (#29, maintainer decision 2026-10-23)** — the caller must be the requisition's `requester_id`; admins may act on any requisition of the tenant; violations return `403` with machine code `requisition_forbidden`. Approver-scope rules ("an approver decides *their assigned* step") arrive with the approval service (#30/#31).
 
 ## Enforcement layers (defense in depth)
 
