@@ -19,6 +19,67 @@ Indexes: `vendors_tenant_code_uidx UNIQUE (tenant_id, code)`; `vendors_tenant_id
 
 **RLS**: same pattern as identity — `ENABLE/FORCE ROW LEVEL SECURITY`, policy on `app.tenant_id` with the transaction-scoped `app.rls_bypass` escape used only by auth flows; all vendor queries run through `internal/platform/tenant.WithTenant` as the non-superuser `eproc_app` role. See [identity schema — tenancy](identity.md#tenancy) for the mechanics.
 
+## Migration 0003 — `procurement.requisitions` / `procurement.requisition_items` (#28)
+
+The storage mirror of the `requisition` domain package (state machine, events,
+validation live in `services/procurement/requisition`; persistence arrives with #29).
+
+`procurement.requisitions`:
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | `gen_random_uuid()` |
+| `tenant_id` | uuid NOT NULL | RLS scoping key |
+| `number` | text NOT NULL | `UNIQUE (tenant_id, number)` — numbers unique per tenant only; generated in #29 |
+| `requester_id` | uuid NOT NULL | the user who created the PR |
+| `status` | text NOT NULL DEFAULT `draft` | CHECK: `draft` \| `submitted` \| `approved` \| `rejected` \| `cancelled` \| `closed` — mirrors the domain state machine as defense in depth |
+| `currency` | text NOT NULL | CHECK: `IDR` \| `USD` — mirrors the domain allowlist (FR-03) |
+| `total_cents` | bigint NOT NULL DEFAULT 0 | sum of `qty × unit_price_cents` |
+| `submitted_at` | timestamptz NULL | set on draft → submitted |
+| `created_at`/`created_by`, `updated_at`/`updated_by` | timestamptz / uuid | audit fields, same shape as vendors |
+
+`procurement.requisition_items` (no `tenant_id` — PRD §13; tenancy derives
+from the parent):
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | `gen_random_uuid()` |
+| `requisition_id` | uuid NOT NULL | FK → `requisitions (id)` ON DELETE CASCADE |
+| `description` | text NOT NULL | non-blank enforced in the domain |
+| `qty` | integer NOT NULL | CHECK `qty > 0` |
+| `unit_price_cents` | bigint NOT NULL | CHECK `unit_price_cents >= 0`; integer cents in the header currency |
+| `category` | text NOT NULL DEFAULT '' | free-form |
+| `created_at` | timestamptz NOT NULL | |
+
+Indexes: `requisitions_tenant_number_uidx UNIQUE (tenant_id, number)`;
+`requisitions_tenant_idx (tenant_id)`; `requisitions_tenant_status_idx
+(tenant_id, status)`; `requisition_items_requisition_idx (requisition_id)`.
+
+**RLS**: `ENABLE/FORCE` + `tenant_isolation` on both tables, exactly the 0001
+pattern — except the items policy derives tenancy from the parent
+requisition (`EXISTS` subquery), so isolation stays transitive without
+denormalizing `tenant_id` onto the lines. Cross-tenant reads, updates,
+deletes, and item inserts under another tenant's requisition are all denied
+(verified against a live PostgreSQL).
+
+## Requisition state machine (#28)
+
+Seven legal edges (loose cancel — maintainer decision on #28):
+`draft → submitted`, `draft → cancelled`, `submitted → approved`,
+`submitted → rejected`, `submitted → cancelled`, `approved → cancelled`,
+`approved → closed`. `rejected`, `cancelled`, `closed` are terminal.
+`approved → closed` is driven by PO conversion (#35); the domain `Close`
+method exists now. Every successful transition appends exactly one domain
+event (`requisition_submitted`, …, plus `requisition_created` on draft
+creation) to the in-memory aggregate log (`Events()` / `PullEvents()`) —
+the outbox writer comes with #45.
+
+Error codes: `requisition_currency_invalid`, `requisition_description_invalid`,
+`requisition_qty_invalid`, `requisition_unit_price_invalid`,
+`requisition_items_empty` → 400 · `requisition_illegal_transition` → 409
+(domain sentinel → `codes.Aborted` in the procurement server; the gateway
+maps `Aborted` → HTTP 409 with #29, when the endpoints go live).
+
 ## Lifecycle
 
 - **Create** (`vendor:write`): code normalized to uppercase, validated (`^[A-Z0-9][A-Z0-9-]{1,31}$`); duplicate in the same tenant → `vendor_duplicate_code` (HTTP 409).
@@ -34,7 +95,9 @@ Indexes: `vendors_tenant_code_uidx UNIQUE (tenant_id, code)`; `vendors_tenant_id
 
 - #26: attachments via presigned uploads (done).
 - #27: list/search/filter/pagination (done).
-- Requisitions, approvals, POs, GRNs, invoices + transactional outbox (M2–M3).
+- #28: requisition domain + state machine + tables (done; domain and migration only).
+- #29: requisition create/edit/submit API (store, number generation, REST/gRPC wiring, gateway `Aborted` → 409).
+- Approvals (#30/#31), PO conversion (#35), outbox (#45) (M2–M3).
 
 ## Vendor list — filters, pagination, query plans (#27)
 
