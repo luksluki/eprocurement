@@ -2,15 +2,18 @@ package approval
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/luksluki/eprocurement/internal/platform/dbmigrate"
+	"github.com/luksluki/eprocurement/internal/platform/logger"
 	"github.com/luksluki/eprocurement/internal/platform/tenant"
 	"github.com/luksluki/eprocurement/services/procurement/migrations"
 	"github.com/luksluki/eprocurement/services/procurement/requisition"
@@ -59,6 +62,12 @@ func openTestDB(t *testing.T) *pgxpool.Pool {
 func cleanupApprovals(t *testing.T, db *pgxpool.Pool) {
 	t.Helper()
 	_ = tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(context.Background(),
+			`DELETE FROM procurement.outbox WHERE tenant_id IN ($1, $2)`, tenantA, tenantB); err != nil {
+			return err
+		}
+		// decision_idempotency rides the approval_steps → requisitions
+		// cascades, so deleting the requisitions clears it too.
 		if _, err := tx.Exec(context.Background(),
 			`DELETE FROM procurement.requisitions WHERE tenant_id IN ($1, $2) AND number LIKE 'PR-%'`,
 			tenantA, tenantB); err != nil {
@@ -517,5 +526,275 @@ func TestStoreDecideConcurrent(t *testing.T) {
 	persisted, err := s.ListSteps(ctx, tenantA, submitted.ID)
 	if err != nil || len(persisted) != 1 || persisted[0].Status != StepApproved || persisted[0].DecidedBy != userApp {
 		t.Fatalf("persisted step = (%v, %v)", persisted, err)
+	}
+}
+
+// outboxRow is one procurement.outbox row as the tests read it back.
+type outboxRow struct {
+	ID         string
+	EventType  string
+	Version    int32
+	Payload    []byte
+	ActorID    *string
+	TraceID    string
+	EntityType string
+	EntityID   string
+	Published  *struct{}
+}
+
+// outboxRows reads the decide events of one requisition straight from the
+// table (bypassing RLS on purpose — the count is the exactly-once evidence).
+func outboxRows(t *testing.T, db *pgxpool.Pool, requisitionID string) []outboxRow {
+	t.Helper()
+	rows := []outboxRow{}
+	_ = tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		rs, err := tx.Query(context.Background(), `
+			SELECT id::text, event_type, version, payload, actor_id::text,
+			       trace_id, entity_type, entity_id::text, published_at
+			FROM procurement.outbox WHERE entity_id = $1
+			ORDER BY occurred_at, event_type`, requisitionID)
+		if err != nil {
+			return err
+		}
+		defer rs.Close()
+		for rs.Next() {
+			var r outboxRow
+			var published any
+			if err := rs.Scan(&r.ID, &r.EventType, &r.Version, &r.Payload,
+				&r.ActorID, &r.TraceID, &r.EntityType, &r.EntityID, &published); err != nil {
+				return err
+			}
+			rows = append(rows, r)
+		}
+		return rs.Err()
+	})
+	return rows
+}
+
+func decideKeyRows(t *testing.T, db *pgxpool.Pool, tenantID, key string) int {
+	t.Helper()
+	var n int
+	_ = tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		return tx.QueryRow(context.Background(),
+			`SELECT count(*) FROM procurement.decision_idempotency WHERE tenant_id = $1 AND idempotency_key = $2`,
+			tenantID, key).Scan(&n)
+	})
+	return n
+}
+
+// AC (idempotent decide + exactly-once outbox): a keyed decide records its
+// key once and writes one step event (plus one terminal event only when the
+// flow finishes); replaying the key returns the current state and writes
+// nothing; the same key on another step of the tenant is a conflict; a
+// duplicate decide without a key on a decided step is still
+// ErrStepNotCurrent; the rows carry actor and the propagated trace id.
+func TestStoreDecideIdempotencyAndOutbox(t *testing.T) {
+	db := openTestDB(t)
+	s, reqs := NewStore(db), requisition.NewStore(db)
+	t.Cleanup(func() { cleanupApprovals(t, db) })
+	cleanupApprovals(t, db)
+	// The trace id rides the context exactly as the TraceInterceptor puts
+	// it there for gRPC calls.
+	ctx := logger.WithTraceID(context.Background(), "trace-31-store")
+
+	submitted, steps := submittedPR(t, ctx, s, reqs, userReq, "key-31-sub-a")
+
+	// Mid-flow keyed approve: one step event, no terminal event.
+	after1, updated, err := s.Decide(ctx, tenantA, DecideInput{
+		StepID: steps[0].ID, Decision: DecisionApprove, ActorID: userApp,
+		Roles: []string{"approver"}, IdempotencyKey: "decide-31-a",
+	})
+	if err != nil {
+		t.Fatalf("keyed approve step 1: %v", err)
+	}
+	if after1.Status != requisition.StatusSubmitted || updated[0].Status != StepApproved {
+		t.Fatalf("after keyed approve = %s %+v", after1.Status, updated)
+	}
+	rows := outboxRows(t, db, submitted.ID)
+	if len(rows) != 1 || rows[0].EventType != OutboxStepApproved ||
+		rows[0].ActorID == nil || *rows[0].ActorID != userApp ||
+		rows[0].TraceID != "trace-31-store" || rows[0].Version != 1 ||
+		rows[0].EntityType != "requisition" || rows[0].EntityID != submitted.ID ||
+		rows[0].Published != nil {
+		t.Fatalf("mid-flow outbox rows = %+v", rows)
+	}
+	var payload DecisionPayload
+	if err := json.Unmarshal(rows[0].Payload, &payload); err != nil {
+		t.Fatalf("payload unmarshal: %v", err)
+	}
+	if payload.RequisitionID != submitted.ID || payload.Number != submitted.Number ||
+		payload.RequesterID != userReq || payload.StepID != steps[0].ID ||
+		payload.StepNo != 1 || payload.Decision != DecisionApprove ||
+		payload.Reason != "" || payload.DecidedBy != userApp || payload.DecidedAt.IsZero() {
+		t.Fatalf("step payload = %+v", payload)
+	}
+	if n := decideKeyRows(t, db, tenantA, "decide-31-a"); n != 1 {
+		t.Fatalf("decide key rows = %d, want 1", n)
+	}
+
+	// Replay: current requisition + steps, nothing written. (DecidedAt is
+	// truncated to microseconds: the replay reads the value back from
+	// timestamptz, the winner's copy is nanosecond in-memory.)
+	replayed, replaySteps, err := s.Decide(ctx, tenantA, DecideInput{
+		StepID: steps[0].ID, Decision: DecisionApprove, ActorID: userApp,
+		Roles: []string{"approver"}, IdempotencyKey: "decide-31-a",
+	})
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if replayed.Status != requisition.StatusSubmitted || len(replaySteps) != 2 ||
+		replaySteps[0].Status != StepApproved || replaySteps[0].DecidedBy != userApp ||
+		!replaySteps[0].DecidedAt.Equal(updated[0].DecidedAt.Truncate(time.Microsecond)) {
+		t.Fatalf("replay = %s %+v, want the winner's current state", replayed.Status, replaySteps)
+	}
+	if got := len(outboxRows(t, db, submitted.ID)); got != 1 {
+		t.Fatalf("outbox rows after replay = %d, want 1", got)
+	}
+	if n := decideKeyRows(t, db, tenantA, "decide-31-a"); n != 1 {
+		t.Fatalf("decide key rows after replay = %d, want 1", n)
+	}
+
+	// The same key cannot name another step of the tenant (even of the same
+	// requisition) — conflict, and still nothing written.
+	if _, _, err := s.Decide(ctx, tenantA, DecideInput{
+		StepID: steps[1].ID, Decision: DecisionApprove, ActorID: userFin,
+		Roles: []string{"finance", "approver"}, IdempotencyKey: "decide-31-a",
+	}); !errors.Is(err, ErrIdempotencyKeyConflict) {
+		t.Fatalf("key on other step err = %v, want ErrIdempotencyKeyConflict", err)
+	}
+	if got := len(outboxRows(t, db, submitted.ID)); got != 1 {
+		t.Fatalf("outbox rows after key conflict = %d, want 1", got)
+	}
+
+	// Terminal keyed approve of the last step: step event + pr.approved.
+	after2, _, err := s.Decide(ctx, tenantA, DecideInput{
+		StepID: steps[1].ID, Decision: DecisionApprove, Reason: "within budget",
+		ActorID: userFin, Roles: []string{"finance", "approver"}, IdempotencyKey: "decide-31-b",
+	})
+	if err != nil || after2.Status != requisition.StatusApproved {
+		t.Fatalf("terminal approve = (%s, %v), want approved", after2.Status, err)
+	}
+	rows = outboxRows(t, db, submitted.ID)
+	if len(rows) != 3 {
+		t.Fatalf("terminal outbox rows = %d, want 3 (step 1, step 2, pr.approved)", len(rows))
+	}
+	types := map[string]bool{}
+	for _, r := range rows {
+		types[r.EventType] = true
+	}
+	if !types[OutboxStepApproved] || !types[OutboxApproved] || len(types) != 2 {
+		t.Fatalf("terminal event types = %v", types)
+	}
+
+	// A duplicate decide WITHOUT a key on the decided step keeps its #30
+	// answer: ErrStepNotCurrent, no outbox growth.
+	if _, _, err := s.Decide(ctx, tenantA, DecideInput{
+		StepID: steps[1].ID, Decision: DecisionApprove, ActorID: userFin,
+		Roles: []string{"finance", "approver"},
+	}); !errors.Is(err, ErrStepNotCurrent) {
+		t.Fatalf("no-key duplicate err = %v, want ErrStepNotCurrent", err)
+	}
+	if got := len(outboxRows(t, db, submitted.ID)); got != 3 {
+		t.Fatalf("outbox rows after no-key duplicate = %d, want 3", got)
+	}
+
+	// Cross-tenant: tenant B cannot even see the step, key or not.
+	if _, _, err := s.Decide(ctx, tenantB, DecideInput{
+		StepID: steps[1].ID, Decision: DecisionApprove, ActorID: userFin,
+		Roles: []string{"finance", "approver"}, IdempotencyKey: "decide-31-a",
+	}); !errors.Is(err, ErrStepNotFound) {
+		t.Fatalf("cross-tenant keyed decide err = %v, want ErrStepNotFound", err)
+	}
+
+	// A reject is always terminal: step event + pr.rejected in one decide.
+	rejReq, rejSteps := submittedPR(t, ctx, s, reqs, userReq, "key-31-sub-b")
+	if _, _, err := s.Decide(ctx, tenantA, DecideInput{
+		StepID: rejSteps[0].ID, Decision: DecisionReject, Reason: "over budget",
+		ActorID: userApp, Roles: []string{"approver"}, IdempotencyKey: "decide-31-rej",
+	}); err != nil {
+		t.Fatalf("keyed reject: %v", err)
+	}
+	rows = outboxRows(t, db, rejReq.ID)
+	if len(rows) != 2 {
+		t.Fatalf("reject outbox rows = %d, want 2", len(rows))
+	}
+	rejTypes := map[string]bool{}
+	for _, r := range rows {
+		rejTypes[r.EventType] = true
+	}
+	if !rejTypes[OutboxStepRejected] || !rejTypes[OutboxRejected] {
+		t.Fatalf("reject event types = %v", rejTypes)
+	}
+}
+
+// AC (concurrent keyed decides): two goroutines decide the same step with
+// the same key — the parent lock serializes them into one winner and one
+// idempotent replay (never a conflict), one key row, and exactly the one
+// decision's outbox rows.
+func TestStoreDecideConcurrentSameKey(t *testing.T) {
+	db := openTestDB(t)
+	s, reqs := NewStore(db), requisition.NewStore(db)
+	t.Cleanup(func() { cleanupApprovals(t, db) })
+	cleanupApprovals(t, db)
+	ctx := context.Background()
+
+	// One-step flow so the first decision is also terminal.
+	if _, err := s.ReplaceRules(ctx, tenantA, rulesA[:1]); err != nil {
+		t.Fatalf("replace rules: %v", err)
+	}
+	r, err := reqs.Create(ctx, tenantA, requisition.CreateInput{
+		RequesterID: userReq, Currency: "IDR",
+		Items: []requisition.Item{{Description: "Item", Qty: 1, UnitPriceCents: 6_000_000}},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	submitted, steps, err := submit(ctx, s, reqs, tenantA, r.ID, userReq, "")
+	if err != nil || len(steps) != 1 {
+		t.Fatalf("submit = (%+v, %v, steps=%d)", submitted, err, len(steps))
+	}
+
+	const n = 2
+	type result struct {
+		req  requisition.Requisition
+		step Step
+	}
+	results := make([]result, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			req, updated, err := s.Decide(ctx, tenantA, DecideInput{
+				StepID: steps[0].ID, Decision: DecisionApprove,
+				ActorID: userApp, Roles: []string{"approver"},
+				IdempotencyKey: "decide-31-race",
+			})
+			if err == nil {
+				results[i] = result{req, updated[0]}
+			}
+			errs[i] = err
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d failed: %v (want one winner + one replay, never a conflict)", i, err)
+		}
+		if results[i].req.Status != requisition.StatusApproved || results[i].step.Status != StepApproved {
+			t.Fatalf("goroutine %d = (%s, %s), want approved", i, results[i].req.Status, results[i].step.Status)
+		}
+	}
+	if results[0].step.DecidedBy != results[1].step.DecidedBy ||
+		!results[0].step.DecidedAt.Truncate(time.Microsecond).Equal(results[1].step.DecidedAt.Truncate(time.Microsecond)) {
+		t.Fatalf("decisions differ: %+v vs %+v", results[0].step, results[1].step)
+	}
+	if got := len(outboxRows(t, db, submitted.ID)); got != 2 {
+		t.Fatalf("outbox rows after race = %d, want 2 (one step event + one terminal)", got)
+	}
+	if n := decideKeyRows(t, db, tenantA, "decide-31-race"); n != 1 {
+		t.Fatalf("decide key rows after race = %d, want 1", n)
 	}
 }

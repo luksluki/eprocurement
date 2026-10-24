@@ -48,8 +48,12 @@ service Procurement {
   // role_required (admins excepted) and must not be the requester
   // (self-approval is forbidden for everyone, admins included). A reject
   // skips the remaining steps and rejects the requisition; approving the
-  // last step approves it. The response carries the requisition with its
-  // latest approval_steps.
+  // last step approves it. The optional idempotency_key (from the gateway's
+  // Idempotency-Key header) names the decision: replaying the same key on
+  // the same step returns the current state without a second decision or a
+  // second outbox event; reusing it for another step in the tenant is
+  // rejected. The response carries the requisition with its latest
+  // approval_steps.
   rpc DecideApproval(DecideApprovalRequest) returns (DecideApprovalResponse);
   // GetApprovalRules returns the caller tenant's whole rule set.
   rpc GetApprovalRules(GetApprovalRulesRequest) returns (ApprovalRulesResponse);
@@ -180,6 +184,10 @@ message DecideApprovalRequest {
   // Required for reject (non-blank after trimming), optional for approve;
   // bounded to 1000 characters at the edge and the service layer.
   string reason = 3;
+  // Optional: 1-64 chars after trimming; empty means no idempotency.
+  // Replaying the same key on the same step returns the current state;
+  // reusing it for another step in the tenant is rejected.
+  string idempotency_key = 4;
 }
 
 message DecideApprovalResponse {

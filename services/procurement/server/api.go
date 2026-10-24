@@ -173,6 +173,10 @@ func mapApprovalError(err error) error {
 		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, approval.ErrStepNotCurrent):
 		return status.Error(codes.Aborted, err.Error())
+	case errors.Is(err, approval.ErrIdempotencyKeyInvalid):
+		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, approval.ErrIdempotencyKeyConflict):
+		return status.Error(codes.AlreadyExists, err.Error())
 	case errors.Is(err, approval.ErrStepNotFound), errors.Is(err, requisition.ErrNotFound):
 		return status.Error(codes.NotFound, err.Error())
 	case errors.Is(err, approval.ErrSelfForbidden), errors.Is(err, approval.ErrRoleForbidden):
@@ -196,8 +200,9 @@ func requireOwner(r requisition.Requisition, auth *rbac.AuthContext) error {
 	return requisition.ErrForbidden
 }
 
-// maxIdempotencyKeyLen bounds the submit Idempotency-Key (gateway re-checks
-// the same limit at the edge; this is the service-layer defense in depth).
+// maxIdempotencyKeyLen bounds the submit and decide Idempotency-Key (the
+// gateway re-checks the same limit at the edge; this is the service-layer
+// defense in depth).
 const maxIdempotencyKeyLen = 64
 
 // normalizeCurrency uppercases and trims the client currency at the API
@@ -337,22 +342,31 @@ func (a *api) SubmitRequisition(ctx context.Context, req *procurementv1.SubmitRe
 // permission: the decider must not be the requester (self-approval is
 // forbidden with no admin exception) and must hold the step's role_required
 // (admins excepted) — enforced in the approval domain inside the locked
-// transaction. The response carries the requisition with its latest steps.
+// transaction. The optional idempotency key follows the submit convention:
+// 1–64 chars after trimming, replay returns the current state, another
+// step's key conflicts. The decision's outbox rows (step + terminal event)
+// commit with the decision; the response carries the requisition with its
+// latest steps.
 func (a *api) DecideApproval(ctx context.Context, req *procurementv1.DecideApprovalRequest) (*procurementv1.DecideApprovalResponse, error) {
 	auth, err := authTenant(ctx)
 	if err != nil {
 		return nil, err
+	}
+	key := strings.TrimSpace(req.GetIdempotencyKey())
+	if key != "" && len(key) > maxIdempotencyKeyLen {
+		return nil, mapApprovalError(approval.ErrIdempotencyKeyInvalid)
 	}
 	reason := strings.TrimSpace(req.GetReason())
 	if len(reason) > approval.MaxReasonLen {
 		return nil, mapApprovalError(approval.ErrReasonTooLong)
 	}
 	r, steps, err := a.approvals.Decide(ctx, auth.TenantID, approval.DecideInput{
-		StepID:   strings.TrimSpace(req.GetStepId()),
-		Decision: normalizeDecision(req.GetDecision()),
-		Reason:   reason,
-		ActorID:  auth.UserID,
-		Roles:    auth.Roles,
+		StepID:         strings.TrimSpace(req.GetStepId()),
+		Decision:       normalizeDecision(req.GetDecision()),
+		Reason:         reason,
+		ActorID:        auth.UserID,
+		Roles:          auth.Roles,
+		IdempotencyKey: key,
 	})
 	if err != nil {
 		return nil, mapApprovalError(err)

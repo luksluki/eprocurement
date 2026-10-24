@@ -3,8 +3,11 @@
 // tenant through the RLS helpers. Submit-time materialization runs inside
 // the requisition store's transaction (MaterializeTx); Decide opens its own
 // transaction and locks the parent requisition row FOR UPDATE, the same
-// serialization point submit and edit use. Machine-readable IO failure codes
-// live in approval.go next to the domain's validation sentinels.
+// serialization point submit and edit use. Decide is idempotent through an
+// optional key (procurement.decision_idempotency, recorded on the success
+// path only) and appends the decision's procurement.outbox rows in the same
+// transaction (#31; the publisher is #45). Machine-readable IO failure
+// codes live in approval.go next to the domain's validation sentinels.
 package approval
 
 import (
@@ -16,9 +19,12 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/luksluki/eprocurement/internal/platform/logger"
 	"github.com/luksluki/eprocurement/internal/platform/tenant"
+	"github.com/luksluki/eprocurement/services/procurement/outbox"
 	"github.com/luksluki/eprocurement/services/procurement/requisition"
 )
 
@@ -184,22 +190,59 @@ func scanStep(row pgx.Row, st *Step) error {
 }
 
 // DecideInput is the store-level decide payload; Decision/Reason are already
-// normalized (trim, lowercase decision) by the API layer.
+// normalized (trim, lowercase decision) by the API layer. IdempotencyKey is
+// the trimmed decide key — empty means no idempotency; the 1–64 length bound
+// is enforced at the edge and the service layer.
 type DecideInput struct {
-	StepID   string
-	Decision string
-	Reason   string
-	ActorID  string
-	Roles    []string
+	StepID         string
+	Decision       string
+	Reason         string
+	ActorID        string
+	Roles          []string
+	IdempotencyKey string
+}
+
+// Outbox event types written by Decide (issue #31). pr.approved /
+// pr.rejected are the PRD §14.6 catalog entries; pr.step_approved /
+// pr.step_rejected extend the catalog with two-segment names because the
+// §14.5 topic bindings use pr.* and the * wildcard matches exactly one
+// word — three-segment step names would never be delivered by a natural
+// binding. Documented as a catalog extension in docs/schema/procurement.md.
+const (
+	OutboxStepApproved = "pr.step_approved"
+	OutboxStepRejected = "pr.step_rejected"
+	OutboxApproved     = "pr.approved"
+	OutboxRejected     = "pr.rejected"
+)
+
+// DecisionPayload is the JSONB payload shared by the decide outbox events —
+// the step event and the terminal event. It carries the minimum the
+// notification consumer (#45; recipient = RequesterID) and the timeline /
+// audit projections (#43/#34) need.
+type DecisionPayload struct {
+	RequisitionID string    `json:"requisition_id"`
+	Number        string    `json:"number"`
+	RequesterID   string    `json:"requester_id"`
+	StepID        string    `json:"step_id"`
+	StepNo        int32     `json:"step_no"`
+	Decision      string    `json:"decision"`
+	Reason        string    `json:"reason"`
+	DecidedBy     string    `json:"decided_by"`
+	DecidedAt     time.Time `json:"decided_at"`
 }
 
 // Decide applies one approve/reject decision. The whole flow runs in one
 // tenant transaction: the step is read, its parent requisition row is locked
 // FOR UPDATE (the serialization point shared with submit/edit — a concurrent
 // decide on the same requisition blocks here, and a future cancel endpoint
-// will serialize on the same lock), the steps are re-loaded after the lock,
-// the domain re-checks status and currency, and the guarded writes land.
-// Cross-tenant step ids are indistinguishable from missing ones.
+// will serialize on the same lock), the decide idempotency key is checked
+// (a key that already named this step replays the current state without
+// writing anything; one that named another step of the tenant conflicts),
+// the steps are re-loaded after the lock, the domain re-checks status and
+// currency, and the guarded writes land. The outbox rows for the decision
+// and, on success only, the idempotency key row are written by the same
+// transaction. Cross-tenant step ids are indistinguishable from missing
+// ones.
 func (s *Store) Decide(ctx context.Context, tenantID string, in DecideInput) (requisition.Requisition, []Step, error) {
 	if _, err := uuid.Parse(in.StepID); err != nil {
 		return requisition.Requisition{}, nil, ErrStepIDInvalid
@@ -220,6 +263,30 @@ func (s *Store) Decide(ctx context.Context, tenantID string, in DecideInput) (re
 		req, err := requisition.LoadForUpdate(ctx, tx, step.RequisitionID)
 		if err != nil {
 			return err
+		}
+
+		// Keyed decides check the idempotency key after the lock (the
+		// pinned submit semantics): a key that already named this step's
+		// decision returns the current requisition + steps as-is — no
+		// second transition, no second outbox row; a key that named
+		// another step of the tenant is a conflict. Keys are recorded
+		// only by a successful decide, so nothing below burns one.
+		if in.IdempotencyKey != "" {
+			keyedStep, err := lookupDecideKeyTx(ctx, tx, tenantID, in.IdempotencyKey)
+			if err != nil {
+				return err
+			}
+			if keyedStep != "" {
+				if keyedStep != in.StepID {
+					return ErrIdempotencyKeyConflict
+				}
+				steps, err := loadStepsTx(ctx, tx, step.RequisitionID)
+				if err != nil {
+					return err
+				}
+				outReq, outSteps = req, steps
+				return nil
+			}
 		}
 
 		// Re-load the steps after the lock; the domain re-checks the
@@ -283,6 +350,24 @@ func (s *Store) Decide(ctx context.Context, tenantID string, in DecideInput) (re
 			}
 		}
 
+		// The decision's outbox rows — same transaction as the guarded
+		// writes above, so exactly one step event (plus one terminal
+		// event when the flow finished) commits with the decision. The
+		// #45 publisher drains the table later.
+		if err := appendDecisionEventsTx(ctx, tx, tenantID, req, in, decided); err != nil {
+			return err
+		}
+
+		// The idempotency key is recorded on the success path only.
+		if in.IdempotencyKey != "" {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO procurement.decision_idempotency (tenant_id, idempotency_key, step_id)
+				VALUES ($1, $2, $3)`,
+				tenantID, in.IdempotencyKey, in.StepID); err != nil {
+				return mapDecideKeyError(err)
+			}
+		}
+
 		outReq = req
 		outSteps = updated
 		return nil
@@ -291,6 +376,77 @@ func (s *Store) Decide(ctx context.Context, tenantID string, in DecideInput) (re
 		return requisition.Requisition{}, nil, wrap("decide", err)
 	}
 	return outReq, outSteps, nil
+}
+
+// lookupDecideKeyTx returns the step id a decide key already named in this
+// tenant, or "" when the key is unused. Runs inside the decide transaction
+// after the parent lock, so concurrent keyed decides on one step serialize
+// here: the loser deterministically replays the winner's outcome.
+func lookupDecideKeyTx(ctx context.Context, tx pgx.Tx, tenantID, key string) (string, error) {
+	var stepID string
+	err := tx.QueryRow(ctx, `
+		SELECT step_id::text FROM procurement.decision_idempotency
+		WHERE tenant_id = $1 AND idempotency_key = $2`, tenantID, key).Scan(&stepID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return stepID, nil
+}
+
+// mapDecideKeyError recognizes the composite-PK violation on the decide key
+// — unreachable behind the parent lock (the lookup above already answered
+// replay/conflict), kept as the belt-and-braces twin of the submit mapping
+// in the requisition store.
+func mapDecideKeyError(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "decision_idempotency_pkey" {
+		return ErrIdempotencyKeyConflict
+	}
+	return err
+}
+
+// appendDecisionEventsTx writes the outbox rows for one landed decision:
+// exactly one step event, plus one terminal event when the decision finished
+// the flow (the requisition left `submitted`). The entity is the
+// requisition — the filter key of the events endpoint (PRD §15) and the
+// timeline projection (#43); the step rides in the payload. Actor and trace
+// come from the caller's context, so the rows carry the REST trace id.
+func appendDecisionEventsTx(ctx context.Context, tx pgx.Tx, tenantID string, req requisition.Requisition, in DecideInput, decided *Step) error {
+	payload := DecisionPayload{
+		RequisitionID: req.ID, Number: req.Number, RequesterID: req.RequesterID,
+		StepID: decided.ID, StepNo: decided.StepNo,
+		Decision: in.Decision, Reason: decided.Reason,
+		DecidedBy: in.ActorID, DecidedAt: *decided.DecidedAt,
+	}
+	base := outbox.Event{
+		TenantID: tenantID, Version: 1, Payload: payload,
+		ActorID: in.ActorID, TraceID: logger.TraceID(ctx),
+		EntityType: "requisition", EntityID: req.ID, OccurredAt: *decided.DecidedAt,
+	}
+	events := []outbox.Event{base}
+	events[0].ID = uuid.NewString()
+	events[0].EventType = OutboxStepApproved
+	if in.Decision == DecisionReject {
+		events[0].EventType = OutboxStepRejected
+	}
+	if req.Status != requisition.StatusSubmitted {
+		terminal := base
+		terminal.ID = uuid.NewString()
+		terminal.EventType = OutboxApproved
+		if req.Status == requisition.StatusRejected {
+			terminal.EventType = OutboxRejected
+		}
+		events = append(events, terminal)
+	}
+	for _, ev := range events {
+		if err := outbox.AppendTx(ctx, tx, ev); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func loadStepsTx(ctx context.Context, tx pgx.Tx, requisitionID string) ([]Step, error) {
@@ -318,6 +474,7 @@ func wrap(what string, err error) error {
 		ErrRuleThresholdInvalid, ErrRuleStepNoInvalid, ErrRuleStepNoDuplicate,
 		ErrDecisionInvalid, ErrReasonRequired, ErrSelfForbidden,
 		ErrRoleForbidden, ErrStepNotCurrent, ErrStepNotFound, ErrStepIDInvalid,
+		ErrIdempotencyKeyInvalid, ErrIdempotencyKeyConflict,
 		requisition.ErrNotFound, requisition.ErrIDInvalid,
 	} {
 		if errors.Is(err, sentinel) {

@@ -172,7 +172,7 @@ func metadataOf(t *testing.T, ctx context.Context) map[string]string {
 		t.Fatal("no outgoing metadata on the procurement call")
 	}
 	out := map[string]string{}
-	for _, key := range []string{rbac.MDTenantID, rbac.MDUserID, rbac.MDRole} {
+	for _, key := range []string{rbac.MDTenantID, rbac.MDUserID, rbac.MDRole, "x-trace-id"} {
 		if got := md.Get(key); len(got) > 0 {
 			out[key] = got[0]
 		}
