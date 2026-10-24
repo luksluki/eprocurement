@@ -512,20 +512,23 @@ func (x *ListVendorsResponse) GetPageSize() int32 {
 // Requisition is the purchase-requisition aggregate as stored: server-side
 // number, requester, status, currency, and the server-computed total.
 type Requisition struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	TenantId      string                 `protobuf:"bytes,2,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
-	Number        string                 `protobuf:"bytes,3,opt,name=number,proto3" json:"number,omitempty"`                              // server-generated per tenant, e.g. "PR-000042"
-	RequesterId   string                 `protobuf:"bytes,4,opt,name=requester_id,json=requesterId,proto3" json:"requester_id,omitempty"` // user who created the PR
-	Status        string                 `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`                              // draft | submitted | approved | rejected | cancelled | closed
-	Currency      string                 `protobuf:"bytes,6,opt,name=currency,proto3" json:"currency,omitempty"`                          // IDR | USD
-	TotalCents    int64                  `protobuf:"varint,7,opt,name=total_cents,json=totalCents,proto3" json:"total_cents,omitempty"`   // server-computed sum of qty × unit_price_cents
-	Items         []*RequisitionItem     `protobuf:"bytes,8,rep,name=items,proto3" json:"items,omitempty"`
-	SubmittedAt   string                 `protobuf:"bytes,9,opt,name=submitted_at,json=submittedAt,proto3" json:"submitted_at,omitempty"` // RFC 3339, empty while draft
-	CreatedAt     string                 `protobuf:"bytes,10,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`      // RFC 3339
-	CreatedBy     string                 `protobuf:"bytes,11,opt,name=created_by,json=createdBy,proto3" json:"created_by,omitempty"`      // user id
-	UpdatedAt     string                 `protobuf:"bytes,12,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`      // RFC 3339
-	UpdatedBy     string                 `protobuf:"bytes,13,opt,name=updated_by,json=updatedBy,proto3" json:"updated_by,omitempty"`      // user id
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Id          string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	TenantId    string                 `protobuf:"bytes,2,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
+	Number      string                 `protobuf:"bytes,3,opt,name=number,proto3" json:"number,omitempty"`                              // server-generated per tenant, e.g. "PR-000042"
+	RequesterId string                 `protobuf:"bytes,4,opt,name=requester_id,json=requesterId,proto3" json:"requester_id,omitempty"` // user who created the PR
+	Status      string                 `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`                              // draft | submitted | approved | rejected | cancelled | closed
+	Currency    string                 `protobuf:"bytes,6,opt,name=currency,proto3" json:"currency,omitempty"`                          // IDR | USD
+	TotalCents  int64                  `protobuf:"varint,7,opt,name=total_cents,json=totalCents,proto3" json:"total_cents,omitempty"`   // server-computed sum of qty × unit_price_cents
+	Items       []*RequisitionItem     `protobuf:"bytes,8,rep,name=items,proto3" json:"items,omitempty"`
+	SubmittedAt string                 `protobuf:"bytes,9,opt,name=submitted_at,json=submittedAt,proto3" json:"submitted_at,omitempty"` // RFC 3339, empty while draft
+	CreatedAt   string                 `protobuf:"bytes,10,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`      // RFC 3339
+	CreatedBy   string                 `protobuf:"bytes,11,opt,name=created_by,json=createdBy,proto3" json:"created_by,omitempty"`      // user id
+	UpdatedAt   string                 `protobuf:"bytes,12,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`      // RFC 3339
+	UpdatedBy   string                 `protobuf:"bytes,13,opt,name=updated_by,json=updatedBy,proto3" json:"updated_by,omitempty"`      // user id
+	// Steps materialized from the approval rules at submit (empty while
+	// draft); submit and decide responses carry the latest known state.
+	ApprovalSteps []*ApprovalStep `protobuf:"bytes,14,rep,name=approval_steps,json=approvalSteps,proto3" json:"approval_steps,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -651,6 +654,123 @@ func (x *Requisition) GetUpdatedBy() string {
 	return ""
 }
 
+func (x *Requisition) GetApprovalSteps() []*ApprovalStep {
+	if x != nil {
+		return x.ApprovalSteps
+	}
+	return nil
+}
+
+// ApprovalStep is one materialized approval step — a snapshot of the rule
+// that produced it at submit time. Later rule changes never rewrite it.
+type ApprovalStep struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Id             string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	RequisitionId  string                 `protobuf:"bytes,2,opt,name=requisition_id,json=requisitionId,proto3" json:"requisition_id,omitempty"`
+	StepNo         int32                  `protobuf:"varint,3,opt,name=step_no,json=stepNo,proto3" json:"step_no,omitempty"`                         // order of decision, 1-based; smallest pending first
+	RoleRequired   string                 `protobuf:"bytes,4,opt,name=role_required,json=roleRequired,proto3" json:"role_required,omitempty"`        // decider must hold this role (admins excepted)
+	ThresholdCents int64                  `protobuf:"varint,5,opt,name=threshold_cents,json=thresholdCents,proto3" json:"threshold_cents,omitempty"` // rule threshold snapshot
+	Status         string                 `protobuf:"bytes,6,opt,name=status,proto3" json:"status,omitempty"`                                        // pending | approved | rejected | skipped
+	DecidedBy      string                 `protobuf:"bytes,7,opt,name=decided_by,json=decidedBy,proto3" json:"decided_by,omitempty"`                 // user id, empty while pending/skipped
+	DecidedAt      string                 `protobuf:"bytes,8,opt,name=decided_at,json=decidedAt,proto3" json:"decided_at,omitempty"`                 // RFC 3339, empty while pending/skipped
+	Reason         string                 `protobuf:"bytes,9,opt,name=reason,proto3" json:"reason,omitempty"`                                        // required on reject, optional on approve
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *ApprovalStep) Reset() {
+	*x = ApprovalStep{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ApprovalStep) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ApprovalStep) ProtoMessage() {}
+
+func (x *ApprovalStep) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ApprovalStep.ProtoReflect.Descriptor instead.
+func (*ApprovalStep) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *ApprovalStep) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *ApprovalStep) GetRequisitionId() string {
+	if x != nil {
+		return x.RequisitionId
+	}
+	return ""
+}
+
+func (x *ApprovalStep) GetStepNo() int32 {
+	if x != nil {
+		return x.StepNo
+	}
+	return 0
+}
+
+func (x *ApprovalStep) GetRoleRequired() string {
+	if x != nil {
+		return x.RoleRequired
+	}
+	return ""
+}
+
+func (x *ApprovalStep) GetThresholdCents() int64 {
+	if x != nil {
+		return x.ThresholdCents
+	}
+	return 0
+}
+
+func (x *ApprovalStep) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *ApprovalStep) GetDecidedBy() string {
+	if x != nil {
+		return x.DecidedBy
+	}
+	return ""
+}
+
+func (x *ApprovalStep) GetDecidedAt() string {
+	if x != nil {
+		return x.DecidedAt
+	}
+	return ""
+}
+
+func (x *ApprovalStep) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
 type RequisitionItem struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	Description    string                 `protobuf:"bytes,1,opt,name=description,proto3" json:"description,omitempty"`                                // non-blank
@@ -663,7 +783,7 @@ type RequisitionItem struct {
 
 func (x *RequisitionItem) Reset() {
 	*x = RequisitionItem{}
-	mi := &file_procurement_v1_procurement_proto_msgTypes[8]
+	mi := &file_procurement_v1_procurement_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -675,7 +795,7 @@ func (x *RequisitionItem) String() string {
 func (*RequisitionItem) ProtoMessage() {}
 
 func (x *RequisitionItem) ProtoReflect() protoreflect.Message {
-	mi := &file_procurement_v1_procurement_proto_msgTypes[8]
+	mi := &file_procurement_v1_procurement_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -688,7 +808,7 @@ func (x *RequisitionItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequisitionItem.ProtoReflect.Descriptor instead.
 func (*RequisitionItem) Descriptor() ([]byte, []int) {
-	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{8}
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *RequisitionItem) GetDescription() string {
@@ -731,7 +851,7 @@ type CreateRequisitionRequest struct {
 
 func (x *CreateRequisitionRequest) Reset() {
 	*x = CreateRequisitionRequest{}
-	mi := &file_procurement_v1_procurement_proto_msgTypes[9]
+	mi := &file_procurement_v1_procurement_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -743,7 +863,7 @@ func (x *CreateRequisitionRequest) String() string {
 func (*CreateRequisitionRequest) ProtoMessage() {}
 
 func (x *CreateRequisitionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_procurement_v1_procurement_proto_msgTypes[9]
+	mi := &file_procurement_v1_procurement_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -756,7 +876,7 @@ func (x *CreateRequisitionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateRequisitionRequest.ProtoReflect.Descriptor instead.
 func (*CreateRequisitionRequest) Descriptor() ([]byte, []int) {
-	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{9}
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *CreateRequisitionRequest) GetCurrency() string {
@@ -783,7 +903,7 @@ type UpdateRequisitionRequest struct {
 
 func (x *UpdateRequisitionRequest) Reset() {
 	*x = UpdateRequisitionRequest{}
-	mi := &file_procurement_v1_procurement_proto_msgTypes[10]
+	mi := &file_procurement_v1_procurement_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -795,7 +915,7 @@ func (x *UpdateRequisitionRequest) String() string {
 func (*UpdateRequisitionRequest) ProtoMessage() {}
 
 func (x *UpdateRequisitionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_procurement_v1_procurement_proto_msgTypes[10]
+	mi := &file_procurement_v1_procurement_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -808,7 +928,7 @@ func (x *UpdateRequisitionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateRequisitionRequest.ProtoReflect.Descriptor instead.
 func (*UpdateRequisitionRequest) Descriptor() ([]byte, []int) {
-	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{10}
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *UpdateRequisitionRequest) GetId() string {
@@ -836,7 +956,7 @@ type SubmitRequisitionRequest struct {
 
 func (x *SubmitRequisitionRequest) Reset() {
 	*x = SubmitRequisitionRequest{}
-	mi := &file_procurement_v1_procurement_proto_msgTypes[11]
+	mi := &file_procurement_v1_procurement_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -848,7 +968,7 @@ func (x *SubmitRequisitionRequest) String() string {
 func (*SubmitRequisitionRequest) ProtoMessage() {}
 
 func (x *SubmitRequisitionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_procurement_v1_procurement_proto_msgTypes[11]
+	mi := &file_procurement_v1_procurement_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -861,7 +981,7 @@ func (x *SubmitRequisitionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubmitRequisitionRequest.ProtoReflect.Descriptor instead.
 func (*SubmitRequisitionRequest) Descriptor() ([]byte, []int) {
-	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{11}
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *SubmitRequisitionRequest) GetId() string {
@@ -876,6 +996,319 @@ func (x *SubmitRequisitionRequest) GetIdempotencyKey() string {
 		return x.IdempotencyKey
 	}
 	return ""
+}
+
+type DecideApprovalRequest struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	StepId string                 `protobuf:"bytes,1,opt,name=step_id,json=stepId,proto3" json:"step_id,omitempty"`
+	// "approve" | "reject" (normalized trim+lowercase at the edge).
+	Decision string `protobuf:"bytes,2,opt,name=decision,proto3" json:"decision,omitempty"`
+	// Required for reject (non-blank after trimming), optional for approve;
+	// bounded to 1000 characters at the edge and the service layer.
+	Reason        string `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DecideApprovalRequest) Reset() {
+	*x = DecideApprovalRequest{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DecideApprovalRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DecideApprovalRequest) ProtoMessage() {}
+
+func (x *DecideApprovalRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DecideApprovalRequest.ProtoReflect.Descriptor instead.
+func (*DecideApprovalRequest) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *DecideApprovalRequest) GetStepId() string {
+	if x != nil {
+		return x.StepId
+	}
+	return ""
+}
+
+func (x *DecideApprovalRequest) GetDecision() string {
+	if x != nil {
+		return x.Decision
+	}
+	return ""
+}
+
+func (x *DecideApprovalRequest) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+type DecideApprovalResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The requisition after the decision, with approval_steps at their
+	// latest state.
+	Requisition   *Requisition `protobuf:"bytes,1,opt,name=requisition,proto3" json:"requisition,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DecideApprovalResponse) Reset() {
+	*x = DecideApprovalResponse{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DecideApprovalResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DecideApprovalResponse) ProtoMessage() {}
+
+func (x *DecideApprovalResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DecideApprovalResponse.ProtoReflect.Descriptor instead.
+func (*DecideApprovalResponse) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *DecideApprovalResponse) GetRequisition() *Requisition {
+	if x != nil {
+		return x.Requisition
+	}
+	return nil
+}
+
+// ApprovalRule is one tenant rule: requisitions in `currency` totalling at
+// least `threshold_cents` must collect a decision from a holder of
+// `role_required` at position `step_no`.
+type ApprovalRule struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Id             string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`                                                // server-generated; ignored on replace
+	Currency       string                 `protobuf:"bytes,2,opt,name=currency,proto3" json:"currency,omitempty"`                                    // IDR | USD
+	StepNo         int32                  `protobuf:"varint,3,opt,name=step_no,json=stepNo,proto3" json:"step_no,omitempty"`                         // > 0; unique per currency within the tenant
+	RoleRequired   string                 `protobuf:"bytes,4,opt,name=role_required,json=roleRequired,proto3" json:"role_required,omitempty"`        // one of the six fixed roles
+	ThresholdCents int64                  `protobuf:"varint,5,opt,name=threshold_cents,json=thresholdCents,proto3" json:"threshold_cents,omitempty"` // >= 0; lower bound, inclusive
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *ApprovalRule) Reset() {
+	*x = ApprovalRule{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ApprovalRule) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ApprovalRule) ProtoMessage() {}
+
+func (x *ApprovalRule) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ApprovalRule.ProtoReflect.Descriptor instead.
+func (*ApprovalRule) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *ApprovalRule) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *ApprovalRule) GetCurrency() string {
+	if x != nil {
+		return x.Currency
+	}
+	return ""
+}
+
+func (x *ApprovalRule) GetStepNo() int32 {
+	if x != nil {
+		return x.StepNo
+	}
+	return 0
+}
+
+func (x *ApprovalRule) GetRoleRequired() string {
+	if x != nil {
+		return x.RoleRequired
+	}
+	return ""
+}
+
+func (x *ApprovalRule) GetThresholdCents() int64 {
+	if x != nil {
+		return x.ThresholdCents
+	}
+	return 0
+}
+
+type GetApprovalRulesRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetApprovalRulesRequest) Reset() {
+	*x = GetApprovalRulesRequest{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetApprovalRulesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetApprovalRulesRequest) ProtoMessage() {}
+
+func (x *GetApprovalRulesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetApprovalRulesRequest.ProtoReflect.Descriptor instead.
+func (*GetApprovalRulesRequest) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{16}
+}
+
+type ReplaceApprovalRulesRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The complete new rule set (replaces everything; may be empty).
+	Rules         []*ApprovalRule `protobuf:"bytes,1,rep,name=rules,proto3" json:"rules,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReplaceApprovalRulesRequest) Reset() {
+	*x = ReplaceApprovalRulesRequest{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReplaceApprovalRulesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReplaceApprovalRulesRequest) ProtoMessage() {}
+
+func (x *ReplaceApprovalRulesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReplaceApprovalRulesRequest.ProtoReflect.Descriptor instead.
+func (*ReplaceApprovalRulesRequest) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *ReplaceApprovalRulesRequest) GetRules() []*ApprovalRule {
+	if x != nil {
+		return x.Rules
+	}
+	return nil
+}
+
+type ApprovalRulesResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Rules         []*ApprovalRule        `protobuf:"bytes,1,rep,name=rules,proto3" json:"rules,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ApprovalRulesResponse) Reset() {
+	*x = ApprovalRulesResponse{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ApprovalRulesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ApprovalRulesResponse) ProtoMessage() {}
+
+func (x *ApprovalRulesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ApprovalRulesResponse.ProtoReflect.Descriptor instead.
+func (*ApprovalRulesResponse) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *ApprovalRulesResponse) GetRules() []*ApprovalRule {
+	if x != nil {
+		return x.Rules
+	}
+	return nil
 }
 
 var File_procurement_v1_procurement_proto protoreflect.FileDescriptor
@@ -923,7 +1356,7 @@ const file_procurement_v1_procurement_proto_rawDesc = "" +
 	"\avendors\x18\x01 \x03(\v2\x16.procurement.v1.VendorR\avendors\x12\x14\n" +
 	"\x05total\x18\x02 \x01(\x05R\x05total\x12\x12\n" +
 	"\x04page\x18\x03 \x01(\x05R\x04page\x12\x1b\n" +
-	"\tpage_size\x18\x04 \x01(\x05R\bpageSize\"\xa0\x03\n" +
+	"\tpage_size\x18\x04 \x01(\x05R\bpageSize\"\xe5\x03\n" +
 	"\vRequisition\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
 	"\ttenant_id\x18\x02 \x01(\tR\btenantId\x12\x16\n" +
@@ -943,7 +1376,20 @@ const file_procurement_v1_procurement_proto_rawDesc = "" +
 	"\n" +
 	"updated_at\x18\f \x01(\tR\tupdatedAt\x12\x1d\n" +
 	"\n" +
-	"updated_by\x18\r \x01(\tR\tupdatedBy\"\x8b\x01\n" +
+	"updated_by\x18\r \x01(\tR\tupdatedBy\x12C\n" +
+	"\x0eapproval_steps\x18\x0e \x03(\v2\x1c.procurement.v1.ApprovalStepR\rapprovalSteps\"\x9a\x02\n" +
+	"\fApprovalStep\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12%\n" +
+	"\x0erequisition_id\x18\x02 \x01(\tR\rrequisitionId\x12\x17\n" +
+	"\astep_no\x18\x03 \x01(\x05R\x06stepNo\x12#\n" +
+	"\rrole_required\x18\x04 \x01(\tR\froleRequired\x12'\n" +
+	"\x0fthreshold_cents\x18\x05 \x01(\x03R\x0ethresholdCents\x12\x16\n" +
+	"\x06status\x18\x06 \x01(\tR\x06status\x12\x1d\n" +
+	"\n" +
+	"decided_by\x18\a \x01(\tR\tdecidedBy\x12\x1d\n" +
+	"\n" +
+	"decided_at\x18\b \x01(\tR\tdecidedAt\x12\x16\n" +
+	"\x06reason\x18\t \x01(\tR\x06reason\"\x8b\x01\n" +
 	"\x0fRequisitionItem\x12 \n" +
 	"\vdescription\x18\x01 \x01(\tR\vdescription\x12\x10\n" +
 	"\x03qty\x18\x02 \x01(\x05R\x03qty\x12(\n" +
@@ -957,7 +1403,24 @@ const file_procurement_v1_procurement_proto_rawDesc = "" +
 	"\x05items\x18\x02 \x03(\v2\x1f.procurement.v1.RequisitionItemR\x05items\"S\n" +
 	"\x18SubmitRequisitionRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12'\n" +
-	"\x0fidempotency_key\x18\x02 \x01(\tR\x0eidempotencyKey2\xaf\x05\n" +
+	"\x0fidempotency_key\x18\x02 \x01(\tR\x0eidempotencyKey\"d\n" +
+	"\x15DecideApprovalRequest\x12\x17\n" +
+	"\astep_id\x18\x01 \x01(\tR\x06stepId\x12\x1a\n" +
+	"\bdecision\x18\x02 \x01(\tR\bdecision\x12\x16\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\"W\n" +
+	"\x16DecideApprovalResponse\x12=\n" +
+	"\vrequisition\x18\x01 \x01(\v2\x1b.procurement.v1.RequisitionR\vrequisition\"\xa1\x01\n" +
+	"\fApprovalRule\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
+	"\bcurrency\x18\x02 \x01(\tR\bcurrency\x12\x17\n" +
+	"\astep_no\x18\x03 \x01(\x05R\x06stepNo\x12#\n" +
+	"\rrole_required\x18\x04 \x01(\tR\froleRequired\x12'\n" +
+	"\x0fthreshold_cents\x18\x05 \x01(\x03R\x0ethresholdCents\"\x19\n" +
+	"\x17GetApprovalRulesRequest\"Q\n" +
+	"\x1bReplaceApprovalRulesRequest\x122\n" +
+	"\x05rules\x18\x01 \x03(\v2\x1c.procurement.v1.ApprovalRuleR\x05rules\"K\n" +
+	"\x15ApprovalRulesResponse\x122\n" +
+	"\x05rules\x18\x01 \x03(\v2\x1c.procurement.v1.ApprovalRuleR\x05rules2\xe0\a\n" +
 	"\vProcurement\x12K\n" +
 	"\fCreateVendor\x12#.procurement.v1.CreateVendorRequest\x1a\x16.procurement.v1.Vendor\x12E\n" +
 	"\tGetVendor\x12 .procurement.v1.GetVendorRequest\x1a\x16.procurement.v1.Vendor\x12K\n" +
@@ -966,7 +1429,10 @@ const file_procurement_v1_procurement_proto_rawDesc = "" +
 	"\vListVendors\x12\".procurement.v1.ListVendorsRequest\x1a#.procurement.v1.ListVendorsResponse\x12Z\n" +
 	"\x11CreateRequisition\x12(.procurement.v1.CreateRequisitionRequest\x1a\x1b.procurement.v1.Requisition\x12Z\n" +
 	"\x11UpdateRequisition\x12(.procurement.v1.UpdateRequisitionRequest\x1a\x1b.procurement.v1.Requisition\x12Z\n" +
-	"\x11SubmitRequisition\x12(.procurement.v1.SubmitRequisitionRequest\x1a\x1b.procurement.v1.RequisitionBFZDgithub.com/luksluki/eprocurement/gen/go/procurement/v1;procurementv1b\x06proto3"
+	"\x11SubmitRequisition\x12(.procurement.v1.SubmitRequisitionRequest\x1a\x1b.procurement.v1.Requisition\x12_\n" +
+	"\x0eDecideApproval\x12%.procurement.v1.DecideApprovalRequest\x1a&.procurement.v1.DecideApprovalResponse\x12b\n" +
+	"\x10GetApprovalRules\x12'.procurement.v1.GetApprovalRulesRequest\x1a%.procurement.v1.ApprovalRulesResponse\x12j\n" +
+	"\x14ReplaceApprovalRules\x12+.procurement.v1.ReplaceApprovalRulesRequest\x1a%.procurement.v1.ApprovalRulesResponseBFZDgithub.com/luksluki/eprocurement/gen/go/procurement/v1;procurementv1b\x06proto3"
 
 var (
 	file_procurement_v1_procurement_proto_rawDescOnce sync.Once
@@ -980,47 +1446,64 @@ func file_procurement_v1_procurement_proto_rawDescGZIP() []byte {
 	return file_procurement_v1_procurement_proto_rawDescData
 }
 
-var file_procurement_v1_procurement_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_procurement_v1_procurement_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_procurement_v1_procurement_proto_goTypes = []any{
-	(*Vendor)(nil),                   // 0: procurement.v1.Vendor
-	(*CreateVendorRequest)(nil),      // 1: procurement.v1.CreateVendorRequest
-	(*GetVendorRequest)(nil),         // 2: procurement.v1.GetVendorRequest
-	(*UpdateVendorRequest)(nil),      // 3: procurement.v1.UpdateVendorRequest
-	(*DeactivateVendorRequest)(nil),  // 4: procurement.v1.DeactivateVendorRequest
-	(*ListVendorsRequest)(nil),       // 5: procurement.v1.ListVendorsRequest
-	(*ListVendorsResponse)(nil),      // 6: procurement.v1.ListVendorsResponse
-	(*Requisition)(nil),              // 7: procurement.v1.Requisition
-	(*RequisitionItem)(nil),          // 8: procurement.v1.RequisitionItem
-	(*CreateRequisitionRequest)(nil), // 9: procurement.v1.CreateRequisitionRequest
-	(*UpdateRequisitionRequest)(nil), // 10: procurement.v1.UpdateRequisitionRequest
-	(*SubmitRequisitionRequest)(nil), // 11: procurement.v1.SubmitRequisitionRequest
+	(*Vendor)(nil),                      // 0: procurement.v1.Vendor
+	(*CreateVendorRequest)(nil),         // 1: procurement.v1.CreateVendorRequest
+	(*GetVendorRequest)(nil),            // 2: procurement.v1.GetVendorRequest
+	(*UpdateVendorRequest)(nil),         // 3: procurement.v1.UpdateVendorRequest
+	(*DeactivateVendorRequest)(nil),     // 4: procurement.v1.DeactivateVendorRequest
+	(*ListVendorsRequest)(nil),          // 5: procurement.v1.ListVendorsRequest
+	(*ListVendorsResponse)(nil),         // 6: procurement.v1.ListVendorsResponse
+	(*Requisition)(nil),                 // 7: procurement.v1.Requisition
+	(*ApprovalStep)(nil),                // 8: procurement.v1.ApprovalStep
+	(*RequisitionItem)(nil),             // 9: procurement.v1.RequisitionItem
+	(*CreateRequisitionRequest)(nil),    // 10: procurement.v1.CreateRequisitionRequest
+	(*UpdateRequisitionRequest)(nil),    // 11: procurement.v1.UpdateRequisitionRequest
+	(*SubmitRequisitionRequest)(nil),    // 12: procurement.v1.SubmitRequisitionRequest
+	(*DecideApprovalRequest)(nil),       // 13: procurement.v1.DecideApprovalRequest
+	(*DecideApprovalResponse)(nil),      // 14: procurement.v1.DecideApprovalResponse
+	(*ApprovalRule)(nil),                // 15: procurement.v1.ApprovalRule
+	(*GetApprovalRulesRequest)(nil),     // 16: procurement.v1.GetApprovalRulesRequest
+	(*ReplaceApprovalRulesRequest)(nil), // 17: procurement.v1.ReplaceApprovalRulesRequest
+	(*ApprovalRulesResponse)(nil),       // 18: procurement.v1.ApprovalRulesResponse
 }
 var file_procurement_v1_procurement_proto_depIdxs = []int32{
 	0,  // 0: procurement.v1.ListVendorsResponse.vendors:type_name -> procurement.v1.Vendor
-	8,  // 1: procurement.v1.Requisition.items:type_name -> procurement.v1.RequisitionItem
-	8,  // 2: procurement.v1.CreateRequisitionRequest.items:type_name -> procurement.v1.RequisitionItem
-	8,  // 3: procurement.v1.UpdateRequisitionRequest.items:type_name -> procurement.v1.RequisitionItem
-	1,  // 4: procurement.v1.Procurement.CreateVendor:input_type -> procurement.v1.CreateVendorRequest
-	2,  // 5: procurement.v1.Procurement.GetVendor:input_type -> procurement.v1.GetVendorRequest
-	3,  // 6: procurement.v1.Procurement.UpdateVendor:input_type -> procurement.v1.UpdateVendorRequest
-	4,  // 7: procurement.v1.Procurement.DeactivateVendor:input_type -> procurement.v1.DeactivateVendorRequest
-	5,  // 8: procurement.v1.Procurement.ListVendors:input_type -> procurement.v1.ListVendorsRequest
-	9,  // 9: procurement.v1.Procurement.CreateRequisition:input_type -> procurement.v1.CreateRequisitionRequest
-	10, // 10: procurement.v1.Procurement.UpdateRequisition:input_type -> procurement.v1.UpdateRequisitionRequest
-	11, // 11: procurement.v1.Procurement.SubmitRequisition:input_type -> procurement.v1.SubmitRequisitionRequest
-	0,  // 12: procurement.v1.Procurement.CreateVendor:output_type -> procurement.v1.Vendor
-	0,  // 13: procurement.v1.Procurement.GetVendor:output_type -> procurement.v1.Vendor
-	0,  // 14: procurement.v1.Procurement.UpdateVendor:output_type -> procurement.v1.Vendor
-	0,  // 15: procurement.v1.Procurement.DeactivateVendor:output_type -> procurement.v1.Vendor
-	6,  // 16: procurement.v1.Procurement.ListVendors:output_type -> procurement.v1.ListVendorsResponse
-	7,  // 17: procurement.v1.Procurement.CreateRequisition:output_type -> procurement.v1.Requisition
-	7,  // 18: procurement.v1.Procurement.UpdateRequisition:output_type -> procurement.v1.Requisition
-	7,  // 19: procurement.v1.Procurement.SubmitRequisition:output_type -> procurement.v1.Requisition
-	12, // [12:20] is the sub-list for method output_type
-	4,  // [4:12] is the sub-list for method input_type
-	4,  // [4:4] is the sub-list for extension type_name
-	4,  // [4:4] is the sub-list for extension extendee
-	0,  // [0:4] is the sub-list for field type_name
+	9,  // 1: procurement.v1.Requisition.items:type_name -> procurement.v1.RequisitionItem
+	8,  // 2: procurement.v1.Requisition.approval_steps:type_name -> procurement.v1.ApprovalStep
+	9,  // 3: procurement.v1.CreateRequisitionRequest.items:type_name -> procurement.v1.RequisitionItem
+	9,  // 4: procurement.v1.UpdateRequisitionRequest.items:type_name -> procurement.v1.RequisitionItem
+	7,  // 5: procurement.v1.DecideApprovalResponse.requisition:type_name -> procurement.v1.Requisition
+	15, // 6: procurement.v1.ReplaceApprovalRulesRequest.rules:type_name -> procurement.v1.ApprovalRule
+	15, // 7: procurement.v1.ApprovalRulesResponse.rules:type_name -> procurement.v1.ApprovalRule
+	1,  // 8: procurement.v1.Procurement.CreateVendor:input_type -> procurement.v1.CreateVendorRequest
+	2,  // 9: procurement.v1.Procurement.GetVendor:input_type -> procurement.v1.GetVendorRequest
+	3,  // 10: procurement.v1.Procurement.UpdateVendor:input_type -> procurement.v1.UpdateVendorRequest
+	4,  // 11: procurement.v1.Procurement.DeactivateVendor:input_type -> procurement.v1.DeactivateVendorRequest
+	5,  // 12: procurement.v1.Procurement.ListVendors:input_type -> procurement.v1.ListVendorsRequest
+	10, // 13: procurement.v1.Procurement.CreateRequisition:input_type -> procurement.v1.CreateRequisitionRequest
+	11, // 14: procurement.v1.Procurement.UpdateRequisition:input_type -> procurement.v1.UpdateRequisitionRequest
+	12, // 15: procurement.v1.Procurement.SubmitRequisition:input_type -> procurement.v1.SubmitRequisitionRequest
+	13, // 16: procurement.v1.Procurement.DecideApproval:input_type -> procurement.v1.DecideApprovalRequest
+	16, // 17: procurement.v1.Procurement.GetApprovalRules:input_type -> procurement.v1.GetApprovalRulesRequest
+	17, // 18: procurement.v1.Procurement.ReplaceApprovalRules:input_type -> procurement.v1.ReplaceApprovalRulesRequest
+	0,  // 19: procurement.v1.Procurement.CreateVendor:output_type -> procurement.v1.Vendor
+	0,  // 20: procurement.v1.Procurement.GetVendor:output_type -> procurement.v1.Vendor
+	0,  // 21: procurement.v1.Procurement.UpdateVendor:output_type -> procurement.v1.Vendor
+	0,  // 22: procurement.v1.Procurement.DeactivateVendor:output_type -> procurement.v1.Vendor
+	6,  // 23: procurement.v1.Procurement.ListVendors:output_type -> procurement.v1.ListVendorsResponse
+	7,  // 24: procurement.v1.Procurement.CreateRequisition:output_type -> procurement.v1.Requisition
+	7,  // 25: procurement.v1.Procurement.UpdateRequisition:output_type -> procurement.v1.Requisition
+	7,  // 26: procurement.v1.Procurement.SubmitRequisition:output_type -> procurement.v1.Requisition
+	14, // 27: procurement.v1.Procurement.DecideApproval:output_type -> procurement.v1.DecideApprovalResponse
+	18, // 28: procurement.v1.Procurement.GetApprovalRules:output_type -> procurement.v1.ApprovalRulesResponse
+	18, // 29: procurement.v1.Procurement.ReplaceApprovalRules:output_type -> procurement.v1.ApprovalRulesResponse
+	19, // [19:30] is the sub-list for method output_type
+	8,  // [8:19] is the sub-list for method input_type
+	8,  // [8:8] is the sub-list for extension type_name
+	8,  // [8:8] is the sub-list for extension extendee
+	0,  // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_procurement_v1_procurement_proto_init() }
@@ -1034,7 +1517,7 @@ func file_procurement_v1_procurement_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_procurement_v1_procurement_proto_rawDesc), len(file_procurement_v1_procurement_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   12,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

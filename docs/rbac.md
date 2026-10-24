@@ -15,6 +15,7 @@ Fixed catalog (seeded in `identity.roles`): **admin, requester, approver, buyer,
 | `requisition:read` | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `requisition:write` | ✓ | | | | |
 | `approval:decide` | | ✓ | | | |
+| `approval:configure` | | | | | |
 | `vendor:read` | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `vendor:write` | ✓ | | | | |
 | `po:read` | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -26,7 +27,10 @@ Fixed catalog (seeded in `identity.roles`): **admin, requester, approver, buyer,
 | `audit:read` | | | | | ✓ |
 | `users:manage` | | | | | |
 
-Read permissions are broad by design (everyone in the tenant sees the flow they participate in); writes are narrow. Ownership rules are domain checks on top of RBAC, enforced inside the owning service. Landed so far: **requisition edit/submit (#29, maintainer decision 2026-10-23)** — the caller must be the requisition's `requester_id`; admins may act on any requisition of the tenant; violations return `403` with machine code `requisition_forbidden`. Approver-scope rules ("an approver decides *their assigned* step") arrive with the approval service (#30/#31).
+Read permissions are broad by design (everyone in the tenant sees the flow they participate in); writes are narrow. Ownership rules are domain checks on top of RBAC, enforced inside the owning service. Landed so far:
+
+- **requisition edit/submit (#29, maintainer decision 2026-10-23)** — the caller must be the requisition's `requester_id`; admins may act on any requisition of the tenant; violations return `403` with machine code `requisition_forbidden`.
+- **approval decisions (#30)** — beyond `approval:decide`, the decider must not be the requisition's `requester_id` (self-approval is forbidden for everyone, admins included — `403 approval_self_forbidden`) and must hold the step's materialized `role_required` (`403 approval_role_forbidden`; admins excepted, mirroring `rbac.Check`). Because `approval:decide` is approver-only above, **a rule with role R is decided by a holder of R who also holds `approval:decide` (R + approver), or by an admin**. `approval:configure` (the rules API) is admin-only by design — PRD §5 puts approval-rule management on the tenant admin.
 
 ## Enforcement layers (defense in depth)
 

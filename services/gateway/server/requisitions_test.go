@@ -58,6 +58,21 @@ func (f *fakeRequisitionClient) reply() (*procurementv1.Requisition, error) {
 	return f.got, nil
 }
 
+// The #30 approval methods satisfy the widened ProcurementClient interface;
+// the requisition tests never call them (the approval tests use their own
+// fake with recording).
+func (f *fakeRequisitionClient) DecideApproval(ctx context.Context, in *procurementv1.DecideApprovalRequest, opts ...grpc.CallOption) (*procurementv1.DecideApprovalResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
+}
+
+func (f *fakeRequisitionClient) GetApprovalRules(ctx context.Context, in *procurementv1.GetApprovalRulesRequest, opts ...grpc.CallOption) (*procurementv1.ApprovalRulesResponse, error) {
+	return &procurementv1.ApprovalRulesResponse{}, nil
+}
+
+func (f *fakeRequisitionClient) ReplaceApprovalRules(ctx context.Context, in *procurementv1.ReplaceApprovalRulesRequest, opts ...grpc.CallOption) (*procurementv1.ApprovalRulesResponse, error) {
+	return &procurementv1.ApprovalRulesResponse{}, nil
+}
+
 // reqTokenFor mints a requisition-test token (user-29 of tenant-29) with the
 // given roles.
 func reqTokenFor(t *testing.T, priv ed25519.PrivateKey, kid string, roles ...string) string {

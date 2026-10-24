@@ -254,7 +254,7 @@ func TestStoreUpdateItems(t *testing.T) {
 	for name, call := range map[string]func() error{
 		"get":    func() error { _, err := s.Get(ctx, tenantB, r.ID); return err },
 		"update": func() error { _, err := s.UpdateItems(ctx, tenantB, r.ID, basketItems, userA); return err },
-		"submit": func() error { _, err := s.Submit(ctx, tenantB, r.ID, userA, ""); return err },
+		"submit": func() error { _, err := s.Submit(ctx, tenantB, r.ID, userA, "", nil); return err },
 	} {
 		if err := call(); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("cross-tenant %s: err = %v, want ErrNotFound", name, err)
@@ -292,17 +292,17 @@ func TestStoreSubmitIdempotency(t *testing.T) {
 	}
 
 	// Submit needs at least one line.
-	if _, err := s.Submit(ctx, tenantA, empty.ID, userA, ""); !errors.Is(err, ErrItemsEmpty) {
+	if _, err := s.Submit(ctx, tenantA, empty.ID, userA, "", nil); !errors.Is(err, ErrItemsEmpty) {
 		t.Fatalf("empty submit err = %v, want ErrItemsEmpty", err)
 	}
 
 	// Submit with a key; replay of the same key returns the same submitted
 	// state without error (and without a second transition).
-	submitted, err := s.Submit(ctx, tenantA, a.ID, userA, "key-29-a")
+	submitted, err := s.Submit(ctx, tenantA, a.ID, userA, "key-29-a", nil)
 	if err != nil || submitted.Status != StatusSubmitted || submitted.SubmittedAt == nil {
 		t.Fatalf("submit = (%+v, %v)", submitted, err)
 	}
-	replayed, err := s.Submit(ctx, tenantA, a.ID, userA, "key-29-a")
+	replayed, err := s.Submit(ctx, tenantA, a.ID, userA, "key-29-a", nil)
 	if err != nil || replayed.Status != StatusSubmitted || replayed.ID != a.ID {
 		t.Fatalf("replay = (%+v, %v)", replayed, err)
 	}
@@ -311,19 +311,69 @@ func TestStoreSubmitIdempotency(t *testing.T) {
 	}
 
 	// The same key cannot name another requisition's submit in the tenant.
-	if _, err := s.Submit(ctx, tenantA, b.ID, userA, "key-29-a"); !errors.Is(err, ErrIdempotencyKeyConflict) {
+	if _, err := s.Submit(ctx, tenantA, b.ID, userA, "key-29-a", nil); !errors.Is(err, ErrIdempotencyKeyConflict) {
 		t.Fatalf("key reuse err = %v, want ErrIdempotencyKeyConflict", err)
 	}
 
 	// Submit without a key still works; a second submit and any edit of a
 	// submitted requisition are illegal transitions.
-	if _, err := s.Submit(ctx, tenantA, b.ID, userA, ""); err != nil {
+	if _, err := s.Submit(ctx, tenantA, b.ID, userA, "", nil); err != nil {
 		t.Fatalf("submit b: %v", err)
 	}
-	if _, err := s.Submit(ctx, tenantA, b.ID, userA, "key-29-b"); !errors.Is(err, ErrIllegalTransition) {
+	if _, err := s.Submit(ctx, tenantA, b.ID, userA, "key-29-b", nil); !errors.Is(err, ErrIllegalTransition) {
 		t.Fatalf("resubmit err = %v, want ErrIllegalTransition", err)
 	}
 	if _, err := s.UpdateItems(ctx, tenantA, b.ID, basketItems, userA); !errors.Is(err, ErrIllegalTransition) {
 		t.Fatalf("edit submitted err = %v, want ErrIllegalTransition", err)
+	}
+}
+
+// AC (#30 rollback): a materializer failure inside the submit transaction
+// rolls the whole submit back — the requisition stays a draft, no
+// submit_idempotency_key is recorded (the same key then names the fresh
+// submit once the materializer succeeds), and no approval steps leak.
+func TestStoreSubmitMaterializerRollback(t *testing.T) {
+	s, db := testStoreDB(t)
+	t.Cleanup(func() { cleanupRequisition(t, db) })
+	cleanupRequisition(t, db)
+	ctx := context.Background()
+
+	r, err := s.Create(ctx, tenantA, CreateInput{RequesterID: userA, Currency: "IDR", Items: basketItems})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	boom := errors.New("approval_rules_missing")
+	failing := func(tx pgx.Tx, r Requisition) error { return boom }
+	if _, err := s.Submit(ctx, tenantA, r.ID, userA, "key-30-a", failing); !errors.Is(err, boom) {
+		t.Fatalf("failing materializer err = %v, want the materializer error", err)
+	}
+
+	stored, err := s.Get(ctx, tenantA, r.ID)
+	if err != nil || stored.Status != StatusDraft || stored.SubmittedAt != nil {
+		t.Fatalf("after rollback = (%+v, %v), want untouched draft", stored, err)
+	}
+	var steps int
+	if err := tenant.WithBypass(ctx, db, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM procurement.approval_steps WHERE requisition_id = $1`, r.ID).Scan(&steps)
+	}); err != nil || steps != 0 {
+		t.Fatalf("steps after rollback = (%d, %v), want none", steps, err)
+	}
+	var keyCount int
+	if err := tenant.WithBypass(ctx, db, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM procurement.requisitions WHERE id = $1 AND submit_idempotency_key IS NOT NULL`, r.ID).Scan(&keyCount)
+	}); err != nil || keyCount != 0 {
+		t.Fatalf("idempotency key recorded after rollback = (%d, %v), want none", keyCount, err)
+	}
+
+	// The key was never recorded: the same key now names this fresh submit.
+	submitted, err := s.Submit(ctx, tenantA, r.ID, userA, "key-30-a", nil)
+	if err != nil || submitted.Status != StatusSubmitted {
+		t.Fatalf("submit after rollback = (%+v, %v), want submitted", submitted, err)
+	}
+	// And its replay is idempotent.
+	if replayed, err := s.Submit(ctx, tenantA, r.ID, userA, "key-30-a", nil); err != nil ||
+		replayed.Status != StatusSubmitted || !replayed.SubmittedAt.Equal(*submitted.SubmittedAt) {
+		t.Fatalf("replay = (%+v, %v), want the same submitted state", replayed, err)
 	}
 }

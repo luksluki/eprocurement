@@ -19,14 +19,17 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Procurement_CreateVendor_FullMethodName      = "/procurement.v1.Procurement/CreateVendor"
-	Procurement_GetVendor_FullMethodName         = "/procurement.v1.Procurement/GetVendor"
-	Procurement_UpdateVendor_FullMethodName      = "/procurement.v1.Procurement/UpdateVendor"
-	Procurement_DeactivateVendor_FullMethodName  = "/procurement.v1.Procurement/DeactivateVendor"
-	Procurement_ListVendors_FullMethodName       = "/procurement.v1.Procurement/ListVendors"
-	Procurement_CreateRequisition_FullMethodName = "/procurement.v1.Procurement/CreateRequisition"
-	Procurement_UpdateRequisition_FullMethodName = "/procurement.v1.Procurement/UpdateRequisition"
-	Procurement_SubmitRequisition_FullMethodName = "/procurement.v1.Procurement/SubmitRequisition"
+	Procurement_CreateVendor_FullMethodName         = "/procurement.v1.Procurement/CreateVendor"
+	Procurement_GetVendor_FullMethodName            = "/procurement.v1.Procurement/GetVendor"
+	Procurement_UpdateVendor_FullMethodName         = "/procurement.v1.Procurement/UpdateVendor"
+	Procurement_DeactivateVendor_FullMethodName     = "/procurement.v1.Procurement/DeactivateVendor"
+	Procurement_ListVendors_FullMethodName          = "/procurement.v1.Procurement/ListVendors"
+	Procurement_CreateRequisition_FullMethodName    = "/procurement.v1.Procurement/CreateRequisition"
+	Procurement_UpdateRequisition_FullMethodName    = "/procurement.v1.Procurement/UpdateRequisition"
+	Procurement_SubmitRequisition_FullMethodName    = "/procurement.v1.Procurement/SubmitRequisition"
+	Procurement_DecideApproval_FullMethodName       = "/procurement.v1.Procurement/DecideApproval"
+	Procurement_GetApprovalRules_FullMethodName     = "/procurement.v1.Procurement/GetApprovalRules"
+	Procurement_ReplaceApprovalRules_FullMethodName = "/procurement.v1.Procurement/ReplaceApprovalRules"
 )
 
 // ProcurementClient is the client API for Procurement service.
@@ -71,6 +74,21 @@ type ProcurementClient interface {
 	// without a second transition; reusing it for another requisition in the
 	// tenant is rejected.
 	SubmitRequisition(ctx context.Context, in *SubmitRequisitionRequest, opts ...grpc.CallOption) (*Requisition, error)
+	// DecideApproval applies one approve/reject decision to an approval step.
+	// Only the current step (the smallest pending step_no of a submitted
+	// requisition) may be decided; the decider must hold the step's
+	// role_required (admins excepted) and must not be the requester
+	// (self-approval is forbidden for everyone, admins included). A reject
+	// skips the remaining steps and rejects the requisition; approving the
+	// last step approves it. The response carries the requisition with its
+	// latest approval_steps.
+	DecideApproval(ctx context.Context, in *DecideApprovalRequest, opts ...grpc.CallOption) (*DecideApprovalResponse, error)
+	// GetApprovalRules returns the caller tenant's whole rule set.
+	GetApprovalRules(ctx context.Context, in *GetApprovalRulesRequest, opts ...grpc.CallOption) (*ApprovalRulesResponse, error)
+	// ReplaceApprovalRules replaces the caller tenant's whole rule set in one
+	// transaction (delete + insert). Rules are a live configuration: replacing
+	// them never changes steps already materialized on submitted requisitions.
+	ReplaceApprovalRules(ctx context.Context, in *ReplaceApprovalRulesRequest, opts ...grpc.CallOption) (*ApprovalRulesResponse, error)
 }
 
 type procurementClient struct {
@@ -161,6 +179,36 @@ func (c *procurementClient) SubmitRequisition(ctx context.Context, in *SubmitReq
 	return out, nil
 }
 
+func (c *procurementClient) DecideApproval(ctx context.Context, in *DecideApprovalRequest, opts ...grpc.CallOption) (*DecideApprovalResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DecideApprovalResponse)
+	err := c.cc.Invoke(ctx, Procurement_DecideApproval_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *procurementClient) GetApprovalRules(ctx context.Context, in *GetApprovalRulesRequest, opts ...grpc.CallOption) (*ApprovalRulesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ApprovalRulesResponse)
+	err := c.cc.Invoke(ctx, Procurement_GetApprovalRules_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *procurementClient) ReplaceApprovalRules(ctx context.Context, in *ReplaceApprovalRulesRequest, opts ...grpc.CallOption) (*ApprovalRulesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ApprovalRulesResponse)
+	err := c.cc.Invoke(ctx, Procurement_ReplaceApprovalRules_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ProcurementServer is the server API for Procurement service.
 // All implementations must embed UnimplementedProcurementServer
 // for forward compatibility.
@@ -203,6 +251,21 @@ type ProcurementServer interface {
 	// without a second transition; reusing it for another requisition in the
 	// tenant is rejected.
 	SubmitRequisition(context.Context, *SubmitRequisitionRequest) (*Requisition, error)
+	// DecideApproval applies one approve/reject decision to an approval step.
+	// Only the current step (the smallest pending step_no of a submitted
+	// requisition) may be decided; the decider must hold the step's
+	// role_required (admins excepted) and must not be the requester
+	// (self-approval is forbidden for everyone, admins included). A reject
+	// skips the remaining steps and rejects the requisition; approving the
+	// last step approves it. The response carries the requisition with its
+	// latest approval_steps.
+	DecideApproval(context.Context, *DecideApprovalRequest) (*DecideApprovalResponse, error)
+	// GetApprovalRules returns the caller tenant's whole rule set.
+	GetApprovalRules(context.Context, *GetApprovalRulesRequest) (*ApprovalRulesResponse, error)
+	// ReplaceApprovalRules replaces the caller tenant's whole rule set in one
+	// transaction (delete + insert). Rules are a live configuration: replacing
+	// them never changes steps already materialized on submitted requisitions.
+	ReplaceApprovalRules(context.Context, *ReplaceApprovalRulesRequest) (*ApprovalRulesResponse, error)
 	mustEmbedUnimplementedProcurementServer()
 }
 
@@ -236,6 +299,15 @@ func (UnimplementedProcurementServer) UpdateRequisition(context.Context, *Update
 }
 func (UnimplementedProcurementServer) SubmitRequisition(context.Context, *SubmitRequisitionRequest) (*Requisition, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SubmitRequisition not implemented")
+}
+func (UnimplementedProcurementServer) DecideApproval(context.Context, *DecideApprovalRequest) (*DecideApprovalResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DecideApproval not implemented")
+}
+func (UnimplementedProcurementServer) GetApprovalRules(context.Context, *GetApprovalRulesRequest) (*ApprovalRulesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetApprovalRules not implemented")
+}
+func (UnimplementedProcurementServer) ReplaceApprovalRules(context.Context, *ReplaceApprovalRulesRequest) (*ApprovalRulesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReplaceApprovalRules not implemented")
 }
 func (UnimplementedProcurementServer) mustEmbedUnimplementedProcurementServer() {}
 func (UnimplementedProcurementServer) testEmbeddedByValue()                     {}
@@ -402,6 +474,60 @@ func _Procurement_SubmitRequisition_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Procurement_DecideApproval_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DecideApprovalRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProcurementServer).DecideApproval(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Procurement_DecideApproval_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProcurementServer).DecideApproval(ctx, req.(*DecideApprovalRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Procurement_GetApprovalRules_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetApprovalRulesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProcurementServer).GetApprovalRules(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Procurement_GetApprovalRules_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProcurementServer).GetApprovalRules(ctx, req.(*GetApprovalRulesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Procurement_ReplaceApprovalRules_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReplaceApprovalRulesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProcurementServer).ReplaceApprovalRules(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Procurement_ReplaceApprovalRules_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProcurementServer).ReplaceApprovalRules(ctx, req.(*ReplaceApprovalRulesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Procurement_ServiceDesc is the grpc.ServiceDesc for Procurement service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -440,6 +566,18 @@ var Procurement_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SubmitRequisition",
 			Handler:    _Procurement_SubmitRequisition_Handler,
+		},
+		{
+			MethodName: "DecideApproval",
+			Handler:    _Procurement_DecideApproval_Handler,
+		},
+		{
+			MethodName: "GetApprovalRules",
+			Handler:    _Procurement_GetApprovalRules_Handler,
+		},
+		{
+			MethodName: "ReplaceApprovalRules",
+			Handler:    _Procurement_ReplaceApprovalRules_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

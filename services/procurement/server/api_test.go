@@ -25,6 +25,7 @@ import (
 	"github.com/luksluki/eprocurement/internal/platform/dbmigrate"
 	"github.com/luksluki/eprocurement/internal/platform/rbac"
 	"github.com/luksluki/eprocurement/internal/platform/tenant"
+	"github.com/luksluki/eprocurement/services/procurement/approval"
 	"github.com/luksluki/eprocurement/services/procurement/migrations"
 	"github.com/luksluki/eprocurement/services/procurement/requisition"
 	"github.com/luksluki/eprocurement/services/procurement/vendor"
@@ -63,7 +64,7 @@ func startProcurement(t *testing.T) (procurementv1.ProcurementClient, *pgxpool.P
 	}
 
 	log := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
-	srv := New(log, db, vendor.NewStore(db), requisition.NewStore(db))
+	srv := New(log, db, vendor.NewStore(db), requisition.NewStore(db), approval.NewStore(db))
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -315,8 +316,8 @@ func TestMapRequisitionError(t *testing.T) {
 	}
 }
 
-// grpcCleanupRequisition wipes the PR rows and counters this test creates in
-// the shared test tenants (items cascade).
+// grpcCleanupRequisition wipes the PR rows, counters, and approval rules
+// this test creates in the shared test tenants (items and steps cascade).
 func grpcCleanupRequisition(t *testing.T, db *pgxpool.Pool) {
 	t.Helper()
 	_ = tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
@@ -325,8 +326,12 @@ func grpcCleanupRequisition(t *testing.T, db *pgxpool.Pool) {
 			gTenantA, gTenantB); err != nil {
 			return err
 		}
+		if _, err := tx.Exec(context.Background(),
+			`DELETE FROM procurement.requisition_counters WHERE tenant_id IN ($1, $2)`, gTenantA, gTenantB); err != nil {
+			return err
+		}
 		_, err := tx.Exec(context.Background(),
-			`DELETE FROM procurement.requisition_counters WHERE tenant_id IN ($1, $2)`, gTenantA, gTenantB)
+			`DELETE FROM procurement.approval_rules WHERE tenant_id IN ($1, $2)`, gTenantA, gTenantB)
 		return err
 	})
 }
@@ -440,12 +445,25 @@ func TestRequisitionGRPCLifecycle(t *testing.T) {
 		t.Fatalf("empty submit: (%v, %q), want InvalidArgument requisition_items_empty", status.Code(err), status.Convert(err).Message())
 	}
 
+	// Since #30 a submit also needs applicable approval rules — configure a
+	// minimal IDR chain for this tenant before submitting (admins only).
+	if _, err := client.ReplaceApprovalRules(callerCtx(gTenantA, rbac.RoleAdmin),
+		&procurementv1.ReplaceApprovalRulesRequest{Rules: []*procurementv1.ApprovalRule{
+			{Currency: "IDR", StepNo: 1, RoleRequired: "approver", ThresholdCents: 0},
+		}}); err != nil {
+		t.Fatalf("configure rules: %v", err)
+	}
+
 	// Submit with an Idempotency-Key; a replay of the same key returns the
 	// current (submitted) state, not an error.
 	submitted, err := client.SubmitRequisition(callerCtx(gTenantA, rbac.RoleRequester),
 		&procurementv1.SubmitRequisitionRequest{Id: basket.GetId(), IdempotencyKey: "key-29-a"})
 	if err != nil || submitted.GetStatus() != "submitted" || submitted.GetSubmittedAt() == "" {
 		t.Fatalf("submit = (%+v, %v)", submitted, err)
+	}
+	// The submit response carries the materialized steps in-band (#30).
+	if len(submitted.GetApprovalSteps()) != 1 || submitted.GetApprovalSteps()[0].GetId() == "" {
+		t.Fatalf("submit steps = %+v, want one step with an id", submitted.GetApprovalSteps())
 	}
 	replayed, err := client.SubmitRequisition(callerCtx(gTenantA, rbac.RoleRequester),
 		&procurementv1.SubmitRequisitionRequest{Id: basket.GetId(), IdempotencyKey: "key-29-a"})
@@ -513,5 +531,320 @@ func TestRequisitionGRPCValidation(t *testing.T) {
 	if _, err := client.CreateRequisition(context.Background(),
 		&procurementv1.CreateRequisitionRequest{Currency: "IDR"}); status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("anonymous: code = %v, want Unauthenticated", status.Code(err))
+	}
+}
+
+// testRules is the two-step IDR chain (approver@5M then finance@10M) plus a
+// USD rule that must never match an IDR requisition.
+func testRules() []*procurementv1.ApprovalRule {
+	return []*procurementv1.ApprovalRule{
+		{Currency: "IDR", StepNo: 1, RoleRequired: "approver", ThresholdCents: 5_000_000},
+		{Currency: "IDR", StepNo: 2, RoleRequired: "finance", ThresholdCents: 10_000_000},
+		{Currency: "USD", StepNo: 1, RoleRequired: "approver", ThresholdCents: 1},
+	}
+}
+
+// Approval-rule administration: admin-only at the interceptor, replace-set
+// with edge normalization, validation machine codes, and the GET round-trip.
+func TestApprovalRulesGRPC(t *testing.T) {
+	client, db, cleanup := startProcurement(t)
+	defer cleanup()
+	grpcCleanupRequisition(t, db)
+	t.Cleanup(func() { grpcCleanupRequisition(t, db) })
+
+	// approval:configure is admin-only: requester and viewer are denied at
+	// the service-layer re-check.
+	for _, role := range []string{rbac.RoleRequester, rbac.RoleViewer, rbac.RoleApprover} {
+		if _, err := client.ReplaceApprovalRules(callerCtx(gTenantA, role),
+			&procurementv1.ReplaceApprovalRulesRequest{}); status.Code(err) != codes.PermissionDenied {
+			t.Fatalf("replace as %s: code = %v, want PermissionDenied", role, status.Code(err))
+		}
+		if _, err := client.GetApprovalRules(callerCtx(gTenantA, role),
+			&procurementv1.GetApprovalRulesRequest{}); status.Code(err) != codes.PermissionDenied {
+			t.Fatalf("get as %s: code = %v, want PermissionDenied", role, status.Code(err))
+		}
+	}
+
+	// Empty tenant: no rules.
+	got, err := client.GetApprovalRules(callerCtx(gTenantA, rbac.RoleAdmin),
+		&procurementv1.GetApprovalRulesRequest{})
+	if err != nil || len(got.GetRules()) != 0 {
+		t.Fatalf("initial get = (%v, %v), want empty", got, err)
+	}
+
+	// Replace with edge-case normalization: currency uppercased, role
+	// lowercased; ids are server-generated.
+	stored, err := client.ReplaceApprovalRules(callerCtx(gTenantA, rbac.RoleAdmin),
+		&procurementv1.ReplaceApprovalRulesRequest{Rules: []*procurementv1.ApprovalRule{
+			{Currency: " idr ", StepNo: 2, RoleRequired: " Finance ", ThresholdCents: 10_000_000},
+			{Currency: "IDR", StepNo: 1, RoleRequired: "approver", ThresholdCents: 5_000_000},
+		}})
+	if err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	if len(stored.GetRules()) != 2 ||
+		stored.GetRules()[0].GetCurrency() != "IDR" || stored.GetRules()[0].GetRoleRequired() != "approver" ||
+		stored.GetRules()[1].GetRoleRequired() != "finance" || stored.GetRules()[1].GetId() == "" {
+		t.Fatalf("stored rules = %+v", stored.GetRules())
+	}
+	if got, err := client.GetApprovalRules(callerCtx(gTenantA, rbac.RoleAdmin),
+		&procurementv1.GetApprovalRulesRequest{}); err != nil || len(got.GetRules()) != 2 {
+		t.Fatalf("get after replace = (%v, %v), want 2 rules", got, err)
+	}
+
+	// Validation failures carry the machine codes verbatim.
+	for name, tc := range map[string]struct {
+		rule *procurementv1.ApprovalRule
+		msg  string
+	}{
+		"bad currency":       {&procurementv1.ApprovalRule{Currency: "EUR", StepNo: 1, RoleRequired: "approver"}, "approval_rule_currency_invalid"},
+		"bad role":           {&procurementv1.ApprovalRule{Currency: "IDR", StepNo: 1, RoleRequired: "cto"}, "approval_rule_role_invalid"},
+		"negative threshold": {&procurementv1.ApprovalRule{Currency: "IDR", StepNo: 1, RoleRequired: "approver", ThresholdCents: -1}, "approval_rule_threshold_invalid"},
+		"zero step_no":       {&procurementv1.ApprovalRule{Currency: "IDR", StepNo: 0, RoleRequired: "approver"}, "approval_rule_step_no_invalid"},
+	} {
+		_, err := client.ReplaceApprovalRules(callerCtx(gTenantA, rbac.RoleAdmin),
+			&procurementv1.ReplaceApprovalRulesRequest{Rules: []*procurementv1.ApprovalRule{tc.rule}})
+		if status.Code(err) != codes.InvalidArgument || status.Convert(err).Message() != tc.msg {
+			t.Errorf("%s: got (%v, %q), want (InvalidArgument, %q)", name, status.Code(err), status.Convert(err).Message(), tc.msg)
+		}
+	}
+	// Duplicate step_no per currency.
+	_, err = client.ReplaceApprovalRules(callerCtx(gTenantA, rbac.RoleAdmin),
+		&procurementv1.ReplaceApprovalRulesRequest{Rules: []*procurementv1.ApprovalRule{
+			{Currency: "IDR", StepNo: 1, RoleRequired: "approver"},
+			{Currency: "IDR", StepNo: 1, RoleRequired: "finance"},
+		}})
+	if status.Code(err) != codes.InvalidArgument || status.Convert(err).Message() != "approval_rule_step_no_duplicate" {
+		t.Fatalf("dup step_no: got (%v, %q)", status.Code(err), status.Convert(err).Message())
+	}
+	// The failed replaces changed nothing.
+	if got, err := client.GetApprovalRules(callerCtx(gTenantA, rbac.RoleAdmin),
+		&procurementv1.GetApprovalRulesRequest{}); err != nil || len(got.GetRules()) != 2 {
+		t.Fatalf("get after invalid replaces = (%v, %v), want the previous 2", got, err)
+	}
+
+	// Tenant B's rules are invisible to tenant A (and vice versa): each
+	// tenant configures independently.
+	if _, err := client.ReplaceApprovalRules(callerCtx(gTenantB, rbac.RoleAdmin),
+		&procurementv1.ReplaceApprovalRulesRequest{Rules: []*procurementv1.ApprovalRule{
+			{Currency: "USD", StepNo: 1, RoleRequired: "buyer", ThresholdCents: 0},
+		}}); err != nil {
+		t.Fatalf("tenant B replace: %v", err)
+	}
+	gotA, err := client.GetApprovalRules(callerCtx(gTenantA, rbac.RoleAdmin), &procurementv1.GetApprovalRulesRequest{})
+	if err != nil || len(gotA.GetRules()) != 2 || gotA.GetRules()[0].GetCurrency() != "IDR" {
+		t.Fatalf("tenant A sees (%v, %v) after tenant B configured", gotA.GetRules(), err)
+	}
+}
+
+// The #30 approval flow through the gRPC API: submit without rules is a 412
+// that rolls back (the key is not recorded), submit materializes steps
+// in-band, sequential decisions with role/self enforcement, and the
+// reject-skips flow.
+func TestApprovalGRPCFlow(t *testing.T) {
+	client, db, cleanup := startProcurement(t)
+	defer cleanup()
+	grpcCleanupRequisition(t, db)
+	t.Cleanup(func() { grpcCleanupRequisition(t, db) })
+
+	// No rules yet: submit fails with FailedPrecondition (HTTP 412 via the
+	// gateway) and the requisition stays a draft.
+	pr, err := client.CreateRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.CreateRequisitionRequest{Currency: "IDR", Items: testItems()})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	_, err = client.SubmitRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.SubmitRequisitionRequest{Id: pr.GetId(), IdempotencyKey: "key-30-a"})
+	if status.Code(err) != codes.FailedPrecondition || status.Convert(err).Message() != "approval_rules_missing" {
+		t.Fatalf("submit without rules: got (%v, %q), want FailedPrecondition approval_rules_missing", status.Code(err), status.Convert(err).Message())
+	}
+	if still, err := client.UpdateRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.UpdateRequisitionRequest{Id: pr.GetId(), Items: testItems()}); err != nil || still.GetStatus() != "draft" {
+		t.Fatalf("after failed submit = (%s, %v), want still draft", still.GetStatus(), err)
+	}
+
+	// Configure rules; the SAME key now names the fresh submit — proof the
+	// 412 did not record it.
+	if _, err := client.ReplaceApprovalRules(callerCtx(gTenantA, rbac.RoleAdmin),
+		&procurementv1.ReplaceApprovalRulesRequest{Rules: testRules()}); err != nil {
+		t.Fatalf("configure rules: %v", err)
+	}
+	submitted, err := client.SubmitRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.SubmitRequisitionRequest{Id: pr.GetId(), IdempotencyKey: "key-30-a"})
+	if err != nil || submitted.GetStatus() != "submitted" {
+		t.Fatalf("submit after rules = (%+v, %v)", submitted, err)
+	}
+	// AC: the response carries the materialized steps in-band — both IDR
+	// thresholds match (15,450,000 >= 5M and 10M), the USD rule does not.
+	steps := submitted.GetApprovalSteps()
+	if len(steps) != 2 || steps[0].GetStepNo() != 1 || steps[1].GetStepNo() != 2 ||
+		steps[0].GetId() == "" || steps[1].GetId() == "" || steps[0].GetStatus() != "pending" {
+		t.Fatalf("submit steps = %+v, want two pending steps with ids", steps)
+	}
+	// Replay of the key: current state, no second transition, no duplicate
+	// steps.
+	if replayed, err := client.SubmitRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.SubmitRequisitionRequest{Id: pr.GetId(), IdempotencyKey: "key-30-a"}); err != nil ||
+		replayed.GetStatus() != "submitted" || len(replayed.GetApprovalSteps()) != 2 ||
+		replayed.GetSubmittedAt() != submitted.GetSubmittedAt() {
+		t.Fatalf("replay = (%+v, %v)", replayed, err)
+	}
+
+	// A viewer holds no approval:decide — the interceptor denies.
+	if _, err := client.DecideApproval(callerCtx(gTenantA, rbac.RoleViewer),
+		&procurementv1.DecideApprovalRequest{StepId: steps[0].GetId(), Decision: "approve"}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("viewer decide: code = %v, want PermissionDenied", status.Code(err))
+	}
+
+	// Self-approval is universally forbidden: the requester holds approver
+	// (and even admin) — still approval_self_forbidden.
+	for _, roles := range [][]string{{rbac.RoleApprover}, {rbac.RoleAdmin}, {rbac.RoleRequester, rbac.RoleApprover}} {
+		_, err := client.DecideApproval(callerCtxAs(gUser, gTenantA, roles...),
+			&procurementv1.DecideApprovalRequest{StepId: steps[0].GetId(), Decision: "approve"})
+		if status.Code(err) != codes.PermissionDenied || status.Convert(err).Message() != "approval_self_forbidden" {
+			t.Fatalf("self decide %v: got (%v, %q), want PermissionDenied approval_self_forbidden",
+				roles, status.Code(err), status.Convert(err).Message())
+		}
+	}
+
+	// Out-of-order: the finance step is not current while step 1 pends (the
+	// decider holds finance AND approver — approval:decide is approver-only
+	// in the matrix, so a finance-step decider is dual-roled by definition).
+	_, err = client.DecideApproval(callerCtxAs(gUserB, gTenantA, rbac.RoleFinance, rbac.RoleApprover),
+		&procurementv1.DecideApprovalRequest{StepId: steps[1].GetId(), Decision: "approve"})
+	if status.Code(err) != codes.Aborted || status.Convert(err).Message() != "approval_step_not_current" {
+		t.Fatalf("out-of-order decide: got (%v, %q), want Aborted approval_step_not_current", status.Code(err), status.Convert(err).Message())
+	}
+
+	// Role enforcement: a pure approver cannot decide the finance step —
+	// approval_role_forbidden.
+	_, err = client.DecideApproval(callerCtxAs(gUserB, gTenantA, rbac.RoleApprover),
+		&procurementv1.DecideApprovalRequest{StepId: steps[1].GetId(), Decision: "approve"})
+	if status.Code(err) != codes.PermissionDenied || status.Convert(err).Message() != "approval_role_forbidden" {
+		t.Fatalf("approver on finance step: got (%v, %q), want PermissionDenied approval_role_forbidden", status.Code(err), status.Convert(err).Message())
+	}
+
+	// Decision validation: unknown value, and reject without reason.
+	_, err = client.DecideApproval(callerCtxAs(gUserB, gTenantA, rbac.RoleApprover),
+		&procurementv1.DecideApprovalRequest{StepId: steps[0].GetId(), Decision: "maybe"})
+	if status.Code(err) != codes.InvalidArgument || status.Convert(err).Message() != "approval_decision_invalid" {
+		t.Fatalf("bad decision: got (%v, %q)", status.Code(err), status.Convert(err).Message())
+	}
+	_, err = client.DecideApproval(callerCtxAs(gUserB, gTenantA, rbac.RoleApprover),
+		&procurementv1.DecideApprovalRequest{StepId: steps[0].GetId(), Decision: "reject", Reason: "   "})
+	if status.Code(err) != codes.InvalidArgument || status.Convert(err).Message() != "approval_reason_required" {
+		t.Fatalf("reject without reason: got (%v, %q)", status.Code(err), status.Convert(err).Message())
+	}
+
+	// Approve step 1 as a pure approver; the response embeds the updated
+	// steps and the requisition stays submitted mid-flow.
+	after1, err := client.DecideApproval(callerCtxAs(gUserB, gTenantA, rbac.RoleApprover),
+		&procurementv1.DecideApprovalRequest{StepId: steps[0].GetId(), Decision: "approve"})
+	if err != nil {
+		t.Fatalf("approve step 1: %v", err)
+	}
+	if r := after1.GetRequisition(); r.GetStatus() != "submitted" || len(r.GetApprovalSteps()) != 2 ||
+		r.GetApprovalSteps()[0].GetStatus() != "approved" || r.GetApprovalSteps()[1].GetStatus() != "pending" {
+		t.Fatalf("after step 1 = %+v", r)
+	}
+	if r := after1.GetRequisition().GetApprovalSteps()[0]; r.GetDecidedBy() != gUserB || r.GetDecidedAt() == "" {
+		t.Fatalf("step 1 decision fields = %+v", r)
+	}
+
+	// Cross-tenant decide: tenant B cannot see the step (404, distinct
+	// from forbidden) — the caller holds approval:decide, so only the RLS
+	// invisibility can answer.
+	_, err = client.DecideApproval(callerCtxAs(gUserB, gTenantB, rbac.RoleApprover),
+		&procurementv1.DecideApprovalRequest{StepId: steps[1].GetId(), Decision: "approve"})
+	if status.Code(err) != codes.NotFound || status.Convert(err).Message() != "approval_step_not_found" {
+		t.Fatalf("cross-tenant decide: got (%v, %q), want NotFound approval_step_not_found", status.Code(err), status.Convert(err).Message())
+	}
+
+	// A dual-role finance+approver user approves the last step → the
+	// requisition is approved.
+	after2, err := client.DecideApproval(callerCtxAs(gUserB, gTenantA, rbac.RoleFinance, rbac.RoleApprover),
+		&procurementv1.DecideApprovalRequest{StepId: steps[1].GetId(), Decision: "approve", Reason: "within budget"})
+	if err != nil {
+		t.Fatalf("approve step 2: %v", err)
+	}
+	if r := after2.GetRequisition(); r.GetStatus() != "approved" ||
+		r.GetApprovalSteps()[1].GetStatus() != "approved" || r.GetApprovalSteps()[1].GetReason() != "within budget" {
+		t.Fatalf("after step 2 = %+v", r)
+	}
+
+	// Terminal: further decisions are 409s.
+	_, err = client.DecideApproval(callerCtxAs(gUserB, gTenantA, rbac.RoleFinance, rbac.RoleApprover),
+		&procurementv1.DecideApprovalRequest{StepId: steps[1].GetId(), Decision: "approve"})
+	if status.Code(err) != codes.Aborted || status.Convert(err).Message() != "approval_step_not_current" {
+		t.Fatalf("decide after terminal: got (%v, %q), want Aborted approval_step_not_current", status.Code(err), status.Convert(err).Message())
+	}
+
+	// Bad step id fails fast; unknown step id reads as missing.
+	_, err = client.DecideApproval(callerCtxAs(gUserB, gTenantA, rbac.RoleApprover),
+		&procurementv1.DecideApprovalRequest{StepId: "not-a-uuid", Decision: "approve"})
+	if status.Code(err) != codes.InvalidArgument || status.Convert(err).Message() != "approval_step_id_invalid" {
+		t.Fatalf("bad step id: got (%v, %q)", status.Code(err), status.Convert(err).Message())
+	}
+	_, err = client.DecideApproval(callerCtxAs(gUserB, gTenantA, rbac.RoleApprover),
+		&procurementv1.DecideApprovalRequest{StepId: "dddddddd-0000-0000-0000-0000000000ff", Decision: "approve"})
+	if status.Code(err) != codes.NotFound || status.Convert(err).Message() != "approval_step_not_found" {
+		t.Fatalf("unknown step id: got (%v, %q)", status.Code(err), status.Convert(err).Message())
+	}
+}
+
+// Reject stops the flow: the step is rejected, downstream pending steps are
+// skipped, the requisition is rejected, and every later decision is a 409.
+// An admin may decide someone else's step, but never their own.
+func TestApprovalGRPCRejectFlow(t *testing.T) {
+	client, db, cleanup := startProcurement(t)
+	defer cleanup()
+	grpcCleanupRequisition(t, db)
+	t.Cleanup(func() { grpcCleanupRequisition(t, db) })
+
+	if _, err := client.ReplaceApprovalRules(callerCtx(gTenantA, rbac.RoleAdmin),
+		&procurementv1.ReplaceApprovalRulesRequest{Rules: testRules()}); err != nil {
+		t.Fatalf("configure rules: %v", err)
+	}
+	pr, err := client.CreateRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.CreateRequisitionRequest{Currency: "IDR", Items: testItems()})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	submitted, err := client.SubmitRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.SubmitRequisitionRequest{Id: pr.GetId(), IdempotencyKey: "key-30-reject"})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	steps := submitted.GetApprovalSteps()
+
+	// An admin rejects step 1 — a different user than the requester, or
+	// the universal self-approval ban would fire first.
+	after, err := client.DecideApproval(callerCtxAs(gUserB, gTenantA, rbac.RoleAdmin),
+		&procurementv1.DecideApprovalRequest{StepId: steps[0].GetId(), Decision: "reject", Reason: "over budget"})
+	if err != nil {
+		t.Fatalf("reject step 1: %v", err)
+	}
+	r := after.GetRequisition()
+	if r.GetStatus() != "rejected" ||
+		r.GetApprovalSteps()[0].GetStatus() != "rejected" ||
+		r.GetApprovalSteps()[1].GetStatus() != "skipped" {
+		t.Fatalf("after reject = %s %+v", r.GetStatus(), r.GetApprovalSteps())
+	}
+	if s := r.GetApprovalSteps()[0]; s.GetReason() != "over budget" || s.GetDecidedBy() != gUserB {
+		t.Fatalf("rejected step fields = %+v", s)
+	}
+	if s := r.GetApprovalSteps()[1]; s.GetDecidedBy() != "" || s.GetDecidedAt() != "" {
+		t.Fatalf("skipped step records a decision: %+v", s)
+	}
+
+	// Every further decision on the dead flow is a 409 — including by the
+	// admin on the skipped step.
+	for _, s := range r.GetApprovalSteps() {
+		_, err := client.DecideApproval(callerCtxAs(gUserB, gTenantA, rbac.RoleAdmin),
+			&procurementv1.DecideApprovalRequest{StepId: s.GetId(), Decision: "approve"})
+		if status.Code(err) != codes.Aborted || status.Convert(err).Message() != "approval_step_not_current" {
+			t.Fatalf("decide %s after reject: got (%v, %q), want Aborted approval_step_not_current", s.GetId(), status.Code(err), status.Convert(err).Message())
+		}
 	}
 }
