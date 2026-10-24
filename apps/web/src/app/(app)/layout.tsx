@@ -2,7 +2,6 @@ import type { ReactNode } from "react";
 import LogoutButton from "@/components/LogoutButton";
 import SidebarNav, { type NavItem } from "@/components/SidebarNav";
 import Providers from "@/components/Providers";
-import SidebarNav from "@/components/SidebarNav";
 import TenantSwitcher from "@/components/TenantSwitcher";
 import LanguageSwitcher from "@/components/LanguageSwitcher";
 import { getDictionary, getLocale } from "@/i18n/server";

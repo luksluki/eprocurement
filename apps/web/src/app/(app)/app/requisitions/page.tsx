@@ -1,11 +1,3 @@
-import PlaceholderPage from "../../PlaceholderPage";
-import { getDictionary } from "@/i18n/server";
-
-export const dynamic = "force-dynamic";
-
-export default async function RequisitionsPage() {
-  const p = (await getDictionary()).pages.requisitions;
-  return <PlaceholderPage title={p.title} description={p.description} milestone={p.milestone} />;
 import { Suspense } from "react";
 import { requireSession } from "@/lib/session";
 import RequisitionsTable from "./RequisitionsTable";
