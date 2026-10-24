@@ -1,7 +1,12 @@
+import { Card, EmptyState, PageHeader } from "@eprocurement/ui";
+import { getDictionary } from "@/i18n/server";
+
 // Shared placeholder for sections of the PRD §11 information architecture
 // whose screens arrive in later milestones — every sidebar link resolves to a
-// real page; none 404s.
-export default function PlaceholderPage({
+// real page; none 404s. Structure and copy come from the design system and
+// the i18n dictionary; the page-specific title/description/milestone are
+// passed in (already localized) by each page.
+export default async function PlaceholderPage({
   title,
   description,
   milestone,
@@ -10,16 +15,13 @@ export default function PlaceholderPage({
   description: string;
   milestone: string;
 }) {
+  const dict = await getDictionary();
   return (
     <section aria-labelledby="placeholder-title">
-      <h1 id="placeholder-title" className="text-2xl font-semibold">
-        {title}
-      </h1>
-      <p className="mt-2 max-w-2xl text-sm text-slate-600">{description}</p>
-      <div className="mt-6 rounded-xl border border-dashed border-slate-300 bg-white px-6 py-10 text-center">
-        <p className="text-sm font-medium text-slate-700">This screen is not built yet.</p>
-        <p className="mt-1 text-xs text-slate-500">Planned in {milestone}.</p>
-      </div>
+      <PageHeader id="placeholder-title" title={title} description={description} />
+      <Card variant="dashed" className="mt-6">
+        <EmptyState title={dict.placeholder.notBuilt} body={dict.placeholder.plannedIn(milestone)} />
+      </Card>
     </section>
   );
 }

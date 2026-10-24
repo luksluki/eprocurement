@@ -6,9 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "lint": "eslint .",
-    "test": "vitest run"
+    "test": "vitest run && node scripts/assert-ui-css.mjs"
   },
   "dependencies": {
+    "@eprocurement/ui": "workspace:*",
     "next": "^15.5.9",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"

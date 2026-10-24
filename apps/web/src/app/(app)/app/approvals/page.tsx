@@ -1,13 +1,9 @@
 import PlaceholderPage from "../../PlaceholderPage";
+import { getDictionary } from "@/i18n/server";
 
 export const dynamic = "force-dynamic";
 
-export default function ApprovalsPage() {
-  return (
-    <PlaceholderPage
-      title="Approvals"
-      description="The approver's queue: pending steps with thresholds, approve/reject with reason."
-      milestone="M2 — approval engine"
-    />
-  );
+export default async function ApprovalsPage() {
+  const p = (await getDictionary()).pages.approvals;
+  return <PlaceholderPage title={p.title} description={p.description} milestone={p.milestone} />;
 }

@@ -3,39 +3,39 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-type NavItem = {
+export type NavItem = {
   href: string;
   label: string;
 };
 
-// PRD §11 information architecture. The Admin group renders only for admins
-// (RoleAdmin, internal/platform/rbac) — passed in as a prop from the server
-// layout, which holds the verified claims.
-const MAIN_NAV: NavItem[] = [
-  { href: "/app/dashboard", label: "Dashboard" },
-  { href: "/app/requisitions", label: "Requisitions" },
-  { href: "/app/approvals", label: "Approvals" },
-  { href: "/app/purchase-orders", label: "Purchase Orders" },
-  { href: "/app/vendors", label: "Vendors" },
-  { href: "/app/invoices", label: "Invoices" },
-  { href: "/app/reports", label: "Reports" },
-];
+export type SidebarNavLabels = {
+  ariaLabel: string;
+  admin: string;
+};
 
-const ADMIN_NAV: NavItem[] = [
-  { href: "/admin/users", label: "Users" },
-  { href: "/admin/settings", label: "Settings" },
-];
-
-export default function SidebarNav({ isAdmin }: { isAdmin: boolean }) {
+// PRD §11 information architecture. Items and copy arrive from the server
+// layout (dictionary-driven); the Admin group renders only for admins
+// (RoleAdmin, internal/platform/rbac).
+export default function SidebarNav({
+  isAdmin,
+  mainNav,
+  adminNav,
+  labels,
+}: {
+  isAdmin: boolean;
+  mainNav: NavItem[];
+  adminNav: NavItem[];
+  labels: SidebarNavLabels;
+}) {
   const pathname = usePathname();
 
   return (
-    <nav aria-label="Main navigation" className="flex flex-1 flex-col gap-6 px-3 py-4">
-      <NavGroup items={MAIN_NAV} pathname={pathname} />
+    <nav aria-label={labels.ariaLabel} className="flex flex-1 flex-col gap-6 px-3 py-4">
+      <NavGroup items={mainNav} pathname={pathname} />
       {isAdmin ? (
         <div>
-          <p className="px-2 pb-1 text-xs font-semibold uppercase tracking-wide text-slate-400">Admin</p>
-          <NavGroup items={ADMIN_NAV} pathname={pathname} />
+          <p className="px-2 pb-1 text-xs font-semibold uppercase tracking-wide text-slate-600">{labels.admin}</p>
+          <NavGroup items={adminNav} pathname={pathname} />
         </div>
       ) : null}
     </nav>
