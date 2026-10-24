@@ -8,6 +8,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	procurementv1 "github.com/luksluki/eprocurement/gen/go/procurement/v1"
@@ -44,9 +45,16 @@ func registerVendorRoutes(app *fiber.App, verifier *token.Verifier, client Vendo
 }
 
 // forwardContext attaches the verified claims as outgoing gRPC metadata —
-// procurement scopes every query by this tenant and audits this user.
+// procurement scopes every query by this tenant and audits this user — and
+// propagates the request's trace id (X-Trace-Id, generated when absent) as
+// x-trace-id, so outbox rows and service logs share the REST trace
+// (PRD §18; the TraceInterceptor reads it on the other side).
 func forwardContext(c *fiber.Ctx, claims auth.AccessClaims) context.Context {
-	return rbac.OutgoingContext(c.UserContext(), claims.Sub, claims.TenantID, claims.Roles)
+	ctx := rbac.OutgoingContext(c.UserContext(), claims.Sub, claims.TenantID, claims.Roles)
+	if trace := traceIDFrom(c); trace != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, "x-trace-id", trace)
+	}
+	return ctx
 }
 
 func claimsOf(c *fiber.Ctx) (auth.AccessClaims, bool) {

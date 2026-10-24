@@ -322,6 +322,10 @@ func grpcCleanupRequisition(t *testing.T, db *pgxpool.Pool) {
 	t.Helper()
 	_ = tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(context.Background(),
+			`DELETE FROM procurement.outbox WHERE tenant_id IN ($1, $2)`, gTenantA, gTenantB); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(context.Background(),
 			`DELETE FROM procurement.requisitions WHERE tenant_id IN ($1, $2) AND number LIKE 'PR-%'`,
 			gTenantA, gTenantB); err != nil {
 			return err
@@ -846,5 +850,113 @@ func TestApprovalGRPCRejectFlow(t *testing.T) {
 		if status.Code(err) != codes.Aborted || status.Convert(err).Message() != "approval_step_not_current" {
 			t.Fatalf("decide %s after reject: got (%v, %q), want Aborted approval_step_not_current", s.GetId(), status.Code(err), status.Convert(err).Message())
 		}
+	}
+}
+
+// Decide idempotency + outbox over the real gRPC surface: the service-layer
+// key bound, the replay contract (current state, no second event), the
+// cross-step key conflict, and outbox rows carrying the caller as actor and
+// the propagated x-trace-id.
+func TestApprovalGRPCDecideIdempotencyOutbox(t *testing.T) {
+	client, db, cleanup := startProcurement(t)
+	defer cleanup()
+	grpcCleanupRequisition(t, db)
+	t.Cleanup(func() { grpcCleanupRequisition(t, db) })
+
+	if _, err := client.ReplaceApprovalRules(callerCtx(gTenantA, rbac.RoleAdmin),
+		&procurementv1.ReplaceApprovalRulesRequest{Rules: testRules()}); err != nil {
+		t.Fatalf("configure rules: %v", err)
+	}
+	pr, err := client.CreateRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.CreateRequisitionRequest{Currency: "IDR", Items: testItems()})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	submitted, err := client.SubmitRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.SubmitRequisitionRequest{Id: pr.GetId()})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	steps := submitted.GetApprovalSteps()
+
+	outboxCount := func() int {
+		var n int
+		if err := tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+			return tx.QueryRow(context.Background(),
+				`SELECT count(*) FROM procurement.outbox WHERE entity_id = $1`, pr.GetId()).Scan(&n)
+		}); err != nil {
+			t.Fatalf("count outbox: %v", err)
+		}
+		return n
+	}
+
+	// Service-layer key bound (the gateway re-checks the same limit at the
+	// edge); nothing was written.
+	_, err = client.DecideApproval(callerCtxAs(gUserB, gTenantA, rbac.RoleApprover),
+		&procurementv1.DecideApprovalRequest{StepId: steps[0].GetId(), Decision: "approve",
+			IdempotencyKey: strings.Repeat("k", 65)})
+	if status.Code(err) != codes.InvalidArgument || status.Convert(err).Message() != "approval_idempotency_key_invalid" {
+		t.Fatalf("long key: got (%v, %q), want InvalidArgument approval_idempotency_key_invalid", status.Code(err), status.Convert(err).Message())
+	}
+	if n := outboxCount(); n != 0 {
+		t.Fatalf("outbox after rejected key = %d, want 0", n)
+	}
+
+	// A keyed decide whose gRPC call carries x-trace-id: the outbox row must
+	// carry the same trace id and the caller as actor (PRD §18).
+	decider := metadata.AppendToOutgoingContext(callerCtxAs(gUserB, gTenantA, rbac.RoleApprover), "x-trace-id", "trace-grpc-31")
+	after1, err := client.DecideApproval(decider,
+		&procurementv1.DecideApprovalRequest{StepId: steps[0].GetId(), Decision: "approve",
+			IdempotencyKey: "grpc-decide-31"})
+	if err != nil || after1.GetRequisition().GetStatus() != "submitted" {
+		t.Fatalf("keyed decide = (%+v, %v)", after1, err)
+	}
+	if n := outboxCount(); n != 1 {
+		t.Fatalf("outbox after mid-flow decide = %d, want 1", n)
+	}
+	var eventType, actorID, traceID string
+	if err := tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		return tx.QueryRow(context.Background(), `
+			SELECT event_type, actor_id::text, trace_id
+			FROM procurement.outbox WHERE entity_id = $1`, pr.GetId()).Scan(&eventType, &actorID, &traceID)
+	}); err != nil {
+		t.Fatalf("load outbox row: %v", err)
+	}
+	if eventType != "pr.step_approved" || actorID != gUserB || traceID != "trace-grpc-31" {
+		t.Fatalf("outbox row = (%s, %s, %s), want pr.step_approved by %s with trace-grpc-31", eventType, actorID, traceID, gUserB)
+	}
+
+	// Replay: the same key on the same step returns the identical state.
+	replay, err := client.DecideApproval(decider,
+		&procurementv1.DecideApprovalRequest{StepId: steps[0].GetId(), Decision: "approve",
+			IdempotencyKey: "grpc-decide-31"})
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	a, b := replay.GetRequisition().GetApprovalSteps()[0], after1.GetRequisition().GetApprovalSteps()[0]
+	if a.GetDecidedAt() != b.GetDecidedAt() || a.GetDecidedBy() != b.GetDecidedBy() {
+		t.Fatalf("replay step = %+v, want %+v", a, b)
+	}
+	if n := outboxCount(); n != 1 {
+		t.Fatalf("outbox after replay = %d, want 1", n)
+	}
+
+	// The same key cannot name another step of the tenant.
+	_, err = client.DecideApproval(callerCtxAs(gUserB, gTenantA, rbac.RoleFinance, rbac.RoleApprover),
+		&procurementv1.DecideApprovalRequest{StepId: steps[1].GetId(), Decision: "approve",
+			IdempotencyKey: "grpc-decide-31"})
+	if status.Code(err) != codes.AlreadyExists || status.Convert(err).Message() != "approval_idempotency_key_conflict" {
+		t.Fatalf("key on other step: got (%v, %q), want AlreadyExists approval_idempotency_key_conflict", status.Code(err), status.Convert(err).Message())
+	}
+
+	// Terminal decide under a fresh key adds the terminal event.
+	after2, err := client.DecideApproval(callerCtxAs(gUserB, gTenantA, rbac.RoleFinance, rbac.RoleApprover),
+		&procurementv1.DecideApprovalRequest{StepId: steps[1].GetId(), Decision: "approve",
+			IdempotencyKey: "grpc-decide-31-b"})
+	if err != nil || after2.GetRequisition().GetStatus() != "approved" {
+		t.Fatalf("terminal decide = (%s, %v)", after2.GetRequisition().GetStatus(), err)
+	}
+	if n := outboxCount(); n != 3 {
+		t.Fatalf("outbox after terminal decide = %d, want 3", n)
 	}
 }

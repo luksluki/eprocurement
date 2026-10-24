@@ -80,8 +80,12 @@ type ProcurementClient interface {
 	// role_required (admins excepted) and must not be the requester
 	// (self-approval is forbidden for everyone, admins included). A reject
 	// skips the remaining steps and rejects the requisition; approving the
-	// last step approves it. The response carries the requisition with its
-	// latest approval_steps.
+	// last step approves it. The optional idempotency_key (from the gateway's
+	// Idempotency-Key header) names the decision: replaying the same key on
+	// the same step returns the current state without a second decision or a
+	// second outbox event; reusing it for another step in the tenant is
+	// rejected. The response carries the requisition with its latest
+	// approval_steps.
 	DecideApproval(ctx context.Context, in *DecideApprovalRequest, opts ...grpc.CallOption) (*DecideApprovalResponse, error)
 	// GetApprovalRules returns the caller tenant's whole rule set.
 	GetApprovalRules(ctx context.Context, in *GetApprovalRulesRequest, opts ...grpc.CallOption) (*ApprovalRulesResponse, error)
@@ -257,8 +261,12 @@ type ProcurementServer interface {
 	// role_required (admins excepted) and must not be the requester
 	// (self-approval is forbidden for everyone, admins included). A reject
 	// skips the remaining steps and rejects the requisition; approving the
-	// last step approves it. The response carries the requisition with its
-	// latest approval_steps.
+	// last step approves it. The optional idempotency_key (from the gateway's
+	// Idempotency-Key header) names the decision: replaying the same key on
+	// the same step returns the current state without a second decision or a
+	// second outbox event; reusing it for another step in the tenant is
+	// rejected. The response carries the requisition with its latest
+	// approval_steps.
 	DecideApproval(context.Context, *DecideApprovalRequest) (*DecideApprovalResponse, error)
 	// GetApprovalRules returns the caller tenant's whole rule set.
 	GetApprovalRules(context.Context, *GetApprovalRulesRequest) (*ApprovalRulesResponse, error)

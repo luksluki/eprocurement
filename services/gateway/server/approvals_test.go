@@ -208,6 +208,81 @@ func TestApprovalRoutesPermissionsAndRules(t *testing.T) {
 	}
 }
 
+// AC (decide idempotency at the edge, submit convention): the
+// Idempotency-Key header is forwarded trimmed; blank-after-trim (or absent)
+// means a plain request; an over-long key is a 400 without a procurement
+// call.
+func TestApprovalDecideIdempotencyKey(t *testing.T) {
+	for name, tc := range map[string]struct {
+		header string
+		want   string
+	}{
+		"plain key":         {"key-31", "key-31"},
+		"padded key":        {"  key-31  ", "key-31"},
+		"blank means none":  {"   ", ""},
+		"absent means none": {"", ""},
+	} {
+		fake := approvalFake(sampleDecideResponse())
+		app, verifier, priv, kid := newTestApp(t)
+		registerApprovalRoutes(app, verifier, fake)
+		resp, body := reqDo(t, app, "POST", "/api/v1/approvals/step-1/decide",
+			reqTokenFor(t, priv, kid, rbac.RoleApprover), `{"decision":"approve"}`,
+			map[string]string{"Idempotency-Key": tc.header})
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s: status = %d, body = %v", name, resp.StatusCode, body)
+		}
+		if got := fake.decideReq.GetIdempotencyKey(); got != tc.want {
+			t.Fatalf("%s: forwarded key = %q, want %q", name, got, tc.want)
+		}
+	}
+
+	// Over-long key: 400 approval_idempotency_key_invalid, no procurement call.
+	fake := approvalFake(nil)
+	app, verifier, priv, kid := newTestApp(t)
+	registerApprovalRoutes(app, verifier, fake)
+	resp, body := reqDo(t, app, "POST", "/api/v1/approvals/step-1/decide",
+		reqTokenFor(t, priv, kid, rbac.RoleApprover), `{"decision":"approve"}`,
+		map[string]string{"Idempotency-Key": strings.Repeat("k", 65)})
+	if resp.StatusCode != http.StatusBadRequest || body["code"] != "approval_idempotency_key_invalid" {
+		t.Fatalf("long key = (%d, %v), want (400, approval_idempotency_key_invalid)", resp.StatusCode, body)
+	}
+	if fake.decideReq != nil {
+		t.Fatal("procurement was called despite the invalid key")
+	}
+}
+
+// AC (trace propagation, PRD §18): the request's X-Trace-Id rides along as
+// x-trace-id gRPC metadata on the decide call (generated when absent), so
+// procurement's outbox rows share the REST trace.
+func TestApprovalDecideTracePropagation(t *testing.T) {
+	fake := approvalFake(sampleDecideResponse())
+	app, verifier, priv, kid := newTestApp(t)
+	registerApprovalRoutes(app, verifier, fake)
+	token := reqTokenFor(t, priv, kid, rbac.RoleApprover)
+
+	resp, body := reqDo(t, app, "POST", "/api/v1/approvals/step-1/decide", token,
+		`{"decision":"approve"}`, map[string]string{"X-Trace-Id": "trace-edge-31"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("decide with trace = %d, body = %v", resp.StatusCode, body)
+	}
+	md := metadataOf(t, fake.decideCtx)
+	if md["x-trace-id"] != "trace-edge-31" {
+		t.Fatalf("propagated trace = %q, want trace-edge-31", md["x-trace-id"])
+	}
+
+	// Absent header: the middleware generates a 32-hex id, and it still
+	// rides along.
+	fake.decideCtx = nil
+	resp, _ = reqDo(t, app, "POST", "/api/v1/approvals/step-1/decide", token, `{"decision":"approve"}`, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("decide without trace = %d", resp.StatusCode)
+	}
+	md = metadataOf(t, fake.decideCtx)
+	if len(md["x-trace-id"]) != 32 {
+		t.Fatalf("generated trace = %q, want a 32-char generated id", md["x-trace-id"])
+	}
+}
+
 // The approval slice of the shared gRPC→HTTP mapping: 412 rules missing,
 // 403 self/role, 409 not current, 404 step not found — machine codes always
 // preserved in the body.

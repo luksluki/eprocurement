@@ -1005,9 +1005,13 @@ type DecideApprovalRequest struct {
 	Decision string `protobuf:"bytes,2,opt,name=decision,proto3" json:"decision,omitempty"`
 	// Required for reject (non-blank after trimming), optional for approve;
 	// bounded to 1000 characters at the edge and the service layer.
-	Reason        string `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Reason string `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
+	// Optional: 1-64 chars after trimming; empty means no idempotency.
+	// Replaying the same key on the same step returns the current state;
+	// reusing it for another step in the tenant is rejected.
+	IdempotencyKey string `protobuf:"bytes,4,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *DecideApprovalRequest) Reset() {
@@ -1057,6 +1061,13 @@ func (x *DecideApprovalRequest) GetDecision() string {
 func (x *DecideApprovalRequest) GetReason() string {
 	if x != nil {
 		return x.Reason
+	}
+	return ""
+}
+
+func (x *DecideApprovalRequest) GetIdempotencyKey() string {
+	if x != nil {
+		return x.IdempotencyKey
 	}
 	return ""
 }
@@ -1403,11 +1414,12 @@ const file_procurement_v1_procurement_proto_rawDesc = "" +
 	"\x05items\x18\x02 \x03(\v2\x1f.procurement.v1.RequisitionItemR\x05items\"S\n" +
 	"\x18SubmitRequisitionRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12'\n" +
-	"\x0fidempotency_key\x18\x02 \x01(\tR\x0eidempotencyKey\"d\n" +
+	"\x0fidempotency_key\x18\x02 \x01(\tR\x0eidempotencyKey\"\x8d\x01\n" +
 	"\x15DecideApprovalRequest\x12\x17\n" +
 	"\astep_id\x18\x01 \x01(\tR\x06stepId\x12\x1a\n" +
 	"\bdecision\x18\x02 \x01(\tR\bdecision\x12\x16\n" +
-	"\x06reason\x18\x03 \x01(\tR\x06reason\"W\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\x12'\n" +
+	"\x0fidempotency_key\x18\x04 \x01(\tR\x0eidempotencyKey\"W\n" +
 	"\x16DecideApprovalResponse\x12=\n" +
 	"\vrequisition\x18\x01 \x01(\v2\x1b.procurement.v1.RequisitionR\vrequisition\"\xa1\x01\n" +
 	"\fApprovalRule\x12\x0e\n" +

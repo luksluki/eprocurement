@@ -159,7 +159,7 @@ items pattern — the policy derives tenancy from the parent requisition via
   contract for successful submits is unchanged.
 - **Steps are in-band** — the submit and decide responses embed the
   requisition's `approval_steps` (ids included). There is no step read
-  endpoint yet (#31/#32-34 own timeline/queue); a client chains
+  endpoint yet (#32-34 own timeline/queue); a client chains
   submit → decide → decide purely from responses.
 - **Decide** — `POST /api/v1/approvals/{stepId}/decide`
   (`approval:decide`): `{"decision": "approve"|"reject", "reason": "…"}`
@@ -181,9 +181,87 @@ items pattern — the policy derives tenancy from the parent requisition via
   transaction as submit/edit — concurrent decides on one step yield exactly
   one winner, the others 409.
 - **Events** — every step decision records `approval_step_approved` /
-  `approval_step_rejected` on the step aggregate; the terminal transitions
-  reuse the existing `requisition_approved` / `requisition_rejected`. All
-  flow through `Events()`/`PullEvents()` and are not persisted yet (#45).
+  `approval_step_rejected` on the step aggregate's in-memory log; the
+  terminal transitions reuse the existing `requisition_approved` /
+  `requisition_rejected`. Since #31 the persisted record is the outbox rows
+  Decide writes in the same transaction (see 0006 below) — with the
+  publishable two-segment names of the PRD §14.6 catalog, not these
+  aggregate-local names.
+- **Decide idempotency (#31)** — the optional `Idempotency-Key` header
+  (1–64 chars after trimming, else 400 `approval_idempotency_key_invalid`
+  at the gateway and the service layer; blank after trimming = a plain
+  request) names one decision, with the contract pinned like the submit
+  key's: replaying the same key on the same step returns the requisition's
+  current state (plus its steps) **without a second decision, a second
+  outbox row, or a 409**; reusing the key for another step of the tenant →
+  409 `approval_idempotency_key_conflict`; a duplicate decide **without** a
+  key on an already-decided step keeps the #30 answer
+  (`approval_step_not_current`). The replay lookup and the key insert run
+  inside the decide transaction after the parent `FOR UPDATE` lock, and the
+  key is recorded on the success path only — two concurrent keyed decides
+  on one step serialize into one winner + one idempotent replay, never a
+  conflict.
+
+## Migration 0006 — `procurement.outbox` + `procurement.decision_idempotency` (#31)
+
+The persistent half of the transactional outbox (PRD §14.3, ADR-0001):
+state writes and their events commit atomically in one transaction; the
+publisher loop that drains the table to RabbitMQ (poll 2 s, batch 50,
+`published_at` marker, retries, DLQ) stays with #45. `outbox.AppendTx`
+(`services/procurement/outbox`) is the writer; Decide is its first caller.
+
+`procurement.outbox`:
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | **= `event_id`** of the §14.5 envelope — consumers dedupe on it |
+| `tenant_id` | uuid NOT NULL | RLS scoping key |
+| `event_type` | text NOT NULL | catalog names, e.g. `pr.step_approved` |
+| `version` | integer NOT NULL DEFAULT 1 | **delta vs §13**: the envelope's schema `version` (§14.5) as a column, so the #45 publisher assembles envelopes without parsing the payload |
+| `payload` | jsonb NOT NULL | decision payload — see below |
+| `actor_id` | uuid NULL | **delta vs §13**: envelope `actor_id` (§14.5) as a column; the decider |
+| `trace_id` | text NOT NULL DEFAULT '' | **delta vs §13**: envelope `trace_id` (§14.5) as a column; the propagated REST `X-Trace-Id` |
+| `entity_type` / `entity_id` | text / uuid NOT NULL | **delta vs §13/§14.5**: filter keys for `GET /api/v1/events?entityType=&entityId=` (§15) and the timeline projection (#43); for decide events the entity is the **requisition**, the step rides in the payload |
+| `occurred_at` | timestamptz NOT NULL | **delta vs §13**: envelope `occurred_at` (§14.5) as a column |
+| `created_at` | timestamptz NOT NULL | |
+| `published_at` | timestamptz NULL | set by the #45 publisher; rows are never deleted |
+
+These `version`/`actor_id`/`trace_id`/`occurred_at`/`entity_*` columns are a
+**conscious schema delta** beyond the §13 summary row and the §14.5 envelope
+— recorded here rather than claimed as PRD-conformant. Indexes:
+`outbox_unpublished_idx (created_at) WHERE published_at IS NULL` — the #45
+poller's partial index. **RLS**: the 0001/0003 tenant pattern; the #45
+publisher reads through the transaction-scoped `app.rls_bypass` arm.
+
+**Event naming (pinned for #31).** PRD §14.5 binds the topic exchange with
+`pr.*`, and the `*` wildcard matches exactly **one** word — so every
+procurement event name must stay two-segment to be deliverable. The decide
+events are:
+
+- `pr.step_approved` / `pr.step_rejected` — one per decision (step event).
+  **Catalog extension**: not in the §14.6 list; a three-segment step name
+  would never match a natural `pr.*` binding.
+- `pr.approved` / `pr.rejected` — only when the flow finishes (the §14.6
+  catalog entries).
+
+A mid-flow approve writes exactly one row; a decision that completes or
+kills the flow writes two (step + terminal). Replays, key conflicts, and
+duplicates without a key write nothing.
+
+**Decision payload** (both events share it): `requisition_id`, `number`,
+`requester_id` (the notification recipient, #45), `step_id`, `step_no`,
+`decision`, `reason`, `decided_by` (also the `actor_id` column),
+`decided_at`.
+
+`procurement.decision_idempotency` — one row per recorded decide key,
+inserted inside the decide transaction **on the success path only**:
+`tenant_id` + `idempotency_key` composite PK, `step_id` FK →
+`approval_steps` `ON DELETE CASCADE`, `created_at`. A dedicated table (not a
+key column on `approval_steps`) because the key names a request whose
+uniqueness scope is the tenant, and `approval_steps` deliberately carries no
+`tenant_id` (0005) — a unique key column there would let a cross-tenant
+23505 leak which keys exist in other tenants. **RLS**: the 0001 tenant
+pattern on `tenant_id`.
 
 ## Requisition state machine (#28)
 
@@ -194,8 +272,10 @@ Seven legal edges (loose cancel — maintainer decision on #28):
 `approved → closed` is driven by PO conversion (#35); the domain `Close`
 method exists now. Every successful transition appends exactly one domain
 event (`requisition_submitted`, …, plus `requisition_created` on draft
-creation) to the in-memory aggregate log (`Events()` / `PullEvents()`) —
-the outbox writer comes with #45.
+creation) to the in-memory aggregate log (`Events()` / `PullEvents()`). The
+decide events are persisted to `procurement.outbox` since #31 (0006);
+submit/create events still live only in the in-memory log until #45 wires
+them.
 
 Error codes: `requisition_currency_invalid`, `requisition_description_invalid`,
 `requisition_qty_invalid`, `requisition_unit_price_invalid`,
@@ -212,11 +292,14 @@ Approval error codes (#30): `approval_rule_currency_invalid`,
 `approval_rule_step_no_invalid`, `approval_rule_step_no_duplicate`,
 `approval_decision_invalid`, `approval_reason_required`,
 `approval_reason_invalid` (reason over 1000 chars),
-`approval_step_id_invalid` → 400 · `approval_step_not_current` → 409 ·
+`approval_step_id_invalid`, `approval_idempotency_key_invalid` (key over
+64 chars) → 400 · `approval_step_not_current` → 409 ·
+`approval_idempotency_key_conflict` → 409 (#31) ·
 `approval_step_not_found` → 404 (also the cross-tenant answer, via the
 transitive RLS policy) · `approval_self_forbidden`,
 `approval_role_forbidden` → 403 · `approval_rules_missing` → 412. The
-gateway carries them through the shared gRPC→HTTP mapping.
+gateway carries them through the shared gRPC→HTTP mapping
+(`AlreadyExists` → 409 for the key conflict).
 
 ## Lifecycle
 
@@ -268,7 +351,9 @@ missing (404 `requisition_not_found`).
 - #28: requisition domain + state machine + tables (done).
 - #29: requisition create/edit/submit API (done — store, number generation, idempotent submit, REST/gRPC wiring, gateway `Aborted` → 409). Read endpoints (get/list/timeline) are separate issues.
 - #30: approval rules + sequential engine + decide API (done — matrix materialization, 412 rollback, self/role enforcement, reject-skips, admin rule configuration, steps in-band).
-- Approvals #31 (audit log, notifications, idempotent decide), read endpoints/queue #32-34, PO conversion (#35), outbox (#45) (M2–M3).
+- #31: idempotent decide + outbox audit/notification events (done — `procurement.outbox` + `decision_idempotency` in 0006, decide replay/conflict contract, `pr.*` decide events with actor + trace, gateway `x-trace-id` propagation). **Re-sequenced with #45** by an agent decision: the outbox table + writer moved from #45's scope into #31 (see dev-note 031's provenance block); #45 keeps the publisher loop only.
+- Approvals read endpoints/queue #32-34, PO conversion (#35), outbox publisher (#45 — poll/publish/retry/DLQ only; table and writer landed with #31) (M2–M3).
+- The timeline/event read path (#42/#43/#47, `GET /api/v1/events`) consumes the outbox's `entity_type`/`entity_id` columns; a tenant+entity index arrives with whichever issue first queries them.
 
 ## Vendor list — filters, pagination, query plans (#27)
 

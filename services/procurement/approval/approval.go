@@ -32,10 +32,13 @@ const (
 	DecisionReject  = "reject"
 )
 
-// Domain event types, one per step decision. The requisition-level
-// requisition_approved / requisition_rejected events already exist in the
-// requisition package; this package records only the step events. The event
-// history (#43) and the outbox (#45) consume them later.
+// Domain event types, one per step decision, recorded on the in-memory
+// aggregate log. The requisition-level requisition_approved /
+// requisition_rejected events already exist in the requisition package. The
+// persisted events are the outbox rows the store writes (#31) — with the
+// publishable two-segment names of the §14.6 catalog (see store.go), not
+// these aggregate-local names; the in-memory log remains the aggregate's
+// own record.
 const (
 	EventStepApproved = "approval_step_approved"
 	EventStepRejected = "approval_step_rejected"
@@ -80,6 +83,12 @@ var (
 	ErrStepNotCurrent       = errors.New("approval_step_not_current")
 	ErrStepNotFound         = errors.New("approval_step_not_found")
 	ErrStepIDInvalid        = errors.New("approval_step_id_invalid")
+
+	// Decide idempotency (issue #31), same contract as the submit key: the
+	// length bound is enforced at the edge and the service layer, and a key
+	// reused for another step of the tenant is a conflict.
+	ErrIdempotencyKeyInvalid  = errors.New("approval_idempotency_key_invalid")
+	ErrIdempotencyKeyConflict = errors.New("approval_idempotency_key_conflict")
 )
 
 // maxReasonLen bounds the decision reason. Checked at the edge and again in

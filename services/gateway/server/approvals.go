@@ -32,8 +32,11 @@ type decideBody struct {
 
 // decideApproval serves POST /api/v1/approvals/{stepId}/decide. The step id
 // comes from the submit/decide responses' approval_steps (there is no read
-// endpoint yet — #31/#32-34). Edge validation: decision ∈ {approve, reject},
-// reject requires a non-blank reason, reason ≤ 1000 chars.
+// endpoint yet — #32-34). Edge validation: decision ∈ {approve, reject},
+// reject requires a non-blank reason, reason ≤ 1000 chars. The optional
+// Idempotency-Key header follows the submit convention (1–64 chars after
+// trimming): a replay of the same key on the same step returns the current
+// state; empty after trimming means a plain (non-idempotent) request.
 func decideApproval(client ProcurementClient) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		claims, ok := claimsOf(c)
@@ -64,10 +67,18 @@ func decideApproval(client ProcurementClient) fiber.Handler {
 				"code":  "approval_reason_invalid",
 			})
 		}
+		key := strings.TrimSpace(c.Get("Idempotency-Key"))
+		if len(key) > 64 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "Idempotency-Key must be 1-64 characters",
+				"code":  "approval_idempotency_key_invalid",
+			})
+		}
 		resp, err := client.DecideApproval(forwardContext(c, claims), &procurementv1.DecideApprovalRequest{
-			StepId:   c.Params("stepId"),
-			Decision: body.Decision,
-			Reason:   body.Reason,
+			StepId:         c.Params("stepId"),
+			Decision:       body.Decision,
+			Reason:         body.Reason,
+			IdempotencyKey: key,
 		})
 		if err != nil {
 			return approvalError(c, err)
@@ -152,20 +163,22 @@ func rulesJSON(rules []*procurementv1.ApprovalRule) []fiber.Map {
 
 // approvalMessages renders each approval machine code as a human sentence.
 var approvalMessages = map[string]string{
-	"approval_rules_missing":          "no approval rule applies to this requisition; configure rules first",
-	"approval_rule_currency_invalid":  "rule currency must be IDR or USD",
-	"approval_rule_role_invalid":      "rule role must be one of the six fixed roles",
-	"approval_rule_threshold_invalid": "rule threshold must be zero or more",
-	"approval_rule_step_no_invalid":   "rule step_no must be greater than zero",
-	"approval_rule_step_no_duplicate": "rule step_no must be unique per currency",
-	"approval_decision_invalid":       "decision must be approve or reject",
-	"approval_reason_required":        "a reject requires a reason",
-	"approval_reason_invalid":         "reason must be at most 1000 characters",
-	"approval_self_forbidden":         "you cannot decide your own requisition",
-	"approval_role_forbidden":         "this step requires a role you do not hold",
-	"approval_step_not_current":       "this step is not the current pending step",
-	"approval_step_not_found":         "approval step not found",
-	"approval_step_id_invalid":        "approval step id must be a UUID",
+	"approval_rules_missing":            "no approval rule applies to this requisition; configure rules first",
+	"approval_rule_currency_invalid":    "rule currency must be IDR or USD",
+	"approval_rule_role_invalid":        "rule role must be one of the six fixed roles",
+	"approval_rule_threshold_invalid":   "rule threshold must be zero or more",
+	"approval_rule_step_no_invalid":     "rule step_no must be greater than zero",
+	"approval_rule_step_no_duplicate":   "rule step_no must be unique per currency",
+	"approval_decision_invalid":         "decision must be approve or reject",
+	"approval_reason_required":          "a reject requires a reason",
+	"approval_reason_invalid":           "reason must be at most 1000 characters",
+	"approval_self_forbidden":           "you cannot decide your own requisition",
+	"approval_role_forbidden":           "this step requires a role you do not hold",
+	"approval_step_not_current":         "this step is not the current pending step",
+	"approval_step_not_found":           "approval step not found",
+	"approval_step_id_invalid":          "approval step id must be a UUID",
+	"approval_idempotency_key_invalid":  "Idempotency-Key must be 1-64 characters",
+	"approval_idempotency_key_conflict": "Idempotency-Key was already used for another approval step",
 }
 
 // approvalError renders procurement's approval failures through the shared
