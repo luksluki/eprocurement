@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -21,6 +22,7 @@ import (
 	documentsv1 "github.com/luksluki/eprocurement/gen/go/documents/v1"
 	"github.com/luksluki/eprocurement/internal/platform/rbac"
 	"github.com/luksluki/eprocurement/services/documents/attachment"
+	"github.com/luksluki/eprocurement/services/documents/history"
 	"github.com/luksluki/eprocurement/services/documents/internal/testenv"
 	"github.com/luksluki/eprocurement/services/documents/objectstore"
 )
@@ -56,9 +58,13 @@ func startDocuments(t *testing.T) (documentsv1.DocumentsClient, func()) {
 	if err := store.EnsureIndexes(t.Context()); err != nil {
 		t.Fatalf("EnsureIndexes: %v", err)
 	}
+	events := history.NewStore(db)
+	if err := events.EnsureIndexes(t.Context()); err != nil {
+		t.Fatalf("EnsureIndexes history: %v", err)
+	}
 
 	log := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
-	srv := New(log, okPinger{}, store, storage, attachment.Limits{MaxSizeBytes: 1 << 20})
+	srv := New(log, okPinger{}, store, storage, attachment.Limits{MaxSizeBytes: 1 << 20}, events)
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -305,5 +311,215 @@ func TestAttachmentRBACAndAuth(t *testing.T) {
 	})
 	if st, _ := status.FromError(err); st.Code() != codes.Unauthenticated {
 		t.Fatalf("anonymous CreateUpload error = %v", err)
+	}
+}
+
+// startDocumentsEvents boots the full gRPC wiring for ListEvents tests —
+// real MongoDB, no MinIO (ListEvents never touches object storage).
+func startDocumentsEvents(t *testing.T) (documentsv1.DocumentsClient, *history.Store, func()) {
+	t.Helper()
+	if os.Getenv("TEST_MONGO_URI") == "" {
+		t.Skip("TEST_MONGO_URI not set; skipping integration test")
+	}
+	db := testenv.Mongo(t)
+	events := history.NewStore(db)
+	if err := events.EnsureIndexes(t.Context()); err != nil {
+		t.Fatalf("EnsureIndexes history: %v", err)
+	}
+	log := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
+	srv := New(log, okPinger{}, attachment.NewStore(db), nil, attachment.Limits{}, events)
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() { _ = srv.Serve(context.Background(), lis) }()
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	return documentsv1.NewDocumentsClient(conn), events, func() {
+		_ = conn.Close()
+		_ = lis.Close()
+	}
+}
+
+func seedHistory(t *testing.T, store *history.Store) {
+	t.Helper()
+	base := time.Date(2026, 10, 24, 8, 0, 0, 0, time.UTC)
+	specs := []struct {
+		id, tenant, eventType string
+		at                    time.Time
+		entity                string
+	}{
+		// e5/e4 share occurred_at — the approval engine's step + terminal
+		// pair — so the event_id DESC tiebreaker decides their order.
+		{"e5", gTenantA, "pr.step_approved", base.Add(3 * time.Second), "r-1"},
+		{"e4", gTenantA, "pr.approved", base.Add(3 * time.Second), "r-1"},
+		{"e3", gTenantA, "pr.submitted", base.Add(2 * time.Second), "r-1"},
+		{"e2", gTenantA, "pr.created", base.Add(1 * time.Second), "r-2"},
+		{"e1", gTenantA, "pr.created", base, "r-2"},
+		{"b1", gTenantB, "pr.created", base, "r-1"},
+	}
+	for _, sp := range specs {
+		ev, err := history.NewEvent(sp.id, sp.tenant, sp.eventType, sp.at,
+			gUser, "trace-42", "requisition", sp.entity, `{"number":"PR-000001"}`)
+		if err != nil {
+			t.Fatalf("NewEvent %s: %v", sp.id, err)
+		}
+		if _, err := store.Apply(t.Context(), ev); err != nil {
+			t.Fatalf("Apply %s: %v", sp.id, err)
+		}
+	}
+}
+
+func eventIDsPB(events []*documentsv1.Event) []string {
+	ids := make([]string, 0, len(events))
+	for _, ev := range events {
+		ids = append(ids, ev.GetEventId())
+	}
+	return ids
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestListEventsOrderPaginationTenant pins the ListEvents contract over the
+// real gRPC wiring: newest first with the event_id tiebreaker, cursor pages
+// that neither duplicate nor skip, the entity filter, cross-tenant denial,
+// and payload_json fidelity.
+func TestListEventsOrderPaginationTenant(t *testing.T) {
+	client, store, stop := startDocumentsEvents(t)
+	defer stop()
+	seedHistory(t, store)
+
+	// Walk the tenant A history page by page (viewer holds requisition:read).
+	var walked []string
+	cursor := ""
+	pages := 0
+	for {
+		resp, err := client.ListEvents(viewerCtx(), &documentsv1.ListEventsRequest{Limit: 2, NextCursor: cursor})
+		if err != nil {
+			t.Fatalf("ListEvents page %d: %v", pages+1, err)
+		}
+		walked = append(walked, eventIDsPB(resp.GetEvents())...)
+		pages++
+		if resp.GetNextCursor() == "" {
+			break
+		}
+		cursor = resp.GetNextCursor()
+	}
+	if !equalStrings(walked, []string{"e5", "e4", "e3", "e2", "e1"}) {
+		t.Fatalf("walked = %v, want e5..e1 in order", walked)
+	}
+	if pages != 3 {
+		t.Fatalf("pages = %d, want 3", pages)
+	}
+
+	// Field fidelity of the newest event (the shared-timestamp tie pair).
+	resp, err := client.ListEvents(viewerCtx(), &documentsv1.ListEventsRequest{Limit: 1})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	top := resp.GetEvents()[0]
+	if top.GetType() != "pr.step_approved" || top.GetVersion() != 1 ||
+		top.GetActorId() != gUser || top.GetTraceId() != "trace-42" ||
+		top.GetEntityType() != "requisition" || top.GetEntityId() != "r-1" ||
+		top.GetPayloadJson() != `{"number":"PR-000001"}` ||
+		top.GetOccurredAt() == "" {
+		t.Fatalf("newest event fidelity: %+v", top)
+	}
+
+	// Entity filter narrows to one aggregate.
+	resp, err = client.ListEvents(viewerCtx(), &documentsv1.ListEventsRequest{
+		EntityType: "requisition", EntityId: "r-2", Limit: 10})
+	if err != nil {
+		t.Fatalf("ListEvents filtered: %v", err)
+	}
+	if !equalStrings(eventIDsPB(resp.GetEvents()), []string{"e2", "e1"}) {
+		t.Fatalf("filtered = %v", eventIDsPB(resp.GetEvents()))
+	}
+
+	// Cross-tenant denial: tenant B sees none of tenant A's events.
+	resp, err = client.ListEvents(callerCtx(gTenantB, rbac.RoleBuyer),
+		&documentsv1.ListEventsRequest{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListEvents tenant B: %v", err)
+	}
+	if ids := eventIDsPB(resp.GetEvents()); !equalStrings(ids, []string{"b1"}) {
+		t.Fatalf("tenant B sees %v, want only b1", ids)
+	}
+}
+
+// TestListEventsValidation pins the InvalidArgument machine codes: the
+// half filter and the malformed cursor. Limit normalizes instead (the
+// vendor-list convention) — a limit over the max is clamped, not rejected.
+func TestListEventsValidation(t *testing.T) {
+	client, store, stop := startDocumentsEvents(t)
+	defer stop()
+	seedHistory(t, store)
+
+	tests := []struct {
+		name string
+		req  *documentsv1.ListEventsRequest
+		want string
+	}{
+		{"entity type without id", &documentsv1.ListEventsRequest{EntityType: "requisition"}, history.ErrFilterInvalid.Error()},
+		{"entity id without type", &documentsv1.ListEventsRequest{EntityId: "r-1"}, history.ErrFilterInvalid.Error()},
+		{"malformed cursor", &documentsv1.ListEventsRequest{NextCursor: "not-a-cursor"}, history.ErrCursorInvalid.Error()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := client.ListEvents(viewerCtx(), tt.req)
+			st, _ := status.FromError(err)
+			if st.Code() != codes.InvalidArgument || st.Message() != tt.want {
+				t.Fatalf("error = %v, want InvalidArgument %q", err, tt.want)
+			}
+		})
+	}
+
+	// Over-max limit clamps (max 100) and still answers.
+	resp, err := client.ListEvents(viewerCtx(), &documentsv1.ListEventsRequest{Limit: 1000})
+	if err != nil || len(resp.GetEvents()) != 5 {
+		t.Fatalf("clamped limit: (%d events, %v)", len(resp.GetEvents()), err)
+	}
+}
+
+// TestListEventsRBAC pins the permission mapping: ListEvents requires
+// requisition:read. Every tenant role holds it, so the denial case uses a
+// role outside the matrix (rbac.Check grants unknown roles nothing); a
+// call without caller metadata is Unauthenticated. Methods missing from
+// the map would pass through unprotected (rbac/grpc.go), so the mapping
+// itself is the protection.
+func TestListEventsRBAC(t *testing.T) {
+	client, store, stop := startDocumentsEvents(t)
+	defer stop()
+	seedHistory(t, store)
+
+	// Role outside the matrix → no requisition:read → PermissionDenied.
+	_, err := client.ListEvents(callerCtx(gTenantA, "courier"),
+		&documentsv1.ListEventsRequest{})
+	if st, _ := status.FromError(err); st.Code() != codes.PermissionDenied {
+		t.Fatalf("unknown-role error = %v, want PermissionDenied", err)
+	}
+
+	// No caller metadata at all → Unauthenticated.
+	_, err = client.ListEvents(context.Background(), &documentsv1.ListEventsRequest{})
+	if st, _ := status.FromError(err); st.Code() != codes.Unauthenticated {
+		t.Fatalf("anonymous error = %v, want Unauthenticated", err)
+	}
+
+	// A least-privileged matrix role (viewer) reads fine.
+	if _, err := client.ListEvents(viewerCtx(), &documentsv1.ListEventsRequest{Limit: 1}); err != nil {
+		t.Fatalf("viewer ListEvents: %v", err)
 	}
 }

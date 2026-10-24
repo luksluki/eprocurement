@@ -25,6 +25,14 @@ service Documents {
   rpc ListAttachments(ListAttachmentsRequest) returns (ListAttachmentsResponse);
   // GetDownloadUrl returns a presigned GET URL for a ready attachment.
   rpc GetDownloadUrl(GetDownloadUrlRequest) returns (GetDownloadUrlResponse);
+  // ListEvents returns the caller tenant's append-only event history,
+  // newest first (occurred_at DESC, event_id DESC as the tiebreaker —
+  // decision events share occurred_at). entity_type + entity_id filter the
+  // timeline of one aggregate (both or neither). Pages walk a keyset cursor:
+  // next_cursor is opaque, stable under concurrent inserts, and empty on the
+  // last page. payload_json is the raw event payload JSON — full fidelity of
+  // the procurement outbox JSONB, no restructuring.
+  rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
 }
 
 message Attachment {
@@ -80,4 +88,32 @@ message GetDownloadUrlResponse {
   Attachment attachment = 1;
   string download_url = 2; // presigned GET target on MinIO
   string expires_at = 3;   // RFC 3339
+}
+
+// Event is one stored domain event (the PRD §14.5 envelope) as projected
+// into MongoDB by the history consumer.
+message Event {
+  string event_id = 1;
+  string tenant_id = 2;
+  string type = 3;           // catalog name, e.g. "pr.approved"
+  int32 version = 4;         // payload schema version, 1 today
+  string occurred_at = 5;    // RFC 3339
+  string actor_id = 6;       // user id, empty when unknown
+  string trace_id = 7;       // propagated trace, empty when unknown
+  string entity_type = 8;    // aggregate kind, e.g. "requisition"
+  string entity_id = 9;
+  string payload_json = 10;  // raw JSON payload, never restructured
+}
+
+message ListEventsRequest {
+  // Optional aggregate filter: both must be set, or both empty.
+  string entity_type = 1;
+  string entity_id = 2;
+  int32 limit = 3;         // default 20, max 100 (clamped)
+  string next_cursor = 4;  // keyset cursor from a previous response
+}
+
+message ListEventsResponse {
+  repeated Event events = 1;
+  string next_cursor = 2;  // empty on the last page
 }

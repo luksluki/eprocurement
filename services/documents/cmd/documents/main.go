@@ -1,6 +1,7 @@
 // Command documents runs the documents service: it ensures the MinIO
-// bucket and MongoDB indexes, starts the orphan-upload reaper, then serves
-// gRPC (documents.v1 + health + reflection) until SIGINT/SIGTERM.
+// bucket and the MongoDB indexes (attachment metadata + the append-only
+// event history), starts the orphan-upload reaper, then serves gRPC
+// (documents.v1 + health + reflection) until SIGINT/SIGTERM.
 package main
 
 import (
@@ -18,6 +19,7 @@ import (
 	"github.com/luksluki/eprocurement/internal/platform/logger"
 	"github.com/luksluki/eprocurement/services/documents/attachment"
 	documentsconfig "github.com/luksluki/eprocurement/services/documents/config"
+	"github.com/luksluki/eprocurement/services/documents/history"
 	"github.com/luksluki/eprocurement/services/documents/objectstore"
 	"github.com/luksluki/eprocurement/services/documents/server"
 )
@@ -52,6 +54,10 @@ func run() error {
 	if err := store.EnsureIndexes(ctx); err != nil {
 		return fmt.Errorf("ensure indexes: %w", err)
 	}
+	events := history.NewStore(db)
+	if err := events.EnsureIndexes(ctx); err != nil {
+		return fmt.Errorf("ensure history indexes: %w", err)
+	}
 
 	storage, err := objectstore.New(cfg.S3Endpoint, cfg.S3PresignEndpoint,
 		cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3Bucket, cfg.S3UseSSL)
@@ -75,7 +81,7 @@ func run() error {
 		return fmt.Errorf("listen %s: %w", cfg.Port, err)
 	}
 	srv := server.New(log, pinger{client: mongoClient}, store, storage,
-		attachment.Limits{MaxSizeBytes: int64(cfg.AttachmentMaxSizeMB) << 20})
+		attachment.Limits{MaxSizeBytes: int64(cfg.AttachmentMaxSizeMB) << 20}, events)
 	return srv.Serve(ctx, lis)
 }
 

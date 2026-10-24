@@ -557,6 +557,245 @@ func (x *GetDownloadUrlResponse) GetExpiresAt() string {
 	return ""
 }
 
+// Event is one stored domain event (the PRD §14.5 envelope) as projected
+// into MongoDB by the history consumer.
+type Event struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	EventId       string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	TenantId      string                 `protobuf:"bytes,2,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
+	Type          string                 `protobuf:"bytes,3,opt,name=type,proto3" json:"type,omitempty"`                               // catalog name, e.g. "pr.approved"
+	Version       int32                  `protobuf:"varint,4,opt,name=version,proto3" json:"version,omitempty"`                        // payload schema version, 1 today
+	OccurredAt    string                 `protobuf:"bytes,5,opt,name=occurred_at,json=occurredAt,proto3" json:"occurred_at,omitempty"` // RFC 3339
+	ActorId       string                 `protobuf:"bytes,6,opt,name=actor_id,json=actorId,proto3" json:"actor_id,omitempty"`          // user id, empty when unknown
+	TraceId       string                 `protobuf:"bytes,7,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`          // propagated trace, empty when unknown
+	EntityType    string                 `protobuf:"bytes,8,opt,name=entity_type,json=entityType,proto3" json:"entity_type,omitempty"` // aggregate kind, e.g. "requisition"
+	EntityId      string                 `protobuf:"bytes,9,opt,name=entity_id,json=entityId,proto3" json:"entity_id,omitempty"`
+	PayloadJson   string                 `protobuf:"bytes,10,opt,name=payload_json,json=payloadJson,proto3" json:"payload_json,omitempty"` // raw JSON payload, never restructured
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Event) Reset() {
+	*x = Event{}
+	mi := &file_documents_v1_documents_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Event) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Event) ProtoMessage() {}
+
+func (x *Event) ProtoReflect() protoreflect.Message {
+	mi := &file_documents_v1_documents_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Event.ProtoReflect.Descriptor instead.
+func (*Event) Descriptor() ([]byte, []int) {
+	return file_documents_v1_documents_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *Event) GetEventId() string {
+	if x != nil {
+		return x.EventId
+	}
+	return ""
+}
+
+func (x *Event) GetTenantId() string {
+	if x != nil {
+		return x.TenantId
+	}
+	return ""
+}
+
+func (x *Event) GetType() string {
+	if x != nil {
+		return x.Type
+	}
+	return ""
+}
+
+func (x *Event) GetVersion() int32 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+func (x *Event) GetOccurredAt() string {
+	if x != nil {
+		return x.OccurredAt
+	}
+	return ""
+}
+
+func (x *Event) GetActorId() string {
+	if x != nil {
+		return x.ActorId
+	}
+	return ""
+}
+
+func (x *Event) GetTraceId() string {
+	if x != nil {
+		return x.TraceId
+	}
+	return ""
+}
+
+func (x *Event) GetEntityType() string {
+	if x != nil {
+		return x.EntityType
+	}
+	return ""
+}
+
+func (x *Event) GetEntityId() string {
+	if x != nil {
+		return x.EntityId
+	}
+	return ""
+}
+
+func (x *Event) GetPayloadJson() string {
+	if x != nil {
+		return x.PayloadJson
+	}
+	return ""
+}
+
+type ListEventsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Optional aggregate filter: both must be set, or both empty.
+	EntityType    string `protobuf:"bytes,1,opt,name=entity_type,json=entityType,proto3" json:"entity_type,omitempty"`
+	EntityId      string `protobuf:"bytes,2,opt,name=entity_id,json=entityId,proto3" json:"entity_id,omitempty"`
+	Limit         int32  `protobuf:"varint,3,opt,name=limit,proto3" json:"limit,omitempty"`                            // default 20, max 100 (clamped)
+	NextCursor    string `protobuf:"bytes,4,opt,name=next_cursor,json=nextCursor,proto3" json:"next_cursor,omitempty"` // keyset cursor from a previous response
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListEventsRequest) Reset() {
+	*x = ListEventsRequest{}
+	mi := &file_documents_v1_documents_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListEventsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListEventsRequest) ProtoMessage() {}
+
+func (x *ListEventsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_documents_v1_documents_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListEventsRequest.ProtoReflect.Descriptor instead.
+func (*ListEventsRequest) Descriptor() ([]byte, []int) {
+	return file_documents_v1_documents_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *ListEventsRequest) GetEntityType() string {
+	if x != nil {
+		return x.EntityType
+	}
+	return ""
+}
+
+func (x *ListEventsRequest) GetEntityId() string {
+	if x != nil {
+		return x.EntityId
+	}
+	return ""
+}
+
+func (x *ListEventsRequest) GetLimit() int32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+func (x *ListEventsRequest) GetNextCursor() string {
+	if x != nil {
+		return x.NextCursor
+	}
+	return ""
+}
+
+type ListEventsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Events        []*Event               `protobuf:"bytes,1,rep,name=events,proto3" json:"events,omitempty"`
+	NextCursor    string                 `protobuf:"bytes,2,opt,name=next_cursor,json=nextCursor,proto3" json:"next_cursor,omitempty"` // empty on the last page
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListEventsResponse) Reset() {
+	*x = ListEventsResponse{}
+	mi := &file_documents_v1_documents_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListEventsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListEventsResponse) ProtoMessage() {}
+
+func (x *ListEventsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_documents_v1_documents_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListEventsResponse.ProtoReflect.Descriptor instead.
+func (*ListEventsResponse) Descriptor() ([]byte, []int) {
+	return file_documents_v1_documents_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *ListEventsResponse) GetEvents() []*Event {
+	if x != nil {
+		return x.Events
+	}
+	return nil
+}
+
+func (x *ListEventsResponse) GetNextCursor() string {
+	if x != nil {
+		return x.NextCursor
+	}
+	return ""
+}
+
 var File_documents_v1_documents_proto protoreflect.FileDescriptor
 
 const file_documents_v1_documents_proto_rawDesc = "" +
@@ -618,12 +857,39 @@ const file_documents_v1_documents_proto_rawDesc = "" +
 	"attachment\x12!\n" +
 	"\fdownload_url\x18\x02 \x01(\tR\vdownloadUrl\x12\x1d\n" +
 	"\n" +
-	"expires_at\x18\x03 \x01(\tR\texpiresAt2\xf0\x02\n" +
+	"expires_at\x18\x03 \x01(\tR\texpiresAt\"\xa5\x02\n" +
+	"\x05Event\x12\x19\n" +
+	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x1b\n" +
+	"\ttenant_id\x18\x02 \x01(\tR\btenantId\x12\x12\n" +
+	"\x04type\x18\x03 \x01(\tR\x04type\x12\x18\n" +
+	"\aversion\x18\x04 \x01(\x05R\aversion\x12\x1f\n" +
+	"\voccurred_at\x18\x05 \x01(\tR\n" +
+	"occurredAt\x12\x19\n" +
+	"\bactor_id\x18\x06 \x01(\tR\aactorId\x12\x19\n" +
+	"\btrace_id\x18\a \x01(\tR\atraceId\x12\x1f\n" +
+	"\ventity_type\x18\b \x01(\tR\n" +
+	"entityType\x12\x1b\n" +
+	"\tentity_id\x18\t \x01(\tR\bentityId\x12!\n" +
+	"\fpayload_json\x18\n" +
+	" \x01(\tR\vpayloadJson\"\x88\x01\n" +
+	"\x11ListEventsRequest\x12\x1f\n" +
+	"\ventity_type\x18\x01 \x01(\tR\n" +
+	"entityType\x12\x1b\n" +
+	"\tentity_id\x18\x02 \x01(\tR\bentityId\x12\x14\n" +
+	"\x05limit\x18\x03 \x01(\x05R\x05limit\x12\x1f\n" +
+	"\vnext_cursor\x18\x04 \x01(\tR\n" +
+	"nextCursor\"b\n" +
+	"\x12ListEventsResponse\x12+\n" +
+	"\x06events\x18\x01 \x03(\v2\x13.documents.v1.EventR\x06events\x12\x1f\n" +
+	"\vnext_cursor\x18\x02 \x01(\tR\n" +
+	"nextCursor2\xc1\x03\n" +
 	"\tDocuments\x12U\n" +
 	"\fCreateUpload\x12!.documents.v1.CreateUploadRequest\x1a\".documents.v1.CreateUploadResponse\x12O\n" +
 	"\x0eCompleteUpload\x12#.documents.v1.CompleteUploadRequest\x1a\x18.documents.v1.Attachment\x12^\n" +
 	"\x0fListAttachments\x12$.documents.v1.ListAttachmentsRequest\x1a%.documents.v1.ListAttachmentsResponse\x12[\n" +
-	"\x0eGetDownloadUrl\x12#.documents.v1.GetDownloadUrlRequest\x1a$.documents.v1.GetDownloadUrlResponseBBZ@github.com/luksluki/eprocurement/gen/go/documents/v1;documentsv1b\x06proto3"
+	"\x0eGetDownloadUrl\x12#.documents.v1.GetDownloadUrlRequest\x1a$.documents.v1.GetDownloadUrlResponse\x12O\n" +
+	"\n" +
+	"ListEvents\x12\x1f.documents.v1.ListEventsRequest\x1a .documents.v1.ListEventsResponseBBZ@github.com/luksluki/eprocurement/gen/go/documents/v1;documentsv1b\x06proto3"
 
 var (
 	file_documents_v1_documents_proto_rawDescOnce sync.Once
@@ -637,7 +903,7 @@ func file_documents_v1_documents_proto_rawDescGZIP() []byte {
 	return file_documents_v1_documents_proto_rawDescData
 }
 
-var file_documents_v1_documents_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_documents_v1_documents_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_documents_v1_documents_proto_goTypes = []any{
 	(*Attachment)(nil),              // 0: documents.v1.Attachment
 	(*CreateUploadRequest)(nil),     // 1: documents.v1.CreateUploadRequest
@@ -647,24 +913,30 @@ var file_documents_v1_documents_proto_goTypes = []any{
 	(*ListAttachmentsResponse)(nil), // 5: documents.v1.ListAttachmentsResponse
 	(*GetDownloadUrlRequest)(nil),   // 6: documents.v1.GetDownloadUrlRequest
 	(*GetDownloadUrlResponse)(nil),  // 7: documents.v1.GetDownloadUrlResponse
+	(*Event)(nil),                   // 8: documents.v1.Event
+	(*ListEventsRequest)(nil),       // 9: documents.v1.ListEventsRequest
+	(*ListEventsResponse)(nil),      // 10: documents.v1.ListEventsResponse
 }
 var file_documents_v1_documents_proto_depIdxs = []int32{
-	0, // 0: documents.v1.CreateUploadResponse.attachment:type_name -> documents.v1.Attachment
-	0, // 1: documents.v1.ListAttachmentsResponse.attachments:type_name -> documents.v1.Attachment
-	0, // 2: documents.v1.GetDownloadUrlResponse.attachment:type_name -> documents.v1.Attachment
-	1, // 3: documents.v1.Documents.CreateUpload:input_type -> documents.v1.CreateUploadRequest
-	3, // 4: documents.v1.Documents.CompleteUpload:input_type -> documents.v1.CompleteUploadRequest
-	4, // 5: documents.v1.Documents.ListAttachments:input_type -> documents.v1.ListAttachmentsRequest
-	6, // 6: documents.v1.Documents.GetDownloadUrl:input_type -> documents.v1.GetDownloadUrlRequest
-	2, // 7: documents.v1.Documents.CreateUpload:output_type -> documents.v1.CreateUploadResponse
-	0, // 8: documents.v1.Documents.CompleteUpload:output_type -> documents.v1.Attachment
-	5, // 9: documents.v1.Documents.ListAttachments:output_type -> documents.v1.ListAttachmentsResponse
-	7, // 10: documents.v1.Documents.GetDownloadUrl:output_type -> documents.v1.GetDownloadUrlResponse
-	7, // [7:11] is the sub-list for method output_type
-	3, // [3:7] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	0,  // 0: documents.v1.CreateUploadResponse.attachment:type_name -> documents.v1.Attachment
+	0,  // 1: documents.v1.ListAttachmentsResponse.attachments:type_name -> documents.v1.Attachment
+	0,  // 2: documents.v1.GetDownloadUrlResponse.attachment:type_name -> documents.v1.Attachment
+	8,  // 3: documents.v1.ListEventsResponse.events:type_name -> documents.v1.Event
+	1,  // 4: documents.v1.Documents.CreateUpload:input_type -> documents.v1.CreateUploadRequest
+	3,  // 5: documents.v1.Documents.CompleteUpload:input_type -> documents.v1.CompleteUploadRequest
+	4,  // 6: documents.v1.Documents.ListAttachments:input_type -> documents.v1.ListAttachmentsRequest
+	6,  // 7: documents.v1.Documents.GetDownloadUrl:input_type -> documents.v1.GetDownloadUrlRequest
+	9,  // 8: documents.v1.Documents.ListEvents:input_type -> documents.v1.ListEventsRequest
+	2,  // 9: documents.v1.Documents.CreateUpload:output_type -> documents.v1.CreateUploadResponse
+	0,  // 10: documents.v1.Documents.CompleteUpload:output_type -> documents.v1.Attachment
+	5,  // 11: documents.v1.Documents.ListAttachments:output_type -> documents.v1.ListAttachmentsResponse
+	7,  // 12: documents.v1.Documents.GetDownloadUrl:output_type -> documents.v1.GetDownloadUrlResponse
+	10, // 13: documents.v1.Documents.ListEvents:output_type -> documents.v1.ListEventsResponse
+	9,  // [9:14] is the sub-list for method output_type
+	4,  // [4:9] is the sub-list for method input_type
+	4,  // [4:4] is the sub-list for extension type_name
+	4,  // [4:4] is the sub-list for extension extendee
+	0,  // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_documents_v1_documents_proto_init() }
@@ -678,7 +950,7 @@ func file_documents_v1_documents_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_documents_v1_documents_proto_rawDesc), len(file_documents_v1_documents_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   8,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
