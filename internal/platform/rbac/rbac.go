@@ -21,19 +21,20 @@ var allRoles = []string{RoleAdmin, RoleRequester, RoleApprover, RoleBuyer, RoleF
 
 // Permission names follow "<area>:<action>".
 const (
-	RequisitionRead  = "requisition:read"
-	RequisitionWrite = "requisition:write"
-	ApprovalDecide   = "approval:decide"
-	VendorRead       = "vendor:read"
-	VendorWrite      = "vendor:write"
-	PORead           = "po:read"
-	POWrite          = "po:write"
-	GRNPost          = "grn:post"
-	InvoiceRead      = "invoice:read"
-	InvoiceWrite     = "invoice:write"
-	ExportRun        = "export:run"
-	AuditRead        = "audit:read"
-	UsersManage      = "users:manage"
+	RequisitionRead   = "requisition:read"
+	RequisitionWrite  = "requisition:write"
+	ApprovalDecide    = "approval:decide"
+	ApprovalConfigure = "approval:configure"
+	VendorRead        = "vendor:read"
+	VendorWrite       = "vendor:write"
+	PORead            = "po:read"
+	POWrite           = "po:write"
+	GRNPost           = "grn:post"
+	InvoiceRead       = "invoice:read"
+	InvoiceWrite      = "invoice:write"
+	ExportRun         = "export:run"
+	AuditRead         = "audit:read"
+	UsersManage       = "users:manage"
 )
 
 // AllPermissions returns every permission in the matrix (tests and docs).
@@ -56,6 +57,9 @@ var matrix = []entry{
 	{RequisitionRead, []string{RoleRequester, RoleApprover, RoleBuyer, RoleFinance, RoleViewer}},
 	{RequisitionWrite, []string{RoleRequester}},
 	{ApprovalDecide, []string{RoleApprover}},
+	// Admin-only by design (PRD §5: the tenant admin manages approval
+	// rules): no non-admin role grants it.
+	{ApprovalConfigure, nil},
 	{VendorRead, []string{RoleRequester, RoleApprover, RoleBuyer, RoleFinance, RoleViewer}},
 	{VendorWrite, []string{RoleBuyer}},
 	{PORead, []string{RoleRequester, RoleApprover, RoleBuyer, RoleFinance, RoleViewer}},

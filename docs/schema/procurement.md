@@ -94,6 +94,175 @@ submit fails with 23505 and maps to `requisition_idempotency_key_conflict`
 covers tables created later; the explicit `GRANT SELECT, INSERT, UPDATE` is
 the same belt-and-braces as 0003.
 
+## Migration 0005 — `procurement.approval_rules` / `procurement.approval_steps` (#30)
+
+The storage mirror of the `approval` domain package. Rules are the live
+per-tenant configuration; steps are the per-requisition **snapshot** a
+submit takes of the rules that matched — replacing rules never rewrites
+steps that already exist.
+
+`procurement.approval_rules` (one row per rule; the tenant's whole set is
+replaced atomically by the configure API):
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | `gen_random_uuid()` |
+| `tenant_id` | uuid NOT NULL | RLS scoping key |
+| `currency` | text NOT NULL | CHECK `IDR` \| `USD` — a rule only matches a requisition in its own currency |
+| `step_no` | integer NOT NULL | CHECK `> 0`; `UNIQUE (tenant_id, currency, step_no)` — position in that currency's chain |
+| `role_required` | text NOT NULL | CHECK one of the six fixed roles — deciders must hold it (see below) |
+| `threshold_cents` | bigint NOT NULL | CHECK `>= 0`; the rule applies when `total_cents >= threshold_cents` (inclusive lower bound) |
+| `created_at`/`updated_at` | timestamptz | |
+
+`procurement.approval_steps` (no `tenant_id` — PRD §13; tenancy derives
+from the parent requisition, exactly like `requisition_items`):
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | `gen_random_uuid()`; the decide API's `{stepId}` |
+| `requisition_id` | uuid NOT NULL | FK → `requisitions (id)` ON DELETE CASCADE |
+| `step_no` | integer NOT NULL | CHECK `> 0`; `UNIQUE (requisition_id, step_no)` |
+| `role_required` | text NOT NULL | snapshot of the rule's role |
+| `threshold_cents` | bigint NOT NULL | snapshot of the rule's threshold |
+| `status` | text NOT NULL DEFAULT `pending` | CHECK `pending` \| `approved` \| `rejected` \| `skipped` |
+| `decided_by` | uuid NULL | the decider; empty while pending/skipped |
+| `decided_at` | timestamptz NULL | |
+| `reason` | text NOT NULL DEFAULT '' | required on reject, optional on approve |
+| `created_at` | timestamptz NOT NULL | |
+
+Indexes: `approval_rules_tenant_currency_step_uidx UNIQUE (tenant_id,
+currency, step_no)`; `approval_rules_tenant_idx (tenant_id)`;
+`approval_steps_requisition_stepno_uidx UNIQUE (requisition_id, step_no)`;
+`approval_steps_requisition_idx (requisition_id)`.
+
+**RLS**: rules carry `tenant_id` directly (0001 pattern); steps use the
+items pattern — the policy derives tenancy from the parent requisition via
+`EXISTS`, so cross-tenant step access is indistinguishable from missing
+(404 `approval_step_not_found`).
+
+### Approval lifecycle (#30)
+
+- **Rule administration** — `GET`/`PUT /api/v1/approval-rules`
+  (`approval:configure`, admin-only by matrix). PUT replaces the tenant's
+  whole set in one transaction (delete + insert); the empty set is legal.
+  Domain validation: currency ∈ {IDR, USD}, role in the six-role catalog,
+  threshold ≥ 0, step_no > 0 and unique per currency.
+- **Submit materialization (matrix model)** — submit evaluates **every**
+  tenant rule with `currency` matching the requisition and
+  `threshold_cents <= total_cents` (inclusive lower bound), not just the
+  highest threshold: each match becomes one `pending` step, ordered by
+  `step_no`. No applicable rule → `approval_rules_missing` (HTTP 412) and
+  the **whole submit transaction rolls back**: the requisition stays a
+  draft, no steps exist, and the submit idempotency key is **not** recorded
+  (it is written only by the successful UPDATE) — retrying the same key
+  after configuring rules behaves as a fresh submit. The pinned replay
+  contract for successful submits is unchanged.
+- **Steps are in-band** — the submit and decide responses embed the
+  requisition's `approval_steps` (ids included). There is no step read
+  endpoint yet (#32-34 own timeline/queue); a client chains
+  submit → decide → decide purely from responses.
+- **Decide** — `POST /api/v1/approvals/{stepId}/decide`
+  (`approval:decide`): `{"decision": "approve"|"reject", "reason": "…"}`
+  (decision required; reason required on reject after trimming, optional on
+  approve, ≤ 1000 chars at the edge and the service layer). Only the
+  **current** step — the smallest pending `step_no` of a requisition in
+  `submitted` — may be decided; anything else → 409
+  `approval_step_not_current`. Authorization beyond the permission: the
+  decider must not be the requester (`approval_self_forbidden`, **no admin
+  exception**) and must hold the step's `role_required`
+  (`approval_role_forbidden`; admins excepted, mirroring `rbac.Check` and
+  the requisition ownership rule). Because `approval:decide` is
+  approver-only in the matrix, **a rule with role R can only be decided by
+  a user who holds both R and `approval:decide` (i.e. R + approver), or by
+  an admin.** A reject marks the step `rejected`, every later pending step
+  `skipped`, and the requisition `rejected` (terminal); approving the last
+  pending step approves the requisition. Decisions serialize on the parent
+  requisition row `FOR UPDATE` inside the same `tenant.WithTenant`
+  transaction as submit/edit — concurrent decides on one step yield exactly
+  one winner, the others 409.
+- **Events** — every step decision records `approval_step_approved` /
+  `approval_step_rejected` on the step aggregate's in-memory log; the
+  terminal transitions reuse the existing `requisition_approved` /
+  `requisition_rejected`. Since #31 the persisted record is the outbox rows
+  Decide writes in the same transaction (see 0006 below) — with the
+  publishable two-segment names of the PRD §14.6 catalog, not these
+  aggregate-local names.
+- **Decide idempotency (#31)** — the optional `Idempotency-Key` header
+  (1–64 chars after trimming, else 400 `approval_idempotency_key_invalid`
+  at the gateway and the service layer; blank after trimming = a plain
+  request) names one decision, with the contract pinned like the submit
+  key's: replaying the same key on the same step returns the requisition's
+  current state (plus its steps) **without a second decision, a second
+  outbox row, or a 409**; reusing the key for another step of the tenant →
+  409 `approval_idempotency_key_conflict`; a duplicate decide **without** a
+  key on an already-decided step keeps the #30 answer
+  (`approval_step_not_current`). The replay lookup and the key insert run
+  inside the decide transaction after the parent `FOR UPDATE` lock, and the
+  key is recorded on the success path only — two concurrent keyed decides
+  on one step serialize into one winner + one idempotent replay, never a
+  conflict.
+
+## Migration 0006 — `procurement.outbox` + `procurement.decision_idempotency` (#31)
+
+The persistent half of the transactional outbox (PRD §14.3, ADR-0001):
+state writes and their events commit atomically in one transaction; the
+publisher loop that drains the table to RabbitMQ (poll 2 s, batch 50,
+`published_at` marker, retries, DLQ) stays with #45. `outbox.AppendTx`
+(`services/procurement/outbox`) is the writer; Decide is its first caller.
+
+`procurement.outbox`:
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | **= `event_id`** of the §14.5 envelope — consumers dedupe on it |
+| `tenant_id` | uuid NOT NULL | RLS scoping key |
+| `event_type` | text NOT NULL | catalog names, e.g. `pr.step_approved` |
+| `version` | integer NOT NULL DEFAULT 1 | **delta vs §13**: the envelope's schema `version` (§14.5) as a column, so the #45 publisher assembles envelopes without parsing the payload |
+| `payload` | jsonb NOT NULL | decision payload — see below |
+| `actor_id` | uuid NULL | **delta vs §13**: envelope `actor_id` (§14.5) as a column; the decider |
+| `trace_id` | text NOT NULL DEFAULT '' | **delta vs §13**: envelope `trace_id` (§14.5) as a column; the propagated REST `X-Trace-Id` |
+| `entity_type` / `entity_id` | text / uuid NOT NULL | **delta vs §13/§14.5**: filter keys for `GET /api/v1/events?entityType=&entityId=` (§15) and the timeline projection (#43); for decide events the entity is the **requisition**, the step rides in the payload |
+| `occurred_at` | timestamptz NOT NULL | **delta vs §13**: envelope `occurred_at` (§14.5) as a column |
+| `created_at` | timestamptz NOT NULL | |
+| `published_at` | timestamptz NULL | set by the #45 publisher; rows are never deleted |
+
+These `version`/`actor_id`/`trace_id`/`occurred_at`/`entity_*` columns are a
+**conscious schema delta** beyond the §13 summary row and the §14.5 envelope
+— recorded here rather than claimed as PRD-conformant. Indexes:
+`outbox_unpublished_idx (created_at) WHERE published_at IS NULL` — the #45
+poller's partial index. **RLS**: the 0001/0003 tenant pattern; the #45
+publisher reads through the transaction-scoped `app.rls_bypass` arm.
+
+**Event naming (pinned for #31).** PRD §14.5 binds the topic exchange with
+`pr.*`, and the `*` wildcard matches exactly **one** word — so every
+procurement event name must stay two-segment to be deliverable. The decide
+events are:
+
+- `pr.step_approved` / `pr.step_rejected` — one per decision (step event).
+  **Catalog extension**: not in the §14.6 list; a three-segment step name
+  would never match a natural `pr.*` binding.
+- `pr.approved` / `pr.rejected` — only when the flow finishes (the §14.6
+  catalog entries).
+
+A mid-flow approve writes exactly one row; a decision that completes or
+kills the flow writes two (step + terminal). Replays, key conflicts, and
+duplicates without a key write nothing.
+
+**Decision payload** (both events share it): `requisition_id`, `number`,
+`requester_id` (the notification recipient, #45), `step_id`, `step_no`,
+`decision`, `reason`, `decided_by` (also the `actor_id` column),
+`decided_at`.
+
+`procurement.decision_idempotency` — one row per recorded decide key,
+inserted inside the decide transaction **on the success path only**:
+`tenant_id` + `idempotency_key` composite PK, `step_id` FK →
+`approval_steps` `ON DELETE CASCADE`, `created_at`. A dedicated table (not a
+key column on `approval_steps`) because the key names a request whose
+uniqueness scope is the tenant, and `approval_steps` deliberately carries no
+`tenant_id` (0005) — a unique key column there would let a cross-tenant
+23505 leak which keys exist in other tenants. **RLS**: the 0001 tenant
+pattern on `tenant_id`.
+
 ## Requisition state machine (#28)
 
 Seven legal edges (loose cancel — maintainer decision on #28):
@@ -103,16 +272,36 @@ Seven legal edges (loose cancel — maintainer decision on #28):
 `approved → closed` is driven by PO conversion (#35); the domain `Close`
 method exists now. Every successful transition appends exactly one domain
 event (`requisition_submitted`, …, plus `requisition_created` on draft
-creation) to the in-memory aggregate log (`Events()` / `PullEvents()`) —
-the outbox writer comes with #45.
+creation) to the in-memory aggregate log (`Events()` / `PullEvents()`). The
+decide events are persisted to `procurement.outbox` since #31 (0006);
+submit/create events still live only in the in-memory log until #45 wires
+them.
 
 Error codes: `requisition_currency_invalid`, `requisition_description_invalid`,
 `requisition_qty_invalid`, `requisition_unit_price_invalid`,
 `requisition_items_empty`, `requisition_id_invalid`,
-`requisition_idempotency_key_invalid` → 400 · `requisition_illegal_transition` → 409
+`requisition_idempotency_key_invalid`,
+`requisition_status_invalid`, `requisition_page_invalid` → 400 ·
+`requisition_illegal_transition` → 409
 · `requisition_idempotency_key_conflict` → 409 · `requisition_not_found` → 404 ·
 `requisition_forbidden` → 403 (domain/store sentinel → gRPC code in the
-procurement server; the gateway maps `Aborted` → HTTP 409 — live since #29).
+procurement server; the gateway maps `Aborted` → HTTP 409 — live since #29) ·
+`approval_rules_missing` → 412 (#30: submit found no applicable rule and rolled
+back).
+
+Approval error codes (#30): `approval_rule_currency_invalid`,
+`approval_rule_role_invalid`, `approval_rule_threshold_invalid`,
+`approval_rule_step_no_invalid`, `approval_rule_step_no_duplicate`,
+`approval_decision_invalid`, `approval_reason_required`,
+`approval_reason_invalid` (reason over 1000 chars),
+`approval_step_id_invalid`, `approval_idempotency_key_invalid` (key over
+64 chars) → 400 · `approval_step_not_current` → 409 ·
+`approval_idempotency_key_conflict` → 409 (#31) ·
+`approval_step_not_found` → 404 (also the cross-tenant answer, via the
+transitive RLS policy) · `approval_self_forbidden`,
+`approval_role_forbidden` → 403 · `approval_rules_missing` → 412. The
+gateway carries them through the shared gRPC→HTTP mapping
+(`AlreadyExists` → 409 for the key conflict).
 
 ## Lifecycle
 
@@ -142,14 +331,26 @@ missing (404 `requisition_not_found`).
   serialize on the row lock; the mutation also guards on `status = 'draft'`).
 - **Submit** — `POST /api/v1/requisitions/{id}/submit`: draft → submitted;
   the basket must hold at least one valid line (empty → 400
-  `requisition_items_empty`, invalid line → the line's 400 code). The
-  optional `Idempotency-Key` header (1–64 chars after trimming, else 400
-  `requisition_idempotency_key_invalid`) names the submit: replaying the same
-  key **returns the requisition's current state as-is** (no second
-  transition, no 409), whatever it has moved on to since — a contract pinned
-  for #30/#31, when submitted requisitions can advance further. Reusing the
-  key for another requisition in the tenant → 409
-  `requisition_idempotency_key_conflict`.
+  `requisition_items_empty`, invalid line → the line's 400 code) **and at
+  least one applicable approval rule must exist** (none → 412
+  `approval_rules_missing`, whole submit rolled back — see the approval
+  lifecycle above). The optional `Idempotency-Key` header (1–64 chars after
+  trimming, else 400 `requisition_idempotency_key_invalid`) names the
+  submit: replaying the same key **returns the requisition's current state
+  as-is** (no second transition, no 409), whatever it has moved on to
+  since — a contract pinned for #30/#31. Reusing the key for another
+  requisition in the tenant → 409 `requisition_idempotency_key_conflict`.
+  The response embeds the materialized `approval_steps` (ids in-band).
+- **List** (#32) — `GET /api/v1/requisitions?q=&status=&page=&page_size=`
+  (`requisition:read` — every role): one page of **header-only** rows
+  (`items`/`approval_steps` always empty; the detail reads own the bodies)
+  ordered by `number` **descending** (numbers are sequential per tenant, so
+  newest first) plus `{total, page, page_size}`. `q` matches a number prefix
+  (case-insensitive; LIKE wildcards literal); `status` is one of the six
+  lifecycle values or empty; pagination defaults 1/20, max size 100, absurd
+  pages → 400 `requisition_page_invalid`, unknown status → 400
+  `requisition_status_invalid`. See the requisition list section below for
+  the query shape, budget test, and plans.
 
 ## Error codes
 
@@ -160,8 +361,11 @@ missing (404 `requisition_not_found`).
 - #26: attachments via presigned uploads (done).
 - #27: list/search/filter/pagination (done).
 - #28: requisition domain + state machine + tables (done).
-- #29: requisition create/edit/submit API (done — store, number generation, idempotent submit, REST/gRPC wiring, gateway `Aborted` → 409). Read endpoints (get/list/timeline) are separate issues.
-- Approvals (#30/#31), PO conversion (#35), outbox (#45) (M2–M3).
+- #29: requisition create/edit/submit API (done — store, number generation, idempotent submit, REST/gRPC wiring, gateway `Aborted` → 409). Read endpoints: **list done in #32** (see below); get/timeline are separate issues.
+- #30: approval rules + sequential engine + decide API (done — matrix materialization, 412 rollback, self/role enforcement, reject-skips, admin rule configuration, steps in-band).
+- #31: idempotent decide + outbox audit/notification events (done — `procurement.outbox` + `decision_idempotency` in 0006, decide replay/conflict contract, `pr.*` decide events with actor + trace, gateway `x-trace-id` propagation). **Re-sequenced with #45** by an agent decision: the outbox table + writer moved from #45's scope into #31 (see dev-note 031's provenance block); #45 keeps the publisher loop only.
+- Approvals read endpoints/queue #32-34, PO conversion (#35), outbox publisher (#45 — poll/publish/retry/DLQ only; table and writer landed with #31) (M2–M3).
+- The timeline/event read path (#42/#43/#47, `GET /api/v1/events`) consumes the outbox's `entity_type`/`entity_id` columns; a tenant+entity index arrives with whichever issue first queries them.
 
 ## Vendor list — filters, pagination, query plans (#27)
 
@@ -218,3 +422,80 @@ All shapes pass with >4× headroom. Two facts from the EXPLAIN output
    latency ever matters more than the shared policy, the follow-up is a
    per-service read role or policy reshaping — a platform decision, not a
    vendor-list tweak.
+
+## Requisition list — filters, pagination, query plans (#32)
+
+`ListRequisitions` (`requisition:read`, REST
+`GET /api/v1/requisitions?q=&status=&page=&page_size=`) returns one page of
+header-only rows ordered by `number DESC` (newest first — numbers are
+sequential per tenant) plus the total number of matching rows:
+
+- `q` — requisition **number prefix**, case-insensitive. LIKE wildcards in
+  the input (`%`, `_`, `\`) are escaped, so they match literally. Numbers are
+  canonical server-generated ASCII (`PR-%06d`), which is why two
+  requisition-specific plan choices below are safe.
+- `status` — one of the six lifecycle values or empty (all); combines with
+  `q`.
+- `page` (1-based, default 1) / `page_size` (default 20, max 100). Responses
+  echo the normalized values; `total` counts matches across all pages. A
+  page past the end is empty but still reports the true `total` (an explicit
+  COUNT fallback).
+
+The total rides the same single statement as the page: an exact COUNT as an
+uncorrelated scalar subquery (an executor **InitPlan — evaluated exactly
+once**), attached to the `LIMIT/OFFSET` page subquery. This deliberately
+differs from the vendor list's `count(*) OVER()` (#27), for measured reasons
+at 100k rows / default `work_mem` (4 MB) on the dev machine:
+
+1. **`count(*) OVER()` spills.** The window's tuplestore materializes every
+   matching row (~12 MB at 100k) and went to temp files: 217–540 ms per
+   unfiltered query against the 300 ms budget.
+2. **A `CROSS JOIN (SELECT count(*) …)` arm is not planner-safe**: without a
+   Materialize node the aggregate was re-executed once per page row
+   (`loops=20`), turning a 50 ms query into ~1 s. The scalar-subquery form
+   is guaranteed single-shot by the executor.
+
+The page arm sorts with `number COLLATE "C" DESC`: every storable number is
+canonical uppercase ASCII (`PR-` + digits), so C ordering equals the default
+collation's ordering for this data while comparisons stay memcmp-cheap — on
+the Windows/libc dev collation (English_Indonesia.1252) the top-N sort alone
+dropped from ~140 ms to ~35 ms. The existing
+`requisitions_tenant_number_uidx (tenant_id, number)` serves prefix quals in
+principle; the #27 note about the RLS policy's bypass arm keeping
+tenant-leading index quals unavailable applies unchanged (the planner
+estimates the tenant filter at ~1% and prefers scans).
+
+### Measured plans at 100k rows (the #32 budget test)
+
+`TestStoreListScale100k` (services/procurement/requisition) seeds 100,000
+requisitions in one tenant (80% draft / 10% submitted / 10% cancelled),
+brings the table to its production steady state (`VACUUM (ANALYZE)` — what
+autovacuum does after a bulk load, setting the visibility map — plus
+`CHECKPOINT` so the fixture's dirty buffers don't compete with the timing
+loop), then runs every filter shape 30× under the real RLS context after
+warm-ups. Budget: **p95 < 300 ms** per query, same bar as #27. Measured on
+the dev machine:
+
+| Shape | median | p95 |
+|---|---|---|
+| unfiltered page 1 | ~64–88 ms | ~108–134 ms |
+| status = submitted (10% of rows) | ~8–10 ms | ~15–18 ms |
+| number prefix (~1k rows) | ~56–156 ms | ~168–251 ms |
+| status + number prefix combined | ~74–161 ms | ~179–258 ms |
+
+Steady-state plans (from the test log's EXPLAIN (ANALYZE)):
+
+- **Unfiltered**: the count arm runs as `InitPlan 1 → Aggregate → Index Only
+  Scan using requisitions_tenant_idx` (100k index entries, `Heap Fetches: 0`
+  thanks to the vacuumed visibility map, ~27 ms); the page arm is a top-N
+  heapsort over the scan with the `COLLATE "C"` key (~83 ms); total ~110 ms.
+- **status filter**: `Index Only Scan using requisitions_tenant_status_idx`
+  with `Index Cond: (status = 'submitted')` and the RLS policy as a filter —
+  the existing `(tenant_id, status)` index carries the selectivity; ~10 ms.
+- **number prefix / combined**: parallel seq scans evaluating the LIKE
+  prefix per row; the LIKE (not the sort) dominates (~50–160 ms on the dev
+  collation; far less on Linux/glibc).
+
+The prefix sort cost is also why the RLS policy's per-row
+`tenant_id::text = current_setting(…)` evaluation matters at this scale —
+same #27 trade-off; a platform-level policy reshaping remains a follow-up.

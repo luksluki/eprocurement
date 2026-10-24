@@ -1,6 +1,8 @@
 import type { ReactNode } from "react";
 import LogoutButton from "@/components/LogoutButton";
 import SidebarNav, { type NavItem } from "@/components/SidebarNav";
+import Providers from "@/components/Providers";
+import SidebarNav from "@/components/SidebarNav";
 import TenantSwitcher from "@/components/TenantSwitcher";
 import LanguageSwitcher from "@/components/LanguageSwitcher";
 import { getDictionary, getLocale } from "@/i18n/server";
@@ -64,7 +66,9 @@ export default async function AppShellLayout({ children }: { children: ReactNode
             <LogoutButton labels={dict.header} />
           </div>
         </header>
-        <main className="flex-1 px-6 py-8">{children}</main>
+        <main className="flex-1 px-6 py-8">
+          <Providers>{children}</Providers>
+        </main>
       </div>
     </div>
   );

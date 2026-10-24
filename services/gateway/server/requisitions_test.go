@@ -34,6 +34,11 @@ type fakeRequisitionClient struct {
 	submitReq *procurementv1.SubmitRequisitionRequest
 	got       *procurementv1.Requisition
 	reqErr    error
+
+	listReq *procurementv1.ListRequisitionsRequest
+	listRes *procurementv1.ListRequisitionsResponse
+	listErr error
+	listCtx context.Context
 }
 
 func (f *fakeRequisitionClient) CreateRequisition(ctx context.Context, in *procurementv1.CreateRequisitionRequest, opts ...grpc.CallOption) (*procurementv1.Requisition, error) {
@@ -51,11 +56,34 @@ func (f *fakeRequisitionClient) SubmitRequisition(ctx context.Context, in *procu
 	return f.reply()
 }
 
+func (f *fakeRequisitionClient) ListRequisitions(ctx context.Context, in *procurementv1.ListRequisitionsRequest, opts ...grpc.CallOption) (*procurementv1.ListRequisitionsResponse, error) {
+	f.listCtx, f.listReq = ctx, in
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.listRes, nil
+}
+
 func (f *fakeRequisitionClient) reply() (*procurementv1.Requisition, error) {
 	if f.reqErr != nil {
 		return nil, f.reqErr
 	}
 	return f.got, nil
+}
+
+// The #30 approval methods satisfy the widened ProcurementClient interface;
+// the requisition tests never call them (the approval tests use their own
+// fake with recording).
+func (f *fakeRequisitionClient) DecideApproval(ctx context.Context, in *procurementv1.DecideApprovalRequest, opts ...grpc.CallOption) (*procurementv1.DecideApprovalResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
+}
+
+func (f *fakeRequisitionClient) GetApprovalRules(ctx context.Context, in *procurementv1.GetApprovalRulesRequest, opts ...grpc.CallOption) (*procurementv1.ApprovalRulesResponse, error) {
+	return &procurementv1.ApprovalRulesResponse{}, nil
+}
+
+func (f *fakeRequisitionClient) ReplaceApprovalRules(ctx context.Context, in *procurementv1.ReplaceApprovalRulesRequest, opts ...grpc.CallOption) (*procurementv1.ApprovalRulesResponse, error) {
+	return &procurementv1.ApprovalRulesResponse{}, nil
 }
 
 // reqTokenFor mints a requisition-test token (user-29 of tenant-29) with the
@@ -157,7 +185,7 @@ func metadataOf(t *testing.T, ctx context.Context) map[string]string {
 		t.Fatal("no outgoing metadata on the procurement call")
 	}
 	out := map[string]string{}
-	for _, key := range []string{rbac.MDTenantID, rbac.MDUserID, rbac.MDRole} {
+	for _, key := range []string{rbac.MDTenantID, rbac.MDUserID, rbac.MDRole, "x-trace-id"} {
 		if got := md.Get(key); len(got) > 0 {
 			out[key] = got[0]
 		}
@@ -256,6 +284,66 @@ func TestRequisitionRoutesErrorMapping(t *testing.T) {
 		}
 		if body["code"] != status.Convert(tc.err).Message() {
 			t.Fatalf("%s: body %v lost the machine code", name, body)
+		}
+	}
+}
+
+// The list route (#32): query params forwarded, {requisitions, total, page,
+// page_size} envelope, claims propagated as metadata, requisition:read broad
+// enough for a viewer, and the shared 400 mapping for bad status/page.
+func TestRequisitionListRoute(t *testing.T) {
+	fake := &fakeRequisitionClient{
+		fakeVendorClient: &fakeVendorClient{},
+		listRes: &procurementv1.ListRequisitionsResponse{
+			Requisitions: []*procurementv1.Requisition{
+				{Id: "pr-2", TenantId: "tenant-29", Number: "PR-000002", Status: "submitted", Currency: "IDR", TotalCents: 1000},
+				{Id: "pr-1", TenantId: "tenant-29", Number: "PR-000001", Status: "draft", Currency: "IDR"},
+			},
+			Total: 42, Page: 2, PageSize: 2,
+		},
+	}
+	app, verifier, priv, kid := newTestApp(t)
+	registerRequisitionRoutes(app, verifier, fake)
+	token := reqTokenFor(t, priv, kid, rbac.RoleViewer) // viewer holds requisition:read
+
+	resp, body := reqDo(t, app, "GET", "/api/v1/requisitions?q=pr-0001&status=draft&page=2&page_size=2", token, "", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list status = %d, body = %v", resp.StatusCode, body)
+	}
+	if body["total"] != float64(42) || body["page"] != float64(2) || body["page_size"] != float64(2) {
+		t.Fatalf("envelope = %v", body)
+	}
+	rows, _ := body["requisitions"].([]any)
+	if len(rows) != 2 {
+		t.Fatalf("requisitions = %v", body["requisitions"])
+	}
+	first, _ := rows[0].(map[string]any)
+	if first["number"] != "PR-000002" || first["status"] != "submitted" {
+		t.Fatalf("row JSON = %v", first)
+	}
+
+	// Query params forwarded to procurement; claims rode along as metadata.
+	if fake.listReq.GetQuery() != "pr-0001" || fake.listReq.GetStatus() != "draft" ||
+		fake.listReq.GetPage() != 2 || fake.listReq.GetPageSize() != 2 {
+		t.Fatalf("forwarded request = %+v", fake.listReq)
+	}
+	md := metadataOf(t, fake.listCtx)
+	if md["x-tenant-id"] != "tenant-29" || md["x-user-id"] != "user-29" {
+		t.Fatalf("propagated metadata = %v", md)
+	}
+
+	// Invalid status/page from procurement map to 400 with the machine code.
+	for name, tc := range map[string]struct {
+		err  error
+		code string
+	}{
+		"bad status": {status.Error(codes.InvalidArgument, "requisition_status_invalid"), "requisition_status_invalid"},
+		"bad page":   {status.Error(codes.InvalidArgument, "requisition_page_invalid"), "requisition_page_invalid"},
+	} {
+		fake.listErr = tc.err
+		resp, body := reqDo(t, app, "GET", "/api/v1/requisitions?status=paused", token, "", nil)
+		if resp.StatusCode != http.StatusBadRequest || body["code"] != tc.code {
+			t.Fatalf("%s: got (%d, %v), want (400, %s)", name, resp.StatusCode, body, tc.code)
 		}
 	}
 }

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -11,15 +12,51 @@ import (
 )
 
 // registerRequisitionRoutes wires /api/v1/requisitions: Bearer auth, RBAC
-// (requisition:write — requester/admin at both layers), and the verified
-// claims propagated to procurement as gRPC metadata. The requester-ownership
-// rule on edit/submit is enforced by procurement (docs/rbac.md).
+// (writes: requisition:write — requester/admin at both layers; list:
+// requisition:read — everyone in the tenant), and the verified claims
+// propagated to procurement as gRPC metadata. The requester-ownership rule
+// on edit/submit is enforced by procurement (docs/rbac.md).
 func registerRequisitionRoutes(app *fiber.App, verifier *token.Verifier, client ProcurementClient) {
 	reqs := app.Group("/api/v1/requisitions", bearerAuth(verifier))
 
+	reqs.Get("/", RequirePermission(rbac.RequisitionRead), listRequisitions(client))
 	reqs.Post("/", RequirePermission(rbac.RequisitionWrite), createRequisition(client))
 	reqs.Put("/:id", RequirePermission(rbac.RequisitionWrite), updateRequisition(client))
 	reqs.Post("/:id/submit", RequirePermission(rbac.RequisitionWrite), submitRequisition(client))
+}
+
+// listRequisitions serves GET /api/v1/requisitions: query params q (number
+// prefix), status, page, page_size — normalized and validated in procurement.
+// The response envelope is {requisitions, total, page, page_size}; rows are
+// header-only (items/approval_steps empty).
+func listRequisitions(client ProcurementClient) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		claims, ok := claimsOf(c)
+		if !ok {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "missing bearer token"})
+		}
+		page, _ := strconv.Atoi(c.Query("page"))
+		pageSize, _ := strconv.Atoi(c.Query("page_size"))
+		resp, err := client.ListRequisitions(forwardContext(c, claims), &procurementv1.ListRequisitionsRequest{
+			Query:    strings.TrimSpace(c.Query("q")),
+			Status:   strings.TrimSpace(c.Query("status")),
+			Page:     int32(page),
+			PageSize: int32(pageSize),
+		})
+		if err != nil {
+			return requisitionError(c, err)
+		}
+		out := make([]fiber.Map, 0, len(resp.GetRequisitions()))
+		for _, r := range resp.GetRequisitions() {
+			out = append(out, requisitionJSON(r))
+		}
+		return c.JSON(fiber.Map{
+			"requisitions": out,
+			"total":        resp.GetTotal(),
+			"page":         resp.GetPage(),
+			"page_size":    resp.GetPageSize(),
+		})
+	}
 }
 
 // The client payload carries no totals and no number: both are computed
@@ -138,6 +175,8 @@ var requisitionMessages = map[string]string{
 	"requisition_illegal_transition":       "requisition is no longer a draft",
 	"requisition_idempotency_key_invalid":  "Idempotency-Key must be 1-64 characters",
 	"requisition_idempotency_key_conflict": "Idempotency-Key was already used for another requisition",
+	"requisition_status_invalid":           "status must be a requisition status or empty",
+	"requisition_page_invalid":             "page is out of range",
 }
 
 // requisitionError renders procurement's requisition failures through the
@@ -156,19 +195,34 @@ func requisitionJSON(r *procurementv1.Requisition) fiber.Map {
 			"category":         it.GetCategory(),
 		})
 	}
+	steps := make([]fiber.Map, 0, len(r.GetApprovalSteps()))
+	for _, s := range r.GetApprovalSteps() {
+		steps = append(steps, fiber.Map{
+			"id":              s.GetId(),
+			"requisition_id":  s.GetRequisitionId(),
+			"step_no":         s.GetStepNo(),
+			"role_required":   s.GetRoleRequired(),
+			"threshold_cents": s.GetThresholdCents(),
+			"status":          s.GetStatus(),
+			"decided_by":      s.GetDecidedBy(),
+			"decided_at":      s.GetDecidedAt(),
+			"reason":          s.GetReason(),
+		})
+	}
 	return fiber.Map{
-		"id":           r.GetId(),
-		"tenant_id":    r.GetTenantId(),
-		"number":       r.GetNumber(),
-		"requester_id": r.GetRequesterId(),
-		"status":       r.GetStatus(),
-		"currency":     r.GetCurrency(),
-		"total_cents":  r.GetTotalCents(),
-		"items":        items,
-		"submitted_at": r.GetSubmittedAt(),
-		"created_at":   r.GetCreatedAt(),
-		"created_by":   r.GetCreatedBy(),
-		"updated_at":   r.GetUpdatedAt(),
-		"updated_by":   r.GetUpdatedBy(),
+		"id":             r.GetId(),
+		"tenant_id":      r.GetTenantId(),
+		"number":         r.GetNumber(),
+		"requester_id":   r.GetRequesterId(),
+		"status":         r.GetStatus(),
+		"currency":       r.GetCurrency(),
+		"total_cents":    r.GetTotalCents(),
+		"items":          items,
+		"approval_steps": steps,
+		"submitted_at":   r.GetSubmittedAt(),
+		"created_at":     r.GetCreatedAt(),
+		"created_by":     r.GetCreatedBy(),
+		"updated_at":     r.GetUpdatedAt(),
+		"updated_by":     r.GetUpdatedBy(),
 	}
 }
