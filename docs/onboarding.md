@@ -243,6 +243,22 @@ The seed only writes the isolated `demo` schema — `identity.users` and `procur
 
    Rerunning a create with the same code returns `409 vendor_duplicate_code` — safe to ignore. Admins implicitly hold every permission (`docs/rbac.md`), so no extra roles are needed.
 
+2b. **Seed a few purchase requisitions per tenant** (the #32 list screen — without them `/app/requisitions` shows its "no data yet" empty state). Submitting requires approval rules to exist first (an admin configures them once per tenant):
+
+   ```bash
+   # once per tenant: a one-step IDR approval chain (admins only)
+   curl -s -X PUT localhost:8080/api/v1/approval-rules \
+     -H "authorization: Bearer $TOKEN_A" -H 'content-type: application/json' \
+     -d '{"rules":[{"currency":"IDR","step_no":1,"role_required":"approver","threshold_cents":0}]}'
+
+   # a draft with items, then submit it (status filters need non-draft rows)
+   curl -s -X POST localhost:8080/api/v1/requisitions \
+     -H "authorization: Bearer $TOKEN_A" -H 'content-type: application/json' \
+     -d '{"currency":"IDR","items":[{"description":"Laptop","qty":2,"unit_price_cents":7500000,"category":"it"}]}'
+   curl -s -X POST localhost:8080/api/v1/requisitions/<id>/submit \
+     -H "authorization: Bearer $TOKEN_A"
+   ```
+
 3. **Run the web app** against the local gateway:
 
    ```bash

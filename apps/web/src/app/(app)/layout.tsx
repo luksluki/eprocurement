@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import LogoutButton from "@/components/LogoutButton";
+import Providers from "@/components/Providers";
 import SidebarNav from "@/components/SidebarNav";
 import TenantSwitcher from "@/components/TenantSwitcher";
 import { parseDemoTenants } from "@/lib/demo-tenants";
@@ -45,7 +46,9 @@ export default async function AppShellLayout({ children }: { children: ReactNode
             <LogoutButton />
           </div>
         </header>
-        <main className="flex-1 px-6 py-8">{children}</main>
+        <main className="flex-1 px-6 py-8">
+          <Providers>{children}</Providers>
+        </main>
       </div>
     </div>
   );

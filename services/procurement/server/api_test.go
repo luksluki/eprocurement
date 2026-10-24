@@ -296,6 +296,8 @@ func TestMapRequisitionError(t *testing.T) {
 		"items empty":               {requisition.ErrItemsEmpty, codes.InvalidArgument, "requisition_items_empty"},
 		"id invalid":                {requisition.ErrIDInvalid, codes.InvalidArgument, "requisition_id_invalid"},
 		"key invalid":               {requisition.ErrIdempotencyKeyInvalid, codes.InvalidArgument, "requisition_idempotency_key_invalid"},
+		"list status invalid":       {requisition.ErrStatusInvalid, codes.InvalidArgument, "requisition_status_invalid"},
+		"list page invalid":         {requisition.ErrPageInvalid, codes.InvalidArgument, "requisition_page_invalid"},
 		"not found":                 {requisition.ErrNotFound, codes.NotFound, "requisition_not_found"},
 		"key conflict":              {requisition.ErrIdempotencyKeyConflict, codes.AlreadyExists, "requisition_idempotency_key_conflict"},
 		"forbidden":                 {requisition.ErrForbidden, codes.PermissionDenied, "requisition_forbidden"},
@@ -534,6 +536,116 @@ func TestRequisitionGRPCValidation(t *testing.T) {
 	// No propagated auth metadata at all: Unauthenticated before any store hit.
 	if _, err := client.CreateRequisition(context.Background(),
 		&procurementv1.CreateRequisitionRequest{Currency: "IDR"}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("anonymous: code = %v, want Unauthenticated", status.Code(err))
+	}
+}
+
+// ListRequisitions through the full gRPC wiring: defaults, number-prefix and
+// status filters, header-only rows, newest-first ordering, cross-tenant
+// invisibility, validation codes, and the Unauthenticated gate.
+func TestRequisitionGRPCList(t *testing.T) {
+	client, db, cleanup := startProcurement(t)
+	defer cleanup()
+	grpcCleanupRequisition(t, db)
+	t.Cleanup(func() { grpcCleanupRequisition(t, db) })
+
+	// Three drafts in tenant A plus one submitted (the filter shapes need a
+	// non-draft status); one row in tenant B that must never surface.
+	create := func(tenant string) *procurementv1.Requisition {
+		r, err := client.CreateRequisition(callerCtx(tenant, rbac.RoleRequester),
+			&procurementv1.CreateRequisitionRequest{Currency: "IDR", Items: testItems()})
+		if err != nil {
+			t.Fatalf("create %s: %v", tenant, err)
+		}
+		return r
+	}
+	a1, _, a3 := create(gTenantA), create(gTenantA), create(gTenantA)
+	submitted := create(gTenantA)
+	create(gTenantB)
+	if _, err := client.ReplaceApprovalRules(callerCtx(gTenantA, rbac.RoleAdmin),
+		&procurementv1.ReplaceApprovalRulesRequest{Rules: testRules()[:1]}); err != nil {
+		t.Fatalf("configure rules: %v", err)
+	}
+	if _, err := client.SubmitRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.SubmitRequisitionRequest{Id: submitted.GetId()}); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	// Defaults: page 1, page size 20, tenant A's four rows newest first.
+	resp, err := client.ListRequisitions(callerCtx(gTenantA, rbac.RoleViewer),
+		&procurementv1.ListRequisitionsRequest{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if resp.GetPage() != 1 || resp.GetPageSize() != 20 || resp.GetTotal() != 4 || len(resp.GetRequisitions()) != 4 {
+		t.Fatalf("defaults: page=%d size=%d total=%d rows=%d", resp.GetPage(), resp.GetPageSize(), resp.GetTotal(), len(resp.GetRequisitions()))
+	}
+	rows := resp.GetRequisitions()
+	if rows[0].GetNumber() != submitted.GetNumber() || rows[3].GetNumber() != a1.GetNumber() {
+		t.Fatalf("not newest-first: %s…%s", rows[0].GetNumber(), rows[3].GetNumber())
+	}
+	// Header-only: items and approval_steps are never populated on list rows.
+	for _, r := range rows {
+		if len(r.GetItems()) != 0 || len(r.GetApprovalSteps()) != 0 {
+			t.Fatalf("list row carries a body: %+v", r)
+		}
+		if r.GetId() == "" || r.GetTenantId() != gTenantA || r.GetCreatedAt() == "" {
+			t.Fatalf("header fields missing: %+v", r)
+		}
+	}
+
+	// Status filter: only the submitted row.
+	resp, err = client.ListRequisitions(callerCtx(gTenantA, rbac.RoleViewer),
+		&procurementv1.ListRequisitionsRequest{Status: "submitted", PageSize: 10})
+	if err != nil || resp.GetTotal() != 1 || resp.GetRequisitions()[0].GetId() != submitted.GetId() {
+		t.Fatalf("status filter = (%+v, %v)", resp, err)
+	}
+
+	// Number-prefix query, case-insensitive input: matches a3 only.
+	resp, err = client.ListRequisitions(callerCtx(gTenantA, rbac.RoleViewer),
+		&procurementv1.ListRequisitionsRequest{Query: strings.ToLower(a3.GetNumber())})
+	if err != nil || resp.GetTotal() != 1 || resp.GetRequisitions()[0].GetId() != a3.GetId() {
+		t.Fatalf("prefix query = (%+v, %v)", resp, err)
+	}
+
+	// Combined filters: status among a prefix set (a2 and a3 share the tenant
+	// counter sequence; use the common "PR-" prefix + draft → the three drafts
+	// minus none, ordered newest first).
+	resp, err = client.ListRequisitions(callerCtx(gTenantA, rbac.RoleViewer),
+		&procurementv1.ListRequisitionsRequest{Query: "PR-", Status: "draft", Page: 1, PageSize: 2})
+	if err != nil || resp.GetTotal() != 3 || len(resp.GetRequisitions()) != 2 ||
+		resp.GetRequisitions()[0].GetId() != a3.GetId() {
+		t.Fatalf("combined = (%+v, %v)", resp, err)
+	}
+
+	// Past-the-end page: empty rows, true total via the COUNT fallback.
+	resp, err = client.ListRequisitions(callerCtx(gTenantA, rbac.RoleViewer),
+		&procurementv1.ListRequisitionsRequest{Page: 9, PageSize: 2})
+	if err != nil || len(resp.GetRequisitions()) != 0 || resp.GetTotal() != 4 {
+		t.Fatalf("past-the-end = (%+v, %v)", resp, err)
+	}
+
+	// Cross-tenant listing: tenant B sees only its own row.
+	resp, err = client.ListRequisitions(callerCtx(gTenantB, rbac.RoleViewer),
+		&procurementv1.ListRequisitionsRequest{})
+	if err != nil || resp.GetTotal() != 1 || resp.GetRequisitions()[0].GetTenantId() != gTenantB {
+		t.Fatalf("tenantB sees (%+v, %v)", resp, err)
+	}
+
+	// Validation: unknown status and absurd page are InvalidArgument.
+	for _, req := range []*procurementv1.ListRequisitionsRequest{
+		{Status: "paused"},
+		{Page: 2000000},
+	} {
+		_, err := client.ListRequisitions(callerCtx(gTenantA, rbac.RoleViewer), req)
+		if status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("validation %+v: code = %v, want InvalidArgument", req, status.Code(err))
+		}
+	}
+
+	// No auth metadata: Unauthenticated.
+	if _, err := client.ListRequisitions(context.Background(),
+		&procurementv1.ListRequisitionsRequest{}); status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("anonymous: code = %v, want Unauthenticated", status.Code(err))
 	}
 }

@@ -27,6 +27,7 @@ const (
 	Procurement_CreateRequisition_FullMethodName    = "/procurement.v1.Procurement/CreateRequisition"
 	Procurement_UpdateRequisition_FullMethodName    = "/procurement.v1.Procurement/UpdateRequisition"
 	Procurement_SubmitRequisition_FullMethodName    = "/procurement.v1.Procurement/SubmitRequisition"
+	Procurement_ListRequisitions_FullMethodName     = "/procurement.v1.Procurement/ListRequisitions"
 	Procurement_DecideApproval_FullMethodName       = "/procurement.v1.Procurement/DecideApproval"
 	Procurement_GetApprovalRules_FullMethodName     = "/procurement.v1.Procurement/GetApprovalRules"
 	Procurement_ReplaceApprovalRules_FullMethodName = "/procurement.v1.Procurement/ReplaceApprovalRules"
@@ -74,6 +75,12 @@ type ProcurementClient interface {
 	// without a second transition; reusing it for another requisition in the
 	// tenant is rejected.
 	SubmitRequisition(ctx context.Context, in *SubmitRequisitionRequest, opts ...grpc.CallOption) (*Requisition, error)
+	// ListRequisitions returns one page of the caller tenant's requisitions
+	// ordered by number descending (newest first). query matches a number
+	// prefix (case-insensitive); status and query combine. total is the number
+	// of matching rows across all pages. Rows are header-only: items and
+	// approval_steps are always empty here — the detail reads own them.
+	ListRequisitions(ctx context.Context, in *ListRequisitionsRequest, opts ...grpc.CallOption) (*ListRequisitionsResponse, error)
 	// DecideApproval applies one approve/reject decision to an approval step.
 	// Only the current step (the smallest pending step_no of a submitted
 	// requisition) may be decided; the decider must hold the step's
@@ -183,6 +190,16 @@ func (c *procurementClient) SubmitRequisition(ctx context.Context, in *SubmitReq
 	return out, nil
 }
 
+func (c *procurementClient) ListRequisitions(ctx context.Context, in *ListRequisitionsRequest, opts ...grpc.CallOption) (*ListRequisitionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListRequisitionsResponse)
+	err := c.cc.Invoke(ctx, Procurement_ListRequisitions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *procurementClient) DecideApproval(ctx context.Context, in *DecideApprovalRequest, opts ...grpc.CallOption) (*DecideApprovalResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(DecideApprovalResponse)
@@ -255,6 +272,12 @@ type ProcurementServer interface {
 	// without a second transition; reusing it for another requisition in the
 	// tenant is rejected.
 	SubmitRequisition(context.Context, *SubmitRequisitionRequest) (*Requisition, error)
+	// ListRequisitions returns one page of the caller tenant's requisitions
+	// ordered by number descending (newest first). query matches a number
+	// prefix (case-insensitive); status and query combine. total is the number
+	// of matching rows across all pages. Rows are header-only: items and
+	// approval_steps are always empty here — the detail reads own them.
+	ListRequisitions(context.Context, *ListRequisitionsRequest) (*ListRequisitionsResponse, error)
 	// DecideApproval applies one approve/reject decision to an approval step.
 	// Only the current step (the smallest pending step_no of a submitted
 	// requisition) may be decided; the decider must hold the step's
@@ -307,6 +330,9 @@ func (UnimplementedProcurementServer) UpdateRequisition(context.Context, *Update
 }
 func (UnimplementedProcurementServer) SubmitRequisition(context.Context, *SubmitRequisitionRequest) (*Requisition, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SubmitRequisition not implemented")
+}
+func (UnimplementedProcurementServer) ListRequisitions(context.Context, *ListRequisitionsRequest) (*ListRequisitionsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListRequisitions not implemented")
 }
 func (UnimplementedProcurementServer) DecideApproval(context.Context, *DecideApprovalRequest) (*DecideApprovalResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method DecideApproval not implemented")
@@ -482,6 +508,24 @@ func _Procurement_SubmitRequisition_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Procurement_ListRequisitions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListRequisitionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProcurementServer).ListRequisitions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Procurement_ListRequisitions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProcurementServer).ListRequisitions(ctx, req.(*ListRequisitionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Procurement_DecideApproval_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(DecideApprovalRequest)
 	if err := dec(in); err != nil {
@@ -574,6 +618,10 @@ var Procurement_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SubmitRequisition",
 			Handler:    _Procurement_SubmitRequisition_Handler,
+		},
+		{
+			MethodName: "ListRequisitions",
+			Handler:    _Procurement_ListRequisitions_Handler,
 		},
 		{
 			MethodName: "DecideApproval",

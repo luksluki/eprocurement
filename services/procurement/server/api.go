@@ -136,7 +136,9 @@ func mapRequisitionError(err error) error {
 		errors.Is(err, requisition.ErrUnitPriceInvalid),
 		errors.Is(err, requisition.ErrItemsEmpty),
 		errors.Is(err, requisition.ErrIDInvalid),
-		errors.Is(err, requisition.ErrIdempotencyKeyInvalid):
+		errors.Is(err, requisition.ErrIdempotencyKeyInvalid),
+		errors.Is(err, requisition.ErrStatusInvalid),
+		errors.Is(err, requisition.ErrPageInvalid):
 		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, requisition.ErrIllegalTransition):
 		return status.Error(codes.Aborted, err.Error())
@@ -335,6 +337,35 @@ func (a *api) SubmitRequisition(ctx context.Context, req *procurementv1.SubmitRe
 		return nil, mapApprovalError(err)
 	}
 	return requisitionPB(r, steps), nil
+}
+
+// ListRequisitions serves the requisition list (requisition:read): filters
+// validated in the domain, one header-only page (items and approval steps
+// are not loaded — the detail reads own them), newest number first.
+func (a *api) ListRequisitions(ctx context.Context, req *procurementv1.ListRequisitionsRequest) (*procurementv1.ListRequisitionsResponse, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	filter, err := requisition.ValidateList(requisition.ListFilter{
+		Query: req.GetQuery(), Status: req.GetStatus(),
+		Page: req.GetPage(), PageSize: req.GetPageSize(),
+	})
+	if err != nil {
+		return nil, mapRequisitionError(err)
+	}
+	headers, total, err := a.requisitions.List(ctx, auth.TenantID, filter)
+	if err != nil {
+		return nil, mapRequisitionError(err)
+	}
+	out := &procurementv1.ListRequisitionsResponse{
+		Total: int32(total), Page: filter.Page, PageSize: filter.PageSize,
+		Requisitions: make([]*procurementv1.Requisition, 0, len(headers)),
+	}
+	for _, r := range headers {
+		out.Requisitions = append(out.Requisitions, requisitionPB(r, nil))
+	}
+	return out, nil
 }
 
 // DecideApproval applies one approve/reject decision to the current approval
