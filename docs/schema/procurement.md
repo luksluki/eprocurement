@@ -293,13 +293,12 @@ cross-service import inside the single Go module.
   the event's `trace_id`, next tick retries. The worker deliberately runs
   no migrations — procurement stays the sole applier — so its `depends_on`
   in compose is only postgres + rabbitmq healthy.
-- **PROVISIONAL DLX.** Connecting declares the durable exchange
-  `procurement.dlx` and a `procurement.dlq` queue bound with `#`. The full
-  §14.5 dead-lettering model is consumer-side — `documents.history`,
-  `notifications`, `exports` each declare `x-dead-letter-exchange` with a
-  TTL-backoff retry queue (5 s → 30 s → 5 min) — and arrives with the
-  consumer issues; this single bootstrap declaration only gives dead
-  letters a destination and admin visibility from day one.
+- **RabbitMQ topology (#46).** Connecting declares the full §14.5 topology
+  (next section) — the exchanges, the three consumer queues with their DLX
+  argument and TTL retry ladders, and the DLQ — replacing #45's PROVISIONAL
+  bootstrap. The `procurement.dlx`/`procurement.dlq` declarations stayed
+  argument-identical, so redeclaring on a broker that carries the #45 pair
+  cannot raise PRECONDITION_FAILED.
 - **Observability (#54 follow-up).** What exists now is the structured
   publish log (`event_id`, `tenant_id`, `event_type`, `trace_id` from the
   row). OTel spans, trace propagation into AMQP headers, and the outbox
@@ -320,6 +319,39 @@ approval rules, empty basket, illegal transition).
 comment and dev-note 031 call the notification consumer "the #45 worker";
 issue #45's own scope text covers the publisher only. The consumers remain
 future issues — the references are historical, kept as-is.
+
+### RabbitMQ topology (#46)
+
+Declared once, idempotently, on every publisher connect (boot and
+reconnect) by `services/worker/topology`; the #47 consumers reuse the same
+declaration. It replaces #45's PROVISIONAL DLX bootstrap — the
+`procurement.dlx`/`procurement.dlq` declarations are argument-identical to
+that bootstrap, so the handover cannot raise PRECONDITION_FAILED on a
+broker that already carries it.
+
+- **Exchanges.** `procurement.events` (topic, durable) — the publisher's
+  target, routing key = event type (§14.6); `procurement.dlx` (topic,
+  durable) — the dead-letter destination.
+- **Main queues** (durable, `x-dead-letter-exchange: procurement.dlx`):
+  `documents.history` bound `#` (the history projection takes the whole
+  catalog), `notifications` bound the actor-facing subset `pr.submitted`,
+  `pr.approved`, `pr.rejected`, `po.issued`, `po.acknowledged`,
+  `invoice.discrepancy`, and `exports` bound `export.requested`. This
+  binding table is the repo's routing convention; the notifications subset
+  is the one judgement call in it, documented in dev-note 046 and open to
+  maintainer override.
+- **Retry ladder.** `<queue>.retry.1/2/3` per main queue — durable,
+  `x-message-ttl` 5 s → 30 s → 5 min, empty `x-dead-letter-exchange` (the
+  default exchange) and `x-dead-letter-routing-key` = the main queue's
+  name: a parked message returns to its own queue only, so one queue's
+  retries can never land in another's. Nothing consumes the tiers; the TTL
+  does the waiting, the broker does the dead-lettering back.
+- **Failure path.** Consumers (#47) track attempts in the `x-retry-count`
+  header through `topology.NextRetry` / `topology.RetryCount`: failures
+  1–3 republish to the next tier with a bumped count; the 4th failure
+  rejects without requeue, the queue's DLX argument routes it to
+  `procurement.dlx`, and the `#`-bound `procurement.dlq` is the final,
+  admin-visible destination (§14.5 "after max attempts → DLQ").
 
 ## Requisition state machine (#28)
 

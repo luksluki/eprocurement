@@ -21,6 +21,7 @@ import (
 	"github.com/luksluki/eprocurement/internal/platform/tenant"
 	"github.com/luksluki/eprocurement/services/procurement/migrations"
 	"github.com/luksluki/eprocurement/services/procurement/outbox"
+	"github.com/luksluki/eprocurement/services/worker/topology"
 )
 
 func testLogger() *slog.Logger {
@@ -388,9 +389,9 @@ func TestAMQPPublisherEndToEnd(t *testing.T) {
 	}
 	defer pub.Close()
 
-	// Capture published messages through a short-lived queue bound to
-	// everything (no consumer queues exist yet — they arrive with the
-	// consumer issues; §14.5).
+	// Capture the published message through a short-lived queue bound to
+	// everything. The production consumer queues exist since #46, but the
+	// consumers themselves are #47 — nothing drains them yet (§14.5).
 	ch, err := pub.conn.Channel()
 	if err != nil {
 		t.Fatalf("test channel: %v", err)
@@ -399,28 +400,32 @@ func TestAMQPPublisherEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("declare capture queue: %v", err)
 	}
-	if err := ch.QueueBind(q.Name, "#", EventsExchange, false, nil); err != nil {
+	if err := ch.QueueBind(q.Name, "#", topology.EventsExchange, false, nil); err != nil {
 		t.Fatalf("bind capture queue: %v", err)
 	}
 
-	// The provisional DLX topology is admin-visible from the first connect.
+	// Connect declares the full §14.5 topology (issue #46): passively
+	// verify both exchanges and every queue — mains, retry tiers, DLQ —
+	// exist after the first connect; the queue arguments themselves are
+	// pinned by the topology unit tests.
 	for _, check := range []struct {
 		name string
 		do   func() error
 	}{
-		{EventsExchange, func() error {
-			return ch.ExchangeDeclarePassive(EventsExchange, "topic", true, false, false, false, nil)
+		{topology.EventsExchange, func() error {
+			return ch.ExchangeDeclarePassive(topology.EventsExchange, "topic", true, false, false, false, nil)
 		}},
-		{DLXExchange, func() error {
-			return ch.ExchangeDeclarePassive(DLXExchange, "topic", true, false, false, false, nil)
-		}},
-		{DLQQueue, func() error {
-			_, err := ch.QueueDeclarePassive(DLQQueue, true, false, false, false, nil)
-			return err
+		{topology.DLXExchange, func() error {
+			return ch.ExchangeDeclarePassive(topology.DLXExchange, "topic", true, false, false, false, nil)
 		}},
 	} {
 		if err := check.do(); err != nil {
 			t.Fatalf("passive declare %s: %v", check.name, err)
+		}
+	}
+	for _, name := range topology.Default.QueueNames() {
+		if _, err := ch.QueueDeclarePassive(name, true, false, false, false, nil); err != nil {
+			t.Fatalf("passive declare queue %s: %v", name, err)
 		}
 	}
 
@@ -476,6 +481,17 @@ func TestAMQPPublisherEndToEnd(t *testing.T) {
 			evID).Scan(&published)
 	}); err != nil || published != 1 {
 		t.Fatalf("row marked published = (%d, %v), want 1", published, err)
+	}
+
+	// The published messages also landed in the production consumer queues
+	// (history binds #; notifications takes its subset) that nothing
+	// consumes until #47 — purge them so this suite leaves the shared dev
+	// broker clean. Explicit, not t.Cleanup: cleanup runs after the deferred
+	// pub.Close() has already torn the channel down.
+	for _, name := range topology.Default.QueueNames() {
+		if _, err := ch.QueuePurge(name, false); err != nil {
+			t.Fatalf("purge %s: %v", name, err)
+		}
 	}
 }
 

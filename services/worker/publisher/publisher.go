@@ -24,15 +24,7 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 
 	"github.com/luksluki/eprocurement/services/procurement/outbox"
-)
-
-// Broker topology (PRD §14.5). The events exchange is the publisher's
-// contract; the DLX pair is a PROVISIONAL bootstrap declaration — see
-// connect.
-const (
-	EventsExchange = "procurement.events"
-	DLXExchange    = "procurement.dlx"
-	DLQQueue       = "procurement.dlq"
+	"github.com/luksluki/eprocurement/services/worker/topology"
 )
 
 // dialTimeout bounds one AMQP dial attempt.
@@ -125,31 +117,13 @@ func (p *AMQPPublisher) connect() error {
 		_ = conn.Close()
 		return fmt.Errorf("publisher: open channel: %w", err)
 	}
-	if err := ch.ExchangeDeclare(EventsExchange, "topic",
-		true, false, false, false, nil); err != nil {
+	// The full §14.5 topology — the events exchange, the three consumer
+	// queues with their DLX argument and retry ladders, the DLQ — is
+	// declared once here (services/worker/topology, issue #46), idempotently
+	// on every connect; the #47 consumers reuse the same declaration.
+	if err := topology.Default.Declare(ch); err != nil {
 		_ = conn.Close()
-		return fmt.Errorf("publisher: declare %s: %w", EventsExchange, err)
-	}
-	// PROVISIONAL: the full §14.5 dead-lettering model is consumer-side —
-	// documents.history / notifications / exports each declare
-	// x-dead-letter-exchange with a TTL-backoff retry queue (5s → 30s → 5m),
-	// arriving with the consumer issues. This one idempotent bootstrap
-	// declaration (durable DLX + a # bound DLQ) exists so a future
-	// dead-letter has a destination and is admin-visible from day one; it is
-	// expected to be reshaped, not final.
-	if err := ch.ExchangeDeclare(DLXExchange, "topic",
-		true, false, false, false, nil); err != nil {
-		_ = conn.Close()
-		return fmt.Errorf("publisher: declare %s: %w", DLXExchange, err)
-	}
-	if _, err := ch.QueueDeclare(DLQQueue,
-		true, false, false, false, nil); err != nil {
-		_ = conn.Close()
-		return fmt.Errorf("publisher: declare %s: %w", DLQQueue, err)
-	}
-	if err := ch.QueueBind(DLQQueue, "#", DLXExchange, false, nil); err != nil {
-		_ = conn.Close()
-		return fmt.Errorf("publisher: bind %s: %w", DLQQueue, err)
+		return fmt.Errorf("publisher: declare topology: %w", err)
 	}
 	if err := ch.Confirm(false); err != nil {
 		_ = conn.Close()
@@ -197,7 +171,7 @@ func (p *AMQPPublisher) Publish(ctx context.Context, env Envelope) error {
 			return err
 		}
 	}
-	dc, err := p.ch.PublishWithDeferredConfirmWithContext(ctx, EventsExchange, env.Type,
+	dc, err := p.ch.PublishWithDeferredConfirmWithContext(ctx, topology.EventsExchange, env.Type,
 		false, false, amqp.Publishing{
 			ContentType:  "application/json",
 			DeliveryMode: amqp.Persistent,
