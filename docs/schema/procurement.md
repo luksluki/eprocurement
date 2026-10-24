@@ -280,7 +280,9 @@ them.
 Error codes: `requisition_currency_invalid`, `requisition_description_invalid`,
 `requisition_qty_invalid`, `requisition_unit_price_invalid`,
 `requisition_items_empty`, `requisition_id_invalid`,
-`requisition_idempotency_key_invalid` → 400 · `requisition_illegal_transition` → 409
+`requisition_idempotency_key_invalid`,
+`requisition_status_invalid`, `requisition_page_invalid` → 400 ·
+`requisition_illegal_transition` → 409
 · `requisition_idempotency_key_conflict` → 409 · `requisition_not_found` → 404 ·
 `requisition_forbidden` → 403 (domain/store sentinel → gRPC code in the
 procurement server; the gateway maps `Aborted` → HTTP 409 — live since #29) ·
@@ -339,6 +341,16 @@ missing (404 `requisition_not_found`).
   since — a contract pinned for #30/#31. Reusing the key for another
   requisition in the tenant → 409 `requisition_idempotency_key_conflict`.
   The response embeds the materialized `approval_steps` (ids in-band).
+- **List** (#32) — `GET /api/v1/requisitions?q=&status=&page=&page_size=`
+  (`requisition:read` — every role): one page of **header-only** rows
+  (`items`/`approval_steps` always empty; the detail reads own the bodies)
+  ordered by `number` **descending** (numbers are sequential per tenant, so
+  newest first) plus `{total, page, page_size}`. `q` matches a number prefix
+  (case-insensitive; LIKE wildcards literal); `status` is one of the six
+  lifecycle values or empty; pagination defaults 1/20, max size 100, absurd
+  pages → 400 `requisition_page_invalid`, unknown status → 400
+  `requisition_status_invalid`. See the requisition list section below for
+  the query shape, budget test, and plans.
 
 ## Error codes
 
@@ -349,7 +361,7 @@ missing (404 `requisition_not_found`).
 - #26: attachments via presigned uploads (done).
 - #27: list/search/filter/pagination (done).
 - #28: requisition domain + state machine + tables (done).
-- #29: requisition create/edit/submit API (done — store, number generation, idempotent submit, REST/gRPC wiring, gateway `Aborted` → 409). Read endpoints (get/list/timeline) are separate issues.
+- #29: requisition create/edit/submit API (done — store, number generation, idempotent submit, REST/gRPC wiring, gateway `Aborted` → 409). Read endpoints: **list done in #32** (see below); get/timeline are separate issues.
 - #30: approval rules + sequential engine + decide API (done — matrix materialization, 412 rollback, self/role enforcement, reject-skips, admin rule configuration, steps in-band).
 - #31: idempotent decide + outbox audit/notification events (done — `procurement.outbox` + `decision_idempotency` in 0006, decide replay/conflict contract, `pr.*` decide events with actor + trace, gateway `x-trace-id` propagation). **Re-sequenced with #45** by an agent decision: the outbox table + writer moved from #45's scope into #31 (see dev-note 031's provenance block); #45 keeps the publisher loop only.
 - Approvals read endpoints/queue #32-34, PO conversion (#35), outbox publisher (#45 — poll/publish/retry/DLQ only; table and writer landed with #31) (M2–M3).
@@ -410,3 +422,80 @@ All shapes pass with >4× headroom. Two facts from the EXPLAIN output
    latency ever matters more than the shared policy, the follow-up is a
    per-service read role or policy reshaping — a platform decision, not a
    vendor-list tweak.
+
+## Requisition list — filters, pagination, query plans (#32)
+
+`ListRequisitions` (`requisition:read`, REST
+`GET /api/v1/requisitions?q=&status=&page=&page_size=`) returns one page of
+header-only rows ordered by `number DESC` (newest first — numbers are
+sequential per tenant) plus the total number of matching rows:
+
+- `q` — requisition **number prefix**, case-insensitive. LIKE wildcards in
+  the input (`%`, `_`, `\`) are escaped, so they match literally. Numbers are
+  canonical server-generated ASCII (`PR-%06d`), which is why two
+  requisition-specific plan choices below are safe.
+- `status` — one of the six lifecycle values or empty (all); combines with
+  `q`.
+- `page` (1-based, default 1) / `page_size` (default 20, max 100). Responses
+  echo the normalized values; `total` counts matches across all pages. A
+  page past the end is empty but still reports the true `total` (an explicit
+  COUNT fallback).
+
+The total rides the same single statement as the page: an exact COUNT as an
+uncorrelated scalar subquery (an executor **InitPlan — evaluated exactly
+once**), attached to the `LIMIT/OFFSET` page subquery. This deliberately
+differs from the vendor list's `count(*) OVER()` (#27), for measured reasons
+at 100k rows / default `work_mem` (4 MB) on the dev machine:
+
+1. **`count(*) OVER()` spills.** The window's tuplestore materializes every
+   matching row (~12 MB at 100k) and went to temp files: 217–540 ms per
+   unfiltered query against the 300 ms budget.
+2. **A `CROSS JOIN (SELECT count(*) …)` arm is not planner-safe**: without a
+   Materialize node the aggregate was re-executed once per page row
+   (`loops=20`), turning a 50 ms query into ~1 s. The scalar-subquery form
+   is guaranteed single-shot by the executor.
+
+The page arm sorts with `number COLLATE "C" DESC`: every storable number is
+canonical uppercase ASCII (`PR-` + digits), so C ordering equals the default
+collation's ordering for this data while comparisons stay memcmp-cheap — on
+the Windows/libc dev collation (English_Indonesia.1252) the top-N sort alone
+dropped from ~140 ms to ~35 ms. The existing
+`requisitions_tenant_number_uidx (tenant_id, number)` serves prefix quals in
+principle; the #27 note about the RLS policy's bypass arm keeping
+tenant-leading index quals unavailable applies unchanged (the planner
+estimates the tenant filter at ~1% and prefers scans).
+
+### Measured plans at 100k rows (the #32 budget test)
+
+`TestStoreListScale100k` (services/procurement/requisition) seeds 100,000
+requisitions in one tenant (80% draft / 10% submitted / 10% cancelled),
+brings the table to its production steady state (`VACUUM (ANALYZE)` — what
+autovacuum does after a bulk load, setting the visibility map — plus
+`CHECKPOINT` so the fixture's dirty buffers don't compete with the timing
+loop), then runs every filter shape 30× under the real RLS context after
+warm-ups. Budget: **p95 < 300 ms** per query, same bar as #27. Measured on
+the dev machine:
+
+| Shape | median | p95 |
+|---|---|---|
+| unfiltered page 1 | ~64–88 ms | ~108–134 ms |
+| status = submitted (10% of rows) | ~8–10 ms | ~15–18 ms |
+| number prefix (~1k rows) | ~56–156 ms | ~168–251 ms |
+| status + number prefix combined | ~74–161 ms | ~179–258 ms |
+
+Steady-state plans (from the test log's EXPLAIN (ANALYZE)):
+
+- **Unfiltered**: the count arm runs as `InitPlan 1 → Aggregate → Index Only
+  Scan using requisitions_tenant_idx` (100k index entries, `Heap Fetches: 0`
+  thanks to the vacuumed visibility map, ~27 ms); the page arm is a top-N
+  heapsort over the scan with the `COLLATE "C"` key (~83 ms); total ~110 ms.
+- **status filter**: `Index Only Scan using requisitions_tenant_status_idx`
+  with `Index Cond: (status = 'submitted')` and the RLS policy as a filter —
+  the existing `(tenant_id, status)` index carries the selectivity; ~10 ms.
+- **number prefix / combined**: parallel seq scans evaluating the LIKE
+  prefix per row; the LIKE (not the sort) dominates (~50–160 ms on the dev
+  collation; far less on Linux/glibc).
+
+The prefix sort cost is also why the RLS policy's per-row
+`tenant_id::text = current_setting(…)` evaluation matters at this scale —
+same #27 trade-off; a platform-level policy reshaping remains a follow-up.

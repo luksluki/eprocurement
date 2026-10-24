@@ -24,7 +24,7 @@ import (
 type Option func(*gatewayOptions)
 
 // ProcurementClient is the full procurement surface the gateway proxies: the
-// vendor API, the requisition create/edit/submit API, and the approval
+// vendor API, the requisition create/edit/submit/list API, and the approval
 // decide/rules API. The generated gRPC client satisfies it; tests substitute
 // a fake.
 type ProcurementClient interface {
@@ -32,6 +32,7 @@ type ProcurementClient interface {
 	CreateRequisition(ctx context.Context, in *procurementv1.CreateRequisitionRequest, opts ...grpc.CallOption) (*procurementv1.Requisition, error)
 	UpdateRequisition(ctx context.Context, in *procurementv1.UpdateRequisitionRequest, opts ...grpc.CallOption) (*procurementv1.Requisition, error)
 	SubmitRequisition(ctx context.Context, in *procurementv1.SubmitRequisitionRequest, opts ...grpc.CallOption) (*procurementv1.Requisition, error)
+	ListRequisitions(ctx context.Context, in *procurementv1.ListRequisitionsRequest, opts ...grpc.CallOption) (*procurementv1.ListRequisitionsResponse, error)
 	DecideApproval(ctx context.Context, in *procurementv1.DecideApprovalRequest, opts ...grpc.CallOption) (*procurementv1.DecideApprovalResponse, error)
 	GetApprovalRules(ctx context.Context, in *procurementv1.GetApprovalRulesRequest, opts ...grpc.CallOption) (*procurementv1.ApprovalRulesResponse, error)
 	ReplaceApprovalRules(ctx context.Context, in *procurementv1.ReplaceApprovalRulesRequest, opts ...grpc.CallOption) (*procurementv1.ApprovalRulesResponse, error)

@@ -59,6 +59,8 @@ var (
 	ErrUnitPriceInvalid   = errors.New("requisition_unit_price_invalid")
 	ErrItemsEmpty         = errors.New("requisition_items_empty")
 	ErrIllegalTransition  = errors.New("requisition_illegal_transition")
+	ErrStatusInvalid      = errors.New("requisition_status_invalid")
+	ErrPageInvalid        = errors.New("requisition_page_invalid")
 )
 
 // Money is an amount as integer cents plus an allowlisted currency. Integer
@@ -107,6 +109,63 @@ var transitionEvents = map[[2]string]string{
 // Terminal reports whether status has no outgoing edge.
 func Terminal(status string) bool {
 	return status == StatusRejected || status == StatusCancelled || status == StatusClosed
+}
+
+// ListStatuses is the status whitelist for the list filter (all six
+// lifecycle statuses; the empty filter means "all").
+var listStatuses = map[string]bool{
+	StatusDraft: true, StatusSubmitted: true, StatusApproved: true,
+	StatusRejected: true, StatusCancelled: true, StatusClosed: true,
+}
+
+// List bounds for pagination (same contract as the vendor list, #27).
+const (
+	DefaultPageSize = 20
+	MaxPageSize     = 100
+	MaxPage         = 1000000
+)
+
+// ListFilter is the requisition-list query: a free-text number-prefix match,
+// an optional status, and server-side pagination. Zero values fall back to
+// the defaults; ordering is fixed by number descending (newest PR first —
+// numbers are sequential per tenant, so number order is creation order).
+type ListFilter struct {
+	Query    string
+	Status   string
+	Page     int32
+	PageSize int32
+}
+
+// ValidateList normalizes and validates the filter: status must be a known
+// lifecycle value (or empty), page/page_size are clamped into range, and the
+// query is trimmed and uppercased (numbers are stored uppercase) with LIKE
+// wildcards escaped so user input matches literally.
+func ValidateList(f ListFilter) (ListFilter, error) {
+	f.Status = strings.TrimSpace(f.Status)
+	if f.Status != "" && !listStatuses[f.Status] {
+		return f, ErrStatusInvalid
+	}
+	if f.Page < 1 {
+		f.Page = 1
+	}
+	if f.Page > MaxPage {
+		return f, ErrPageInvalid
+	}
+	if f.PageSize < 1 {
+		f.PageSize = DefaultPageSize
+	}
+	if f.PageSize > MaxPageSize {
+		f.PageSize = MaxPageSize
+	}
+	f.Query = escapeLike(strings.ToUpper(strings.TrimSpace(f.Query)))
+	return f, nil
+}
+
+// escapeLike neutralizes LIKE wildcards so a query containing %, _, or \
+// matches those literal characters (same helper contract as the vendor list).
+func escapeLike(s string) string {
+	r := strings.NewReplacer(`\`, `\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
 }
 
 // Requisition is the aggregate root. Items are mutable only while the
