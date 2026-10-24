@@ -17,20 +17,22 @@ import (
 	documentsv1 "github.com/luksluki/eprocurement/gen/go/documents/v1"
 	"github.com/luksluki/eprocurement/internal/platform/rbac"
 	"github.com/luksluki/eprocurement/services/documents/attachment"
+	"github.com/luksluki/eprocurement/services/documents/history"
 )
 
 // presignTTL bounds both upload and download URL validity.
 const presignTTL = 15 * time.Minute
 
-// api adapts the attachment domain to the documents.v1 gRPC contract.
-// Every method reads the caller identity the gateway propagated (tenant
-// scoping, audit ids); the RBAC interceptor has already re-checked the
-// permission.
+// api adapts the attachment and history domains to the documents.v1 gRPC
+// contract. Every method reads the caller identity the gateway propagated
+// (tenant scoping, audit ids); the RBAC interceptor has already re-checked
+// the permission.
 type api struct {
 	documentsv1.UnimplementedDocumentsServer
 	store   *attachment.Store
 	storage attachment.Storage
 	limits  attachment.Limits
+	events  *history.Store
 	now     func() time.Time
 	log     *slog.Logger
 }
@@ -172,6 +174,64 @@ func (a *api) GetDownloadUrl(ctx context.Context, req *documentsv1.GetDownloadUr
 		DownloadUrl: downloadURL,
 		ExpiresAt:   expiresAt.UTC().Format(time.RFC3339),
 	}, nil
+}
+
+// ListEvents returns the caller tenant's event history, newest first, with
+// keyset pagination. The filter must name a whole aggregate (entity type +
+// id, both or neither); the cursor is the opaque continuation token from a
+// previous response. payload_json carries the event payload verbatim.
+func (a *api) ListEvents(ctx context.Context, req *documentsv1.ListEventsRequest) (*documentsv1.ListEventsResponse, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	events, nextCursor, err := a.events.List(ctx, auth.TenantID, history.ListFilter{
+		EntityType: req.GetEntityType(),
+		EntityID:   req.GetEntityId(),
+		Limit:      int(req.GetLimit()),
+		Cursor:     req.GetNextCursor(),
+	})
+	if err != nil {
+		return nil, mapHistoryError(err)
+	}
+	out := &documentsv1.ListEventsResponse{NextCursor: nextCursor}
+	for _, ev := range events {
+		out.Events = append(out.Events, eventPB(ev))
+	}
+	return out, nil
+}
+
+// mapHistoryError keeps the machine code (the gRPC message) intact:
+// validation failures → InvalidArgument, anything else → Internal.
+func mapHistoryError(err error) error {
+	switch {
+	case errors.Is(err, history.ErrFilterInvalid),
+		errors.Is(err, history.ErrCursorInvalid),
+		errors.Is(err, history.ErrEventIDInvalid),
+		errors.Is(err, history.ErrEventIncomplete),
+		errors.Is(err, history.ErrPayloadInvalid):
+		return status.Error(codes.InvalidArgument, err.Error())
+	default:
+		return status.Error(codes.Internal, "internal error")
+	}
+}
+
+// eventPB maps a stored history event to the wire message. occurred_at is
+// RFC 3339; MongoDB stores milliseconds, and RFC3339Nano prints that
+// precision without padding zeros.
+func eventPB(ev history.Event) *documentsv1.Event {
+	return &documentsv1.Event{
+		EventId:     ev.EventID,
+		TenantId:    ev.TenantID,
+		Type:        ev.Type,
+		Version:     ev.Version,
+		OccurredAt:  ev.OccurredAt.UTC().Format(time.RFC3339Nano),
+		ActorId:     ev.ActorID,
+		TraceId:     ev.TraceID,
+		EntityType:  ev.EntityType,
+		EntityId:    ev.EntityID,
+		PayloadJson: ev.PayloadJSON,
+	}
 }
 
 // removeObject drops bytes that failed verification; the metadata stays

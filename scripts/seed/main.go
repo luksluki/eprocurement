@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"math/rand"
@@ -18,9 +19,10 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+
+	"github.com/luksluki/eprocurement/services/documents/history"
 )
 
 //go:embed schema.sql
@@ -403,47 +405,88 @@ func seedEvents(ctx context.Context, cfg config, rng *rand.Rand, reqs []requisit
 		fatalf("mongo connect: %v", err)
 	}
 	defer func() { _ = client.Disconnect(context.Background()) }()
+	db := client.Database(cfg.mongoDB)
+	eventsColl := db.Collection(history.EventsCollectionName)
+	auditColl := db.Collection(history.AuditCollectionName)
 
-	collection := client.Database(cfg.mongoDB).Collection("events")
+	// The named index sets of the service — one definition, no drift
+	// (history.EventIndexes / AuditIndexes are what EnsureIndexes creates).
+	// Indexes are created BEFORE the bulk insert (resetData dropped the
+	// collections, so the builds scan nothing): mongod 7.0.45 intermittently
+	// aborts with a WiredTiger invariant when an index build scans the
+	// million-event collection right after the reset's ident drops, while
+	// builds on empty collections followed by indexed inserts are stable —
+	// and still well inside the 2-minute seed budget (dev-note 042).
+	for _, spec := range []struct {
+		coll   *mongo.Collection
+		models []mongo.IndexModel
+	}{
+		{eventsColl, history.EventIndexes()},
+		{auditColl, history.AuditIndexes()},
+	} {
+		for _, model := range spec.models {
+			if _, err := spec.coll.Indexes().CreateOne(ctx, model); err != nil {
+				fatalf("create index %s: %v", model.Options.Name, err)
+			}
+		}
+	}
+
 	types := []string{"pr.created", "pr.submitted", "pr.approved", "po.issued", "po.acknowledged", "grn.posted", "invoice.matched", "pr.rejected", "po.closed", "notification.sent"}
 	base := time.Date(2026, 1, 1, 8, 0, 0, 0, time.UTC)
 
 	const batchSize = 5000
 	seeded := 0
 	batch := make([]any, 0, batchSize)
-	for i := 0; i < cfg.events; i++ {
-		r := reqs[rng.Intn(len(reqs))]
-		event := bson.M{
-			"event_id":    newUUID(rng),
-			"tenant_id":   r.tenantID,
-			"type":        types[rng.Intn(len(types))],
-			"entity_type": "requisition",
-			"entity_id":   r.id,
-			"occurred_at": base.Add(time.Duration(i) * time.Second),
-			"payload":     bson.M{"number": r.number},
-		}
-		batch = append(batch, event)
-		if len(batch) == batchSize {
-			if _, err := collection.InsertMany(ctx, batch); err != nil {
+	auditBatch := make([]any, 0, batchSize)
+	flush := func() {
+		if len(batch) > 0 {
+			if _, err := eventsColl.InsertMany(ctx, batch); err != nil {
 				fatalf("insert events: %v", err)
 			}
-			seeded += len(batch)
 			batch = batch[:0]
 		}
-	}
-	if len(batch) > 0 {
-		if _, err := collection.InsertMany(ctx, batch); err != nil {
-			fatalf("insert events: %v", err)
+		if len(auditBatch) > 0 {
+			if _, err := auditColl.InsertMany(ctx, auditBatch); err != nil {
+				fatalf("insert audit_log: %v", err)
+			}
+			auditBatch = auditBatch[:0]
 		}
-		seeded += len(batch)
 	}
+	for i := 0; i < cfg.events; i++ {
+		r := reqs[rng.Intn(len(reqs))]
+		eventType := types[rng.Intn(len(types))]
+		occurredAt := base.Add(time.Duration(i) * time.Second)
+		payload := map[string]any{"number": r.number}
+		// Decision events carry the decision so their audit rows read well.
+		if action, ok := history.AuditAction(eventType); ok {
+			payload["decision"] = action
+		}
+		payloadJSON, err := json.Marshal(payload)
+		if err != nil {
+			fatalf("marshal payload: %v", err)
+		}
+		// The constructors of the history package pin the document shapes —
+		// the seed writes exactly what the service's Apply writes, and the
+		// deterministic RNG keeps event_id stable across reruns.
+		ev, err := history.NewEvent(
+			newUUID(rng), r.tenantID, eventType, occurredAt,
+			r.requesterID, strings.ReplaceAll(newUUID(rng), "-", ""),
+			"requisition", r.id, string(payloadJSON))
+		if err != nil {
+			fatalf("build event: %v", err)
+		}
+		batch = append(batch, history.EventBSON(ev))
+		if action, ok := history.AuditAction(ev.Type); ok {
+			auditBatch = append(auditBatch, history.AuditBSON(
+				history.NewAuditEntry(ev, action, ev.OccurredAt)))
+		}
+		seeded++
+		if len(batch) == batchSize {
+			flush()
+		}
+	}
+	flush()
 
-	if _, err := collection.Indexes().CreateMany(ctx, []mongo.IndexModel{
-		{Keys: bson.D{{Key: "event_id", Value: 1}}, Options: options.Index().SetUnique(true)},
-		{Keys: bson.D{{Key: "tenant_id", Value: 1}, {Key: "occurred_at", Value: -1}}},
-	}); err != nil {
-		fatalf("create event indexes: %v", err)
-	}
 	return seeded
 }
 
@@ -466,9 +509,15 @@ func resetData(ctx context.Context, db *pgxpool.Pool, mongoURI, mongoDB string) 
 		return err
 	}
 	defer func() { _ = client.Disconnect(context.Background()) }()
-	err = client.Database(mongoDB).Collection("events").Drop(ctx)
-	if err != nil && !strings.Contains(err.Error(), "ns not found") {
-		return err
+	// Both history collections are dropped, indexes included: reruns
+	// regenerate the same deterministic event_ids and recreate the named
+	// index set, so a stale auto-named index can never survive a reseed
+	// (nor trip E11000 on the unique event_id).
+	for _, name := range []string{history.EventsCollectionName, history.AuditCollectionName} {
+		err = client.Database(mongoDB).Collection(name).Drop(ctx)
+		if err != nil && !strings.Contains(err.Error(), "ns not found") {
+			return err
+		}
 	}
 	return nil
 }

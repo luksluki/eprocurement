@@ -23,6 +23,7 @@ const (
 	Documents_CompleteUpload_FullMethodName  = "/documents.v1.Documents/CompleteUpload"
 	Documents_ListAttachments_FullMethodName = "/documents.v1.Documents/ListAttachments"
 	Documents_GetDownloadUrl_FullMethodName  = "/documents.v1.Documents/GetDownloadUrl"
+	Documents_ListEvents_FullMethodName      = "/documents.v1.Documents/ListEvents"
 )
 
 // DocumentsClient is the client API for Documents service.
@@ -50,6 +51,14 @@ type DocumentsClient interface {
 	ListAttachments(ctx context.Context, in *ListAttachmentsRequest, opts ...grpc.CallOption) (*ListAttachmentsResponse, error)
 	// GetDownloadUrl returns a presigned GET URL for a ready attachment.
 	GetDownloadUrl(ctx context.Context, in *GetDownloadUrlRequest, opts ...grpc.CallOption) (*GetDownloadUrlResponse, error)
+	// ListEvents returns the caller tenant's append-only event history,
+	// newest first (occurred_at DESC, event_id DESC as the tiebreaker —
+	// decision events share occurred_at). entity_type + entity_id filter the
+	// timeline of one aggregate (both or neither). Pages walk a keyset cursor:
+	// next_cursor is opaque, stable under concurrent inserts, and empty on the
+	// last page. payload_json is the raw event payload JSON — full fidelity of
+	// the procurement outbox JSONB, no restructuring.
+	ListEvents(ctx context.Context, in *ListEventsRequest, opts ...grpc.CallOption) (*ListEventsResponse, error)
 }
 
 type documentsClient struct {
@@ -100,6 +109,16 @@ func (c *documentsClient) GetDownloadUrl(ctx context.Context, in *GetDownloadUrl
 	return out, nil
 }
 
+func (c *documentsClient) ListEvents(ctx context.Context, in *ListEventsRequest, opts ...grpc.CallOption) (*ListEventsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListEventsResponse)
+	err := c.cc.Invoke(ctx, Documents_ListEvents_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DocumentsServer is the server API for Documents service.
 // All implementations must embed UnimplementedDocumentsServer
 // for forward compatibility.
@@ -125,6 +144,14 @@ type DocumentsServer interface {
 	ListAttachments(context.Context, *ListAttachmentsRequest) (*ListAttachmentsResponse, error)
 	// GetDownloadUrl returns a presigned GET URL for a ready attachment.
 	GetDownloadUrl(context.Context, *GetDownloadUrlRequest) (*GetDownloadUrlResponse, error)
+	// ListEvents returns the caller tenant's append-only event history,
+	// newest first (occurred_at DESC, event_id DESC as the tiebreaker —
+	// decision events share occurred_at). entity_type + entity_id filter the
+	// timeline of one aggregate (both or neither). Pages walk a keyset cursor:
+	// next_cursor is opaque, stable under concurrent inserts, and empty on the
+	// last page. payload_json is the raw event payload JSON — full fidelity of
+	// the procurement outbox JSONB, no restructuring.
+	ListEvents(context.Context, *ListEventsRequest) (*ListEventsResponse, error)
 	mustEmbedUnimplementedDocumentsServer()
 }
 
@@ -146,6 +173,9 @@ func (UnimplementedDocumentsServer) ListAttachments(context.Context, *ListAttach
 }
 func (UnimplementedDocumentsServer) GetDownloadUrl(context.Context, *GetDownloadUrlRequest) (*GetDownloadUrlResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetDownloadUrl not implemented")
+}
+func (UnimplementedDocumentsServer) ListEvents(context.Context, *ListEventsRequest) (*ListEventsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListEvents not implemented")
 }
 func (UnimplementedDocumentsServer) mustEmbedUnimplementedDocumentsServer() {}
 func (UnimplementedDocumentsServer) testEmbeddedByValue()                   {}
@@ -240,6 +270,24 @@ func _Documents_GetDownloadUrl_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Documents_ListEvents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListEventsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DocumentsServer).ListEvents(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Documents_ListEvents_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DocumentsServer).ListEvents(ctx, req.(*ListEventsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Documents_ServiceDesc is the grpc.ServiceDesc for Documents service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -262,6 +310,10 @@ var Documents_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetDownloadUrl",
 			Handler:    _Documents_GetDownloadUrl_Handler,
+		},
+		{
+			MethodName: "ListEvents",
+			Handler:    _Documents_ListEvents_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

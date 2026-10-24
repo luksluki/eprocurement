@@ -1,9 +1,10 @@
-# Documents service — attachments
+# Documents service — attachments and event history
 
-Owns attachment metadata (MongoDB `document_meta`) and the MinIO object
-lifecycle. Attachment bytes never stream through the gateway or this
-service: clients upload to and download from presigned URLs (15-minute
-validity, SigV4).
+Two storages in one service: attachment metadata (MongoDB `document_meta`)
+plus the MinIO object lifecycle, and the append-only event history (MongoDB
+`events` + `audit_log`, PRD §9/§13/§14.3) with the `ListEvents` read API.
+Attachment bytes never stream through the gateway or this service: clients
+upload to and download from presigned URLs (15-minute validity, SigV4).
 
 ## Lifecycle
 
@@ -92,3 +93,115 @@ unchanged; validation → 400, missing → 404, lifecycle violations → 412.
 Integration tests run against real MongoDB + MinIO and are gated on
 `TEST_MONGO_URI` + `TEST_S3_ENDPOINT` (set for local runs and in CI;
 `go test ./...` skips them otherwise).
+
+## Event history and audit log (#42)
+
+`services/documents/history` is the append-only projection of procurement
+domain events (PRD §14.3 CQRS-lite; ADR-0001: no dual writes). `Store.Apply`
+is the projection function the worker consumers (#45–#47) will call; the
+transport (RabbitMQ) is theirs. Both collections are **append-only** — no
+update or delete path exists anywhere in the codebase, and the package
+exports only `EnsureIndexes`, the document constructors, `Apply`, and
+`List` (PRD §17).
+
+### Collections
+
+`events` — one document per domain event, the PRD §14.5 envelope:
+
+| Field | Type | Notes |
+|---|---|---|
+| `event_id` | string | unique; the consumer-dedupe key (PRD §14.5) |
+| `tenant_id` | string | tenant scoping |
+| `type` | string | catalog name, e.g. `pr.approved` — **`type`, not `event_type`**, matching the envelope and the seed |
+| `version` | int | payload schema version, 1 today |
+| `occurred_at` | date | business time (ms precision) |
+| `actor_id` | string | the acting user; empty when unknown |
+| `trace_id` | string | propagated trace; empty when unknown |
+| `entity_type` | string | aggregate kind, e.g. `requisition` |
+| `entity_id` | string | aggregate id |
+| `payload` | string | **raw JSON string** — full fidelity of the procurement outbox jsonb (no key reordering, no number re-encoding); `ListEvents` returns it verbatim as `payload_json` |
+
+`audit_log` — one document per **decision** event (`pr.approved`,
+`pr.step_approved`, `pr.rejected`, `pr.step_rejected` — the decide types of
+dev-note 031; `history.AuditAction` maps them to `approve`/`reject`):
+
+| Field | Type | Notes |
+|---|---|---|
+| `event_id` | string | unique; dedupes audit writes per event |
+| `tenant_id` | string | tenant scoping |
+| `actor_id` | string | the decider |
+| `action` | string | `approve` \| `reject` |
+| `entity_type` / `entity_id` | string | the decided aggregate (the requisition) |
+| `details` | string | raw JSON payload of the event, verbatim |
+| `trace_id` | string | propagated trace |
+| `occurred_at` | date | business time |
+| `recorded_at` | date | projection time (when Apply wrote the row) |
+
+Decoding tolerates absent fields (zero values, no error) — rows written
+before a field existed (e.g. the pre-#42 seed shape without
+`version`/`actor_id`/`trace_id`) stay readable. Pinned by
+`TestApplyToleratesMissingFields`.
+
+### Indexes
+
+One definition, shared by the service's `EnsureIndexes` and `scripts/seed`
+(`history.EventIndexes` / `history.AuditIndexes`), so the two can never
+drift. The seed's old auto-named index definitions are gone; reseeding
+drops both collections and recreates exactly this set — **before** the bulk
+inserts, not after: mongod 7.0.45 intermittently aborts with a WiredTiger
+invariant when an index build scans the million-event collection right
+after the reset's collection drops, while builds on empty collections
+followed by indexed inserts are stable and equally fast (dev-note 042).
+
+| Collection | Index | Keys | Notes |
+|---|---|---|---|
+| `events` | `uniq_event_id` | `{event_id: 1}` | **unique** — the dedupe mechanism |
+| `events` | `tenant_occurred` | `{tenant_id: 1, occurred_at: -1, event_id: -1}` | newest-first pages |
+| `events` | `tenant_entity_occurred` | `{tenant_id: 1, entity_type: 1, entity_id: 1, occurred_at: -1, event_id: -1}` | timeline filter (dev-note 031 follow-up) |
+| `audit_log` | `uniq_event_id` | `{event_id: 1}` | **unique** — audit dedupe per event |
+| `audit_log` | `tenant_occurred` | `{tenant_id: 1, occurred_at: -1}` | newest-first audit reads |
+
+### Apply: idempotent projection
+
+`Apply(ctx, ev)` validates the envelope, inserts the events document, then
+— for decision types — the audit_log row. A duplicate-key error on either
+insert means "already applied" and is **success, not an error**; the return
+value reports whether this call inserted the event (false on replay). Two
+inserts are deliberately **not** wrapped in a transaction: the local
+MongoDB is a single-node mongod (no replica set, no multi-document
+transactions). Each insert is individually idempotent on `event_id`, so a
+crash between the two is recovered by the next Apply / consumer retry —
+the event insert dedupes, the audit insert lands
+(`TestApplyPartialRecovery`).
+
+### ListEvents
+
+`GET`-style read of the caller tenant's history (the gateway route lands
+with #43). Contract:
+
+- order is total and stable: `occurred_at DESC`, `event_id DESC as the
+  tiebreaker` — decide events share `occurred_at` (step + terminal pair,
+  approval/store.go) and still order deterministically;
+- pagination is **keyset** (a deliberate deviation from the repo's
+  page/page_size convention — see dev-note 042): `next_cursor` is the
+  opaque position of the page's last event; pages never duplicate or skip
+  rows regardless of concurrent inserts; empty on the last page;
+- `entity_type` + `entity_id` filter one aggregate's timeline — both set
+  or both empty, else `InvalidArgument` `events_filter_invalid`;
+- `limit` default 20, max 100, clamped like the vendor list; a malformed
+  cursor → `InvalidArgument` `events_cursor_invalid`;
+- `payload_json` returns the stored payload string verbatim;
+- tenant scoping is absolute: another tenant's events are invisible
+  (empty result), pinned at store and gRPC level.
+
+### gRPC API addition (documents.v1)
+
+| Method | Permission | Notes |
+|---|---|---|
+| `ListEvents` | `requisition:read` | tenant's event history, newest first, cursor-paginated |
+
+`requisition:read` is held by every tenant role (rbac matrix), so the whole
+tenant can read its own timeline; the mapping is mandatory because methods
+missing from `MethodPermissions` pass through unprotected (rbac/grpc.go).
+No new permission was added — `internal/platform/rbac` and `docs/rbac.md`
+are untouched.
