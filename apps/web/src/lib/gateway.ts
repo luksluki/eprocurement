@@ -109,3 +109,55 @@ export async function listVendors(accessToken: string): Promise<Vendor[] | null>
     return null;
   }
 }
+
+// RequisitionHeader is one row of the requisition list (issue #32). List rows
+// are header-only: items and approval_steps are always empty on the wire
+// (documented in proto/procurement/v1/procurement.proto).
+export type RequisitionHeader = {
+  id: string;
+  tenant_id: string;
+  number: string;
+  requester_id: string;
+  status: string;
+  currency: string;
+  total_cents: number;
+  items: unknown[];
+  approval_steps: unknown[];
+  submitted_at: string;
+  created_at: string;
+  created_by: string;
+  updated_at: string;
+  updated_by: string;
+};
+
+export type RequisitionListPage = {
+  requisitions: RequisitionHeader[];
+  total: number;
+  page: number;
+  page_size: number;
+};
+
+export type RequisitionListResult =
+  | { ok: true; data: RequisitionListPage }
+  | { ok: false; status: number };
+
+// listRequisitions fetches one page of the tenant-scoped requisition list
+// from the gateway. `query` is the already-canonicalized filter string from
+// requisition-filters (q/status/page/page_size). Only the status is
+// discriminated (401 = session needs the refresh dance; everything else is
+// an error state for the UI) so the BFF route stays a thin proxy.
+export async function listRequisitions(accessToken: string, query: string): Promise<RequisitionListResult> {
+  try {
+    const target = `${gatewayUrl()}/api/v1/requisitions${query ? `?${query}` : ""}`;
+    const res = await fetch(target, {
+      headers: { authorization: `Bearer ${accessToken}` },
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      return { ok: false, status: res.status };
+    }
+    return { ok: true, data: (await res.json()) as RequisitionListPage };
+  } catch {
+    return { ok: false, status: 502 };
+  }
+}

@@ -375,6 +375,90 @@ func loadItems(ctx context.Context, tx pgx.Tx, requisitionID string) ([]Item, er
 	return items, rows.Err()
 }
 
+// listPredicates is the shared WHERE clause of the list's page subquery and
+// its count arm.
+const listPredicates = `WHERE ($1::text = '' OR status = $1::text)
+			  AND ($2::text = '' OR number LIKE $2::text || '%')`
+
+// List returns one page of requisition headers ordered by number descending
+// plus the total number of matching rows (across pages). Filters: status
+// equality and a number-prefix query — escaped so user input with % or _ is
+// literal. The filter must come from ValidateList. Rows are header-only:
+// Items and approval steps are not loaded (the detail reads own them).
+//
+// The total rides the same single statement as the page: an exact COUNT as
+// an uncorrelated scalar subquery, which the executor evaluates once as an
+// InitPlan regardless of join strategy. #27's vendor list uses count(*)
+// OVER() instead; here the window's tuplestore spilled to disk at 100k rows
+// under the default work_mem, and a CROSS JOIN count arm was re-executed per
+// page row by the planner (loops=20, measured during #32 — see
+// docs/schema/procurement.md). The subquery form has neither problem. An
+// empty page (past the end) emits no rows, so an explicit COUNT fallback
+// recovers the true total — the same contract as the vendor list.
+func (s *Store) List(ctx context.Context, tenantID string, f ListFilter) ([]Requisition, int, error) {
+	var (
+		requisitions []Requisition
+		total        int
+	)
+	err := tenant.WithTenant(ctx, s.db, tenantID, func(tx pgx.Tx) error {
+		offset := (int(f.Page) - 1) * int(f.PageSize)
+		// The page arm sorts with COLLATE "C": requisition numbers are
+		// canonical server-generated ASCII (PR-%06d), so C ordering equals
+		// the default collation for every storable value while comparisons
+		// stay memcmp-cheap instead of locale function calls — measured 4×
+		// faster on a libc-collation platform at 100k rows (#32).
+		rows, err := tx.Query(ctx, `
+			SELECT c.id, c.tenant_id, c.number, c.requester_id, c.status, c.currency, c.total_cents,
+			       c.submitted_at, c.created_at, c.created_by, c.updated_at, c.updated_by,
+			       c.submit_idempotency_key,
+			       (SELECT count(*) FROM procurement.requisitions `+listPredicates+`) AS total_count
+			FROM (SELECT `+requisitionColumns+`
+			      FROM procurement.requisitions
+			      `+listPredicates+`
+			      ORDER BY number COLLATE "C" DESC
+			      LIMIT $3 OFFSET $4) c
+			ORDER BY c.number DESC`,
+			f.Status, f.Query, f.PageSize, offset)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				r                    Requisition
+				submitKey            *string // discarded: the list is header-only
+				createdBy, updatedBy *string
+			)
+			if err := rows.Scan(&r.ID, &r.TenantID, &r.Number, &r.RequesterID, &r.Status,
+				&r.Currency, &r.TotalCents, &r.SubmittedAt, &r.CreatedAt,
+				&createdBy, &r.UpdatedAt, &updatedBy, &submitKey, &total); err != nil {
+				return err
+			}
+			if createdBy != nil {
+				r.CreatedBy = *createdBy
+			}
+			if updatedBy != nil {
+				r.UpdatedBy = *updatedBy
+			}
+			requisitions = append(requisitions, r)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if len(requisitions) == 0 {
+			// Past-the-end page: the join's left side is empty; count matches
+			// explicitly so callers still see the real total.
+			return tx.QueryRow(ctx,
+				`SELECT count(*) FROM procurement.requisitions `+listPredicates, f.Status, f.Query).Scan(&total)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, 0, fmt.Errorf("requisition: list: %w", err)
+	}
+	return requisitions, total, nil
+}
+
 // mapSubmitWriteError recognizes the partial-unique-index violation on the
 // submit idempotency key; everything else passes through.
 func mapSubmitWriteError(err error) error {

@@ -42,6 +42,12 @@ service Procurement {
   // without a second transition; reusing it for another requisition in the
   // tenant is rejected.
   rpc SubmitRequisition(SubmitRequisitionRequest) returns (Requisition);
+  // ListRequisitions returns one page of the caller tenant's requisitions
+  // ordered by number descending (newest first). query matches a number
+  // prefix (case-insensitive); status and query combine. total is the number
+  // of matching rows across all pages. Rows are header-only: items and
+  // approval_steps are always empty here — the detail reads own them.
+  rpc ListRequisitions(ListRequisitionsRequest) returns (ListRequisitionsResponse);
   // DecideApproval applies one approve/reject decision to an approval step.
   // Only the current step (the smallest pending step_no of a submitted
   // requisition) may be decided; the decider must hold the step's
@@ -175,6 +181,25 @@ message SubmitRequisitionRequest {
   string id = 1;
   // Optional: 1-64 chars after trimming; empty means no idempotency.
   string idempotency_key = 2;
+}
+
+message ListRequisitionsRequest {
+  // Free-text match: requisition number prefix, case-insensitive. Empty means
+  // no text filter. LIKE wildcards in the input are literal.
+  string query = 1;
+  // draft | submitted | approved | rejected | cancelled | closed | "" (all).
+  string status = 2;
+  int32 page = 3;      // 1-based; default 1
+  int32 page_size = 4; // default 20, max 100
+}
+
+message ListRequisitionsResponse {
+  // Header-only rows: items and approval_steps are always empty (the detail
+  // reads own the bodies).
+  repeated Requisition requisitions = 1;
+  int32 total = 2;      // matching rows across all pages
+  int32 page = 3;       // normalized values actually applied
+  int32 page_size = 4;
 }
 
 message DecideApprovalRequest {
