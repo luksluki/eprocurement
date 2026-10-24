@@ -92,19 +92,49 @@ export type Vendor = {
   status: string;
 };
 
-// listVendors loads the tenant-scoped vendor list (issue #27). Returns null
-// on failure so the page can render an error state instead of crashing.
-export async function listVendors(accessToken: string): Promise<Vendor[] | null> {
+// Envelope of GET /api/v1/vendors (services/gateway/server/vendors.go):
+// { vendors, total, page, page_size } — server-side pagination for the
+// DataTable (issue #51).
+export type VendorPage = {
+  vendors: Vendor[];
+  total: number;
+  page: number;
+  page_size: number;
+};
+
+// listVendors loads one tenant-scoped page of the vendor list (issue #27).
+// Returns null on failure so the page can render an error state instead of
+// crashing.
+export async function listVendors(
+  accessToken: string,
+  params: { page: number; pageSize: number },
+): Promise<VendorPage | null> {
   try {
-    const res = await fetch(`${gatewayUrl()}/api/v1/vendors?page_size=50`, {
+    const url = new URL(`${gatewayUrl()}/api/v1/vendors`);
+    url.searchParams.set("page", String(params.page));
+    url.searchParams.set("page_size", String(params.pageSize));
+    const res = await fetch(url, {
       headers: { authorization: `Bearer ${accessToken}` },
       cache: "no-store",
     });
     if (!res.ok) {
       return null;
     }
-    const body = (await res.json()) as { vendors?: Vendor[] };
-    return Array.isArray(body.vendors) ? body.vendors : [];
+    const body = (await res.json()) as {
+      vendors?: Vendor[];
+      total?: number;
+      page?: number;
+      page_size?: number;
+    };
+    if (!Array.isArray(body.vendors)) {
+      return null;
+    }
+    return {
+      vendors: body.vendors,
+      total: body.total ?? body.vendors.length,
+      page: body.page ?? params.page,
+      page_size: body.page_size ?? params.pageSize,
+    };
   } catch {
     return null;
   }

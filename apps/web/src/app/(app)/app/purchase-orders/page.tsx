@@ -1,13 +1,9 @@
 import PlaceholderPage from "../../PlaceholderPage";
+import { getDictionary } from "@/i18n/server";
 
 export const dynamic = "force-dynamic";
 
-export default function PurchaseOrdersPage() {
-  return (
-    <PlaceholderPage
-      title="Purchase Orders"
-      description="PO list and detail with issue/acknowledge actions and goods receipts (partial receipts supported, over-receipt rejected)."
-      milestone="M3 — PO & GRN"
-    />
-  );
+export default async function PurchaseOrdersPage() {
+  const p = (await getDictionary()).pages.purchaseOrders;
+  return <PlaceholderPage title={p.title} description={p.description} milestone={p.milestone} />;
 }

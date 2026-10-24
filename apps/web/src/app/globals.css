@@ -1,1 +1,10 @@
 @import "tailwindcss";
+@import "../../../../packages/ui/src/tokens.css";
+
+/* Tailwind v4 scans the importing app's source tree by default; the design
+   system lives outside apps/web, so its classes must be registered
+   explicitly. A miss here is silent (unstyled components) — guarded by
+   scripts/assert-ui-css.mjs, which asserts a packages/ui-only utility in the
+   built CSS. Paths are relative to this stylesheet
+   (apps/web/src/app → repo root is four levels up). */
+@source "../../../../packages/ui/src";

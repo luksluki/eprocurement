@@ -6,9 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "lint": "eslint .",
-    "test": "vitest run"
+    "test": "vitest run && node scripts/assert-ui-css.mjs"
   },
   "dependencies": {
+    "@eprocurement/ui": "workspace:*",
     "@tanstack/react-query": "^5.104.5",
     "@tanstack/react-table": "^8.21.3",
     "next": "^15.5.9",

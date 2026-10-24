@@ -1,4 +1,6 @@
 import PlaceholderPage from "../../PlaceholderPage";
+import { ErrorState, PageHeader } from "@eprocurement/ui";
+import { getDictionary } from "@/i18n/server";
 import { requireSession } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
@@ -9,23 +11,19 @@ export const dynamic = "force-dynamic";
 // the RBAC matrix).
 export default async function AdminUsersPage() {
   const { claims } = await requireSession("/admin/users");
+  const dict = await getDictionary();
 
   if (!claims.roles.includes("admin")) {
     return (
-      <section>
-        <h1 className="text-2xl font-semibold">Users</h1>
-        <p role="alert" className="mt-4 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
-          Administrators only.
-        </p>
+      <section aria-labelledby="users-title">
+        <PageHeader id="users-title" title={dict.pages.users.title} />
+        <div className="mt-4">
+          <ErrorState message={dict.adminGate.message} />
+        </div>
       </section>
     );
   }
 
-  return (
-    <PlaceholderPage
-      title="Users"
-      description="Users and roles administration for this tenant."
-      milestone="the identity admin milestone"
-    />
-  );
+  const p = dict.pages.users;
+  return <PlaceholderPage title={p.title} description={p.description} milestone={p.milestone} />;
 }

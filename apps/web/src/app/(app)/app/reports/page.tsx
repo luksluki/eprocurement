@@ -1,13 +1,9 @@
 import PlaceholderPage from "../../PlaceholderPage";
+import { getDictionary } from "@/i18n/server";
 
 export const dynamic = "force-dynamic";
 
-export default function ReportsPage() {
-  return (
-    <PlaceholderPage
-      title="Reports"
-      description="Exports, scheduled jobs, and run history (nightly CSV export per tenant to MinIO)."
-      milestone="M4 — exports & jobs"
-    />
-  );
+export default async function ReportsPage() {
+  const p = (await getDictionary()).pages.reports;
+  return <PlaceholderPage title={p.title} description={p.description} milestone={p.milestone} />;
 }

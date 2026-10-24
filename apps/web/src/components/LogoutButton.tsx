@@ -1,10 +1,17 @@
 "use client";
 
 import { useState } from "react";
+import { Button } from "@eprocurement/ui";
+
+export type LogoutLabels = {
+  signOut: string;
+  signingOut: string;
+};
 
 // Signs out via the logout route handler (which clears the httpOnly cookies
-// server-side), then navigates to /login with a full reload.
-export default function LogoutButton() {
+// server-side), then navigates to /login with a full reload. Button markup
+// comes from the design system.
+export default function LogoutButton({ labels }: { labels: LogoutLabels }) {
   const [busy, setBusy] = useState(false);
 
   async function onClick() {
@@ -19,13 +26,8 @@ export default function LogoutButton() {
   }
 
   return (
-    <button
-      type="button"
-      onClick={() => void onClick()}
-      disabled={busy}
-      className="rounded-md border border-slate-300 px-3 py-1 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-60"
-    >
-      {busy ? "Signing out…" : "Sign out"}
-    </button>
+    <Button variant="secondary" size="sm" disabled={busy} onClick={() => void onClick()}>
+      {busy ? labels.signingOut : labels.signOut}
+    </Button>
   );
 }

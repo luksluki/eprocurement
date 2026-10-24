@@ -1,18 +1,28 @@
 "use client";
 
 import { useState } from "react";
+import { Field } from "@eprocurement/ui";
 import type { DemoTenant } from "@/lib/demo-tenants";
+
+export type TenantSwitcherLabels = {
+  switchTenant: string;
+  switchPlaceholder: string;
+  switchingTenant: string;
+  switchFailed: string;
+  switchNetworkError: string;
+};
 
 // Demo tenant switcher (maintainer decision 2026-10-23 on issue #50): POSTs
 // to /api/auth/switch-tenant, which re-logs in as the target tenant's admin
 // server-side (DEMO_ADMIN_PASSWORD) and rotates the cookies; the full page
-// navigation reloads every list scoped to the new tenant.
-export default function TenantSwitcher({ tenants }: { tenants: DemoTenant[] }) {
-  const [busy, setBusy] = useState<string | null>(null);
+// navigation reloads every list scoped to the new tenant. Label + select
+// markup come from the design system's Field (control="select").
+export default function TenantSwitcher({ tenants, labels }: { tenants: DemoTenant[]; labels: TenantSwitcherLabels }) {
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
   async function switchTo(slug: string) {
-    setBusy(slug);
+    setBusy(true);
     setError("");
     try {
       const res = await fetch(
@@ -28,40 +38,31 @@ export default function TenantSwitcher({ tenants }: { tenants: DemoTenant[] }) {
         window.location.assign(data.redirect);
         return;
       }
-      setError(data.error ?? "Switch failed.");
+      setError(data.error ?? labels.switchFailed);
     } catch {
-      setError("Network error during tenant switch.");
+      setError(labels.switchNetworkError);
     } finally {
-      setBusy(null);
+      setBusy(false);
     }
   }
 
   return (
     <div className="flex items-center gap-2">
-      <label htmlFor="tenant-switcher" className="text-xs text-slate-500">
-        Tenant
-      </label>
-      <select
+      <Field
         id="tenant-switcher"
-        className="rounded-md border border-slate-300 bg-white px-2 py-1 text-sm"
-        defaultValue=""
-        disabled={busy !== null}
-        onChange={(e) => {
-          if (e.target.value) void switchTo(e.target.value);
+        control="select"
+        label={labels.switchTenant}
+        value=""
+        placeholderOption={labels.switchPlaceholder}
+        options={tenants.map((tenant) => ({ value: tenant.slug, label: tenant.label }))}
+        disabled={busy}
+        onValueChange={(value) => {
+          if (value) void switchTo(value);
         }}
-      >
-        <option value="" disabled>
-          Switch…
-        </option>
-        {tenants.map((tenant) => (
-          <option key={tenant.slug} value={tenant.slug}>
-            {tenant.label}
-          </option>
-        ))}
-      </select>
-      {busy ? <span className="text-xs text-slate-400">Switching…</span> : null}
+      />
+      {busy ? <span className="text-xs text-ink-subtle">{labels.switchingTenant}</span> : null}
       {error ? (
-        <span role="alert" className="text-xs text-red-600">
+        <span role="alert" className="text-xs text-danger-fg">
           {error}
         </span>
       ) : null}
