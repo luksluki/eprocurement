@@ -79,9 +79,12 @@ export function useAutosave(opts: {
       return;
     }
     if (draftId === null) {
-      // Create as soon as the details step is valid; exactly once. The
-      // debounce-free path is safe: this effect only re-runs when its value
-      // deps change, and none of them move while the create is in flight.
+      // Create as soon as the details step is valid; exactly once. Deps CAN
+      // move while the create is in flight (the currency select stays active
+      // and basket rows stay editable), which cancels this effect run — but
+      // cancellation never aborts the POST itself. Once it resolves, the
+      // draft exists on the server, so the resolve path below adopts its id
+      // regardless; only a second POST is guarded against (creatingRef).
       if (!detailsValid || creatingRef.current) {
         return;
       }
@@ -91,28 +94,36 @@ export function useAutosave(opts: {
       void (async () => {
         const outcome = await callbacksRef.current.createDraft(currency);
         creatingRef.current = false;
-        if (cancelled) {
-          return;
-        }
+        // The draft now exists server-side, cancelled or not: dropping its
+        // id here would orphan it and make the next effect run POST a second
+        // draft. So the id is always adopted (lastSavedRef baseline of an
+        // empty basket + onDraftCreated → draftId prop), and cancellation
+        // only means this finished run must not setState.
         if (outcome.ok) {
           lastSavedRef.current = JSON.stringify([]);
-          setState({ status: "saved", message: null, code: null, stopped: false });
           if (outcome.id) {
             callbacksRef.current.onDraftCreated(outcome.id);
+          }
+          if (!cancelled) {
+            setState({ status: "saved", message: null, code: null, stopped: false });
           }
           return;
         }
         if (FATAL_STATUSES.has(outcome.status)) {
           stoppedRef.current = true;
-          setState({
-            status: "error",
-            message: fatalMessage(outcome.code, outcome.error),
-            code: outcome.code,
-            stopped: true,
-          });
+          if (!cancelled) {
+            setState({
+              status: "error",
+              message: fatalMessage(outcome.code, outcome.error),
+              code: outcome.code,
+              stopped: true,
+            });
+          }
           return;
         }
-        setState({ status: "error", message: outcome.error, code: outcome.code, stopped: false });
+        if (!cancelled) {
+          setState({ status: "error", message: outcome.error, code: outcome.code, stopped: false });
+        }
       })();
       return () => {
         cancelled = true;

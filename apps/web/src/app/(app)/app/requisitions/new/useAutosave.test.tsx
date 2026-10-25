@@ -60,6 +60,63 @@ describe("useAutosave (#33)", () => {
     expect(createDraft).toHaveBeenCalledTimes(1);
   });
 
+  it("adopts the draft id when deps change mid-create — no second POST, autosave continues as PATCH", async () => {
+    let resolveCreate: (outcome: AutosaveOutcome) => void = () => {};
+    const createDraft = vi.fn(
+      () =>
+        new Promise<AutosaveOutcome>((resolve) => {
+          resolveCreate = resolve;
+        }),
+    );
+    const saveItems = vi.fn(async (): AutosaveOutcome => ({ ok: true }));
+    const onDraftCreated = vi.fn();
+    const hook = renderHook(
+      (props: { draftId: string | null; items: RequisitionItemWire[] }) =>
+        useAutosave({
+          currency: "IDR",
+          detailsValid: true,
+          itemsValid: true,
+          draftId: props.draftId,
+          items: props.items,
+          createDraft,
+          saveItems,
+          onDraftCreated,
+          debounceMs: 300,
+        }),
+      { initialProps: { draftId: null, items: [] as RequisitionItemWire[] } },
+    );
+
+    await advance(50);
+    expect(createDraft).toHaveBeenCalledTimes(1); // POST in flight
+
+    // The user edits the basket while the POST is still out: the effect run
+    // is cancelled, but the request (and the draft it creates) lives on.
+    await act(async () => {
+      hook.rerender({ draftId: null, items: [item] });
+    });
+    expect(createDraft).toHaveBeenCalledTimes(1);
+
+    // Resolve after cancellation: the id must be adopted, not dropped.
+    await act(async () => {
+      resolveCreate({ ok: true, id: "pr-1" });
+    });
+    expect(onDraftCreated).toHaveBeenCalledTimes(1);
+    expect(onDraftCreated).toHaveBeenCalledWith("pr-1");
+
+    // The wizard applies the id via onDraftCreated; the changed basket then
+    // autosaves as a PATCH against that draft — never a second POST.
+    await act(async () => {
+      hook.rerender({ draftId: "pr-1", items: [item] });
+    });
+    await advance(100);
+    expect(createDraft).toHaveBeenCalledTimes(1);
+    expect(saveItems).not.toHaveBeenCalled(); // still inside the debounce
+    await advance(300);
+    expect(saveItems).toHaveBeenCalledTimes(1);
+    expect(saveItems).toHaveBeenCalledWith("pr-1", [item]);
+    expect(createDraft).toHaveBeenCalledTimes(1);
+  });
+
   it("PUTs the basket after the debounce once a draft exists", async () => {
     const saveItems = vi.fn(async (): AutosaveOutcome => ({ ok: true }));
     const hook = renderHook(
