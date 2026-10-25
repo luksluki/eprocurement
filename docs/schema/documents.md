@@ -205,3 +205,49 @@ tenant can read its own timeline; the mapping is mandatory because methods
 missing from `MethodPermissions` pass through unprotected (rbac/grpc.go).
 No new permission was added — `internal/platform/rbac` and `docs/rbac.md`
 are untouched.
+
+## Notifications projection (#47)
+
+`services/documents/notifications` is the second projection the worker
+consumes RabbitMQ for (PRD §14.5 queue `notifications`): exactly **one
+document per event** in the MongoDB `notifications` collection, written by
+the worker's notifications consumer. The queue bindings — the actor-facing
+subset of the §14.6 catalog (`pr.submitted`, `pr.approved`, `pr.rejected`,
+`po.issued`, `po.acknowledged`, `invoice.discrepancy`) — live with the
+worker's consumer topology; the package itself is only the projection
+(`EnsureIndexes` + `Apply`), the same discipline as history.
+
+### Collection
+
+`notifications` — the PRD §14.5 envelope plus the derived recipient:
+
+| Field | Type | Notes |
+|---|---|---|
+| `event_id` | string | unique; the consumer-dedupe key (PRD §14.5) |
+| `tenant_id` | string | tenant scoping |
+| `type` | string | catalog name, e.g. `pr.approved` |
+| `version` | int | payload schema version, 1 today |
+| `occurred_at` | date | business time |
+| `actor_id` | string | the acting user; empty when unknown |
+| `trace_id` | string | propagated trace; empty when unknown |
+| `entity_type` / `entity_id` | string | the aggregate the event is about |
+| `recipient_id` | string | **derived**: `payload.requester_id`, fallback `payload.submitted_by`; may be empty — the document is still created (the effect is durable per event either way) |
+| `payload` | string | raw JSON payload of the event, verbatim |
+| `recorded_at` | date | projection time (when Apply wrote the document) |
+
+### Indexes (PRD §14.7)
+
+| Index | Keys | Notes |
+|---|---|---|
+| `uniq_event_id` | `{event_id: 1}` | **unique** — the dedupe mechanism; created by the worker's boot `EnsureIndexes` before consumption starts |
+| `tenant_occurred` | `{tenant_id: 1, occurred_at: -1}` | compound tenancy index; a future read side pages a tenant's notifications newest-first |
+
+### Apply
+
+`Apply(ctx, ev)` validates the envelope through the shared `history.Event`
+contract (the validation sentinel errors are history's — the consumer
+classifies them as permanent and dead-letters without retry), derives the
+recipient from the payload, and inserts one document. A duplicate-key error
+on `uniq_event_id` is a **successful replay** (`applied=false`), so a
+redelivered event never creates a second notification. There is no update
+or delete path — the collection is append-only (PRD §17).
