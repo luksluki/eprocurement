@@ -203,10 +203,15 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       DATABASE_URL: postgres://${POSTGRES_USER:-eprocurement}:${POSTGRES_PASSWORD:-eprocurement}@postgres:5432/${POSTGRES_DB:-eprocurement}?sslmode=disable
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-eprocurement}:${RABBITMQ_PASSWORD:-eprocurement}@rabbitmq:5672/
+      # consumer side (#47): same credentials the documents service uses
+      MONGO_URI: mongodb://${MONGO_USER:-eprocurement}:${MONGO_PASSWORD:-eprocurement}@mongo:27017/?authSource=admin
+      MONGO_DB: ${MONGO_DB:-eprocurement}
     depends_on:
       postgres:
         condition: service_healthy
       rabbitmq:
+        condition: service_healthy
+      mongo:
         condition: service_healthy
     networks: [backend]
 
