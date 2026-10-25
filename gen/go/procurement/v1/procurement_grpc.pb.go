@@ -28,6 +28,7 @@ const (
 	Procurement_UpdateRequisition_FullMethodName    = "/procurement.v1.Procurement/UpdateRequisition"
 	Procurement_SubmitRequisition_FullMethodName    = "/procurement.v1.Procurement/SubmitRequisition"
 	Procurement_ListRequisitions_FullMethodName     = "/procurement.v1.Procurement/ListRequisitions"
+	Procurement_GetRequisition_FullMethodName       = "/procurement.v1.Procurement/GetRequisition"
 	Procurement_DecideApproval_FullMethodName       = "/procurement.v1.Procurement/DecideApproval"
 	Procurement_GetApprovalRules_FullMethodName     = "/procurement.v1.Procurement/GetApprovalRules"
 	Procurement_ReplaceApprovalRules_FullMethodName = "/procurement.v1.Procurement/ReplaceApprovalRules"
@@ -81,6 +82,12 @@ type ProcurementClient interface {
 	// of matching rows across all pages. Rows are header-only: items and
 	// approval_steps are always empty here — the detail reads own them.
 	ListRequisitions(ctx context.Context, in *ListRequisitionsRequest, opts ...grpc.CallOption) (*ListRequisitionsResponse, error)
+	// GetRequisition returns one requisition of the caller's tenant — the
+	// detail read that owns the items and approval steps the list rows never
+	// carry. Other tenants' requisitions are indistinguishable from missing
+	// ones. Read is tenant-wide (requisition:read); ownership applies to edits
+	// and submit only.
+	GetRequisition(ctx context.Context, in *GetRequisitionRequest, opts ...grpc.CallOption) (*Requisition, error)
 	// DecideApproval applies one approve/reject decision to an approval step.
 	// Only the current step (the smallest pending step_no of a submitted
 	// requisition) may be decided; the decider must hold the step's
@@ -200,6 +207,16 @@ func (c *procurementClient) ListRequisitions(ctx context.Context, in *ListRequis
 	return out, nil
 }
 
+func (c *procurementClient) GetRequisition(ctx context.Context, in *GetRequisitionRequest, opts ...grpc.CallOption) (*Requisition, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Requisition)
+	err := c.cc.Invoke(ctx, Procurement_GetRequisition_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *procurementClient) DecideApproval(ctx context.Context, in *DecideApprovalRequest, opts ...grpc.CallOption) (*DecideApprovalResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(DecideApprovalResponse)
@@ -278,6 +295,12 @@ type ProcurementServer interface {
 	// of matching rows across all pages. Rows are header-only: items and
 	// approval_steps are always empty here — the detail reads own them.
 	ListRequisitions(context.Context, *ListRequisitionsRequest) (*ListRequisitionsResponse, error)
+	// GetRequisition returns one requisition of the caller's tenant — the
+	// detail read that owns the items and approval steps the list rows never
+	// carry. Other tenants' requisitions are indistinguishable from missing
+	// ones. Read is tenant-wide (requisition:read); ownership applies to edits
+	// and submit only.
+	GetRequisition(context.Context, *GetRequisitionRequest) (*Requisition, error)
 	// DecideApproval applies one approve/reject decision to an approval step.
 	// Only the current step (the smallest pending step_no of a submitted
 	// requisition) may be decided; the decider must hold the step's
@@ -333,6 +356,9 @@ func (UnimplementedProcurementServer) SubmitRequisition(context.Context, *Submit
 }
 func (UnimplementedProcurementServer) ListRequisitions(context.Context, *ListRequisitionsRequest) (*ListRequisitionsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListRequisitions not implemented")
+}
+func (UnimplementedProcurementServer) GetRequisition(context.Context, *GetRequisitionRequest) (*Requisition, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetRequisition not implemented")
 }
 func (UnimplementedProcurementServer) DecideApproval(context.Context, *DecideApprovalRequest) (*DecideApprovalResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method DecideApproval not implemented")
@@ -526,6 +552,24 @@ func _Procurement_ListRequisitions_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Procurement_GetRequisition_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetRequisitionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProcurementServer).GetRequisition(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Procurement_GetRequisition_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProcurementServer).GetRequisition(ctx, req.(*GetRequisitionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Procurement_DecideApproval_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(DecideApprovalRequest)
 	if err := dec(in); err != nil {
@@ -622,6 +666,10 @@ var Procurement_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListRequisitions",
 			Handler:    _Procurement_ListRequisitions_Handler,
+		},
+		{
+			MethodName: "GetRequisition",
+			Handler:    _Procurement_GetRequisition_Handler,
 		},
 		{
 			MethodName: "DecideApproval",

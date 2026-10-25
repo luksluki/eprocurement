@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
+import { accessTokenOr401, forwardGatewayResult, isNextResponse } from "@/lib/bff";
 import { ACCESS_COOKIE } from "@/lib/constants";
-import { listRequisitions } from "@/lib/gateway";
+import { createRequisitionDraft, listRequisitions } from "@/lib/gateway";
 import { filtersToSearchParams, parseFilters } from "@/lib/requisition-filters";
 
 export const dynamic = "force-dynamic";
@@ -33,4 +34,24 @@ export async function GET(request: Request) {
     );
   }
   return NextResponse.json(result.data);
+}
+
+// POST /api/requisitions — create the wizard's server-side draft (#33).
+// Unlike the list proxy above, the typed result is forwarded: gateway 4xx
+// bodies (machine codes like requisition_currency_invalid) ride through
+// verbatim so the wizard can map them; only 5xx/network collapse to 502.
+export async function POST(request: Request) {
+  const tokenOr401 = await accessTokenOr401();
+  if (isNextResponse(tokenOr401)) {
+    return tokenOr401;
+  }
+  const body = (await request.json().catch(() => null)) as { currency?: string } | null;
+  if (!body || typeof body.currency !== "string" || !["IDR", "USD"].includes(body.currency)) {
+    return NextResponse.json(
+      { error: "currency must be IDR or USD", code: "requisition_currency_invalid" },
+      { status: 400 },
+    );
+  }
+  const result = await createRequisitionDraft(tokenOr401, body.currency);
+  return forwardGatewayResult(result, 201);
 }

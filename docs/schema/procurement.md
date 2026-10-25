@@ -351,6 +351,16 @@ missing (404 `requisition_not_found`).
   pages → 400 `requisition_page_invalid`, unknown status → 400
   `requisition_status_invalid`. See the requisition list section below for
   the query shape, budget test, and plans.
+- **Get** (#33) — `GET /api/v1/requisitions/{id}` / gRPC `GetRequisition`
+  (`requisition:read` — tenant-wide, no ownership check; ownership governs
+  edit/submit only): the detail read that owns the bodies the list rows
+  never carry — `items` and the materialized `approval_steps` (nil while
+  draft). Cross-tenant reads are 404 `requisition_not_found`, non-UUID ids
+  400 `requisition_id_invalid`. The route is sanctioned by the #33 issue
+  decision (agent 2026-10-25), not by PRD §15, which does not list it.
+  When the gateway has a documents client, the response embeds
+  `attachments: [...]` (requisition-owned attachment metadata, pending and
+  ready — vendor-detail parity); without documents the key is absent.
 
 ## Error codes
 
@@ -361,7 +371,7 @@ missing (404 `requisition_not_found`).
 - #26: attachments via presigned uploads (done).
 - #27: list/search/filter/pagination (done).
 - #28: requisition domain + state machine + tables (done).
-- #29: requisition create/edit/submit API (done — store, number generation, idempotent submit, REST/gRPC wiring, gateway `Aborted` → 409). Read endpoints: **list done in #32** (see below); get/timeline are separate issues.
+- #29: requisition create/edit/submit API (done — store, number generation, idempotent submit, REST/gRPC wiring, gateway `Aborted` → 409). Read endpoints: **list done in #32**, **get done in #33** (see below); timeline is a separate issue.
 - #30: approval rules + sequential engine + decide API (done — matrix materialization, 412 rollback, self/role enforcement, reject-skips, admin rule configuration, steps in-band).
 - #31: idempotent decide + outbox audit/notification events (done — `procurement.outbox` + `decision_idempotency` in 0006, decide replay/conflict contract, `pr.*` decide events with actor + trace, gateway `x-trace-id` propagation). **Re-sequenced with #45** by an agent decision: the outbox table + writer moved from #45's scope into #31 (see dev-note 031's provenance block); #45 keeps the publisher loop only.
 - Approvals read endpoints/queue #32-34, PO conversion (#35), outbox publisher (#45 — poll/publish/retry/DLQ only; table and writer landed with #31) (M2–M3).

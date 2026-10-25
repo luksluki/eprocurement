@@ -229,7 +229,7 @@ func TestCreateUploadValidation(t *testing.T) {
 			SizeBytes: 2 << 20, ChecksumSha256: sha256Hex([]byte("x")), // limit is 1 MiB here
 		}, attachment.ErrTooLarge.Error()},
 		{"entity", &documentsv1.CreateUploadRequest{
-			EntityType: "requisition", EntityId: gVendor,
+			EntityType: "invoice", EntityId: gVendor,
 			Filename: "a.pdf", MimeType: "application/pdf",
 			SizeBytes: 10, ChecksumSha256: sha256Hex([]byte("x")),
 		}, attachment.ErrEntityInvalid.Error()},
@@ -293,7 +293,8 @@ func TestAttachmentRBACAndAuth(t *testing.T) {
 	client, stop := startDocuments(t)
 	defer stop()
 
-	// Viewer lacks vendor:write.
+	// Viewer lacks vendor:write — now re-checked in-handler per entity type
+	// (the attachment methods left the interceptor map in #33).
 	_, err := client.CreateUpload(viewerCtx(), &documentsv1.CreateUploadRequest{
 		EntityType: attachment.EntityTypeVendor, EntityId: gVendor,
 		Filename: "a.pdf", MimeType: "application/pdf",
@@ -311,6 +312,98 @@ func TestAttachmentRBACAndAuth(t *testing.T) {
 	})
 	if st, _ := status.FromError(err); st.Code() != codes.Unauthenticated {
 		t.Fatalf("anonymous CreateUpload error = %v", err)
+	}
+}
+
+// Requisition attachments (#33): the per-entity permission table — a
+// requester (requisition:write) declares, uploads, completes, lists, and
+// downloads an attachment owned by a requisition; the same requester is
+// denied on vendor-owned attachments (vendor:write), a buyer is denied the
+// requisition write, and reads stay broad (viewer lists).
+func TestAttachmentRequisitionEntity(t *testing.T) {
+	client, stop := startDocuments(t)
+	defer stop()
+
+	gRequisition := "eeeeeeee-1111-0000-0000-0000000000cc"
+	requesterCtx := callerCtx(gTenantA, rbac.RoleRequester)
+
+	// A requester declares a requisition attachment: pending metadata, object
+	// key under attachments/{tenant}/requisition/{uuid}.
+	content := []byte("requisition quote bytes")
+	created, err := client.CreateUpload(requesterCtx, &documentsv1.CreateUploadRequest{
+		EntityType:     attachment.EntityTypeRequisition,
+		EntityId:       gRequisition,
+		Filename:       "quote.pdf",
+		MimeType:       "application/pdf",
+		SizeBytes:      int64(len(content)),
+		ChecksumSha256: sha256Hex(content),
+	})
+	if err != nil {
+		t.Fatalf("CreateUpload requisition: %v", err)
+	}
+	att := created.GetAttachment()
+	if att.GetEntityType() != attachment.EntityTypeRequisition || att.GetEntityId() != gRequisition {
+		t.Fatalf("attachment = %+v", att)
+	}
+	if att.GetObjectKey() != attachment.ObjectKey(gTenantA, attachment.EntityTypeRequisition, att.GetId()) {
+		t.Fatalf("object key = %q", att.GetObjectKey())
+	}
+
+	// The same requester cannot declare a vendor attachment (vendor:write).
+	_, err = client.CreateUpload(requesterCtx, &documentsv1.CreateUploadRequest{
+		EntityType:     attachment.EntityTypeVendor,
+		EntityId:       gVendor,
+		Filename:       "a.pdf", MimeType: "application/pdf",
+		SizeBytes: 4, ChecksumSha256: sha256Hex([]byte("x")),
+	})
+	if st, _ := status.FromError(err); st.Code() != codes.PermissionDenied ||
+		st.Message() != "permission_denied: requires vendor:write" {
+		t.Fatalf("requester vendor declare error = %v, want PermissionDenied requires vendor:write", err)
+	}
+
+	// A buyer cannot complete a requisition attachment (requisition:write),
+	// even one that exists — the per-entity write guard.
+	httpPut(t, created.GetUploadUrl(), "application/pdf", content)
+	_, err = client.CompleteUpload(buyerCtx(), &documentsv1.CompleteUploadRequest{AttachmentId: att.GetId()})
+	if st, _ := status.FromError(err); st.Code() != codes.PermissionDenied ||
+		st.Message() != "permission_denied: requires requisition:write" {
+		t.Fatalf("buyer complete requisition attachment error = %v", err)
+	}
+
+	// The owner completes; list and download follow (requisition:read is
+	// broad — a viewer may list and download).
+	ready, err := client.CompleteUpload(requesterCtx, &documentsv1.CompleteUploadRequest{AttachmentId: att.GetId()})
+	if err != nil || ready.GetStatus() != attachment.StatusReady {
+		t.Fatalf("complete = (%+v, %v)", ready, err)
+	}
+	list, err := client.ListAttachments(viewerCtx(), &documentsv1.ListAttachmentsRequest{
+		EntityType: attachment.EntityTypeRequisition, EntityId: gRequisition,
+	})
+	if err != nil || len(list.GetAttachments()) != 1 || list.GetAttachments()[0].GetId() != att.GetId() {
+		t.Fatalf("list = (%+v, %v)", list, err)
+	}
+	dl, err := client.GetDownloadUrl(viewerCtx(), &documentsv1.GetDownloadUrlRequest{AttachmentId: att.GetId()})
+	if err != nil || dl.GetDownloadUrl() == "" {
+		t.Fatalf("download = (%+v, %v)", dl, err)
+	}
+
+	// Cross-tenant denial on the new entity: tenant B's list of tenant A's
+	// requisition owner is empty (tenant-scoped query, no leak, no error).
+	listB, err := client.ListAttachments(callerCtx(gTenantB, rbac.RoleViewer),
+		&documentsv1.ListAttachmentsRequest{
+			EntityType: attachment.EntityTypeRequisition, EntityId: gRequisition,
+		})
+	if err != nil || len(listB.GetAttachments()) != 0 {
+		t.Fatalf("tenant B list = (%+v, %v)", listB, err)
+	}
+
+	// Unknown entity on the read path is the domain's machine code, not a
+	// silent pass.
+	_, err = client.ListAttachments(viewerCtx(), &documentsv1.ListAttachmentsRequest{
+		EntityType: "invoice", EntityId: gRequisition,
+	})
+	if st, _ := status.FromError(err); st.Code() != codes.InvalidArgument || st.Message() != attachment.ErrEntityInvalid.Error() {
+		t.Fatalf("unknown entity list error = %v", err)
 	}
 }
 

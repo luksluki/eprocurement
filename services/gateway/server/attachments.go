@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"slices"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -24,6 +25,13 @@ type DocumentsClient interface {
 	GetDownloadUrl(ctx context.Context, in *documentsv1.GetDownloadUrlRequest, opts ...grpc.CallOption) (*documentsv1.GetDownloadUrlResponse, error)
 }
 
+// Attachment owner kinds the gateway routes for (documents owns the full
+// set; the gateway only needs the ones it has routes for).
+const (
+	entityVendor      = "vendor"
+	entityRequisition = "requisition"
+)
+
 // registerAttachmentRoutes wires /api/v1/vendors/:id/attachments under the
 // vendors group. The vendor's existence is checked against procurement
 // before any documents call, so attachments cannot dangle on unknown ids.
@@ -31,6 +39,20 @@ func registerAttachmentRoutes(vendors fiber.Router, verifier *token.Verifier, ve
 	vendors.Post("/:id/attachments", RequirePermission(rbac.VendorWrite), createAttachment(vendorClient, documents))
 	vendors.Post("/:id/attachments/:attachmentId/complete", RequirePermission(rbac.VendorWrite), completeAttachment(documents))
 	vendors.Get("/:id/attachments/:attachmentId/download", RequirePermission(rbac.VendorRead), downloadAttachment(documents))
+}
+
+// registerRequisitionAttachmentRoutes wires the requisition attachment
+// routes (#33): declare/complete/download under
+// /api/v1/requisitions/:id/attachments. Declare checks the draft exists in
+// procurement first (the vendor pattern) plus the requester-ownership rule
+// procurement enforces on edit/submit — attachments on a requisition are
+// writes to that requisition, so declaring against another user's draft is
+// 403 requisition_forbidden, not a silent pass. Complete/download only bind
+// the attachment to the path's requisition id (vendor parity).
+func registerRequisitionAttachmentRoutes(reqs fiber.Router, verifier *token.Verifier, requisitions ProcurementClient, documents DocumentsClient) {
+	reqs.Post("/:id/attachments", RequirePermission(rbac.RequisitionWrite), createRequisitionAttachment(requisitions, documents))
+	reqs.Post("/:id/attachments/:attachmentId/complete", RequirePermission(rbac.RequisitionWrite), completeAttachment(documents))
+	reqs.Get("/:id/attachments/:attachmentId/download", RequirePermission(rbac.RequisitionRead), downloadAttachment(documents))
 }
 
 type attachmentBody struct {
@@ -56,8 +78,57 @@ func createAttachment(vendorClient VendorClient, documents DocumentsClient) fibe
 			return vendorError(c, err)
 		}
 		resp, err := documents.CreateUpload(forwardContext(c, claims), &documentsv1.CreateUploadRequest{
-			EntityType:     "vendor",
+			EntityType:     entityVendor,
 			EntityId:       c.Params("id"),
+			Filename:       strings.TrimSpace(body.Filename),
+			MimeType:       body.MimeType,
+			SizeBytes:      body.SizeBytes,
+			ChecksumSha256: body.ChecksumSHA256,
+		})
+		if err != nil {
+			return attachmentError(c, err)
+		}
+		out := attachmentJSON(resp.GetAttachment())
+		out["upload"] = fiber.Map{
+			"url":        resp.GetUploadUrl(),
+			"method":     resp.GetMethod(),
+			"expires_at": resp.GetExpiresAt(),
+			"headers":    fiber.Map{"Content-Type": resp.GetAttachment().GetMimeType()},
+		}
+		return c.Status(fiber.StatusCreated).JSON(out)
+	}
+}
+
+// createRequisitionAttachment serves POST /api/v1/requisitions/:id/
+// attachments (#33). Beyond the vendor pattern's existence check, the
+// caller must own the draft: requisition attachments are writes to the
+// requisition, and procurement's ownership rule (requester or admin,
+// docs/rbac.md) is mirrored here because documents has no knowledge of
+// requisition ownership.
+func createRequisitionAttachment(requisitions ProcurementClient, documents DocumentsClient) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		claims, ok := claimsOf(c)
+		if !ok {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "missing bearer token"})
+		}
+		var body attachmentBody
+		if err := c.BodyParser(&body); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid JSON body", "code": "body_invalid"})
+		}
+		r, err := requisitions.GetRequisition(forwardContext(c, claims),
+			&procurementv1.GetRequisitionRequest{Id: c.Params("id")})
+		if err != nil {
+			return requisitionError(c, err)
+		}
+		if r.GetRequesterId() != claims.Sub && !slices.Contains(claims.Roles, rbac.RoleAdmin) {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error": requisitionMessages["requisition_forbidden"],
+				"code":  "requisition_forbidden",
+			})
+		}
+		resp, err := documents.CreateUpload(forwardContext(c, claims), &documentsv1.CreateUploadRequest{
+			EntityType:     entityRequisition,
+			EntityId:       r.GetId(),
 			Filename:       strings.TrimSpace(body.Filename),
 			MimeType:       body.MimeType,
 			SizeBytes:      body.SizeBytes,
@@ -115,11 +186,12 @@ func downloadAttachment(documents DocumentsClient) fiber.Handler {
 	}
 }
 
-// listVendorAttachments powers the vendor-detail aggregation: metadata for
-// every attachment of this vendor, pending and ready.
-func listVendorAttachments(ctx context.Context, vendorID string, documents DocumentsClient) ([]fiber.Map, error) {
+// listEntityAttachments powers the detail aggregations (vendor detail since
+// #26, requisition detail since #33): metadata for every attachment of this
+// owner, pending and ready.
+func listEntityAttachments(ctx context.Context, entityType, entityID string, documents DocumentsClient) ([]fiber.Map, error) {
 	resp, err := documents.ListAttachments(ctx, &documentsv1.ListAttachmentsRequest{
-		EntityType: "vendor", EntityId: vendorID,
+		EntityType: entityType, EntityId: entityID,
 	})
 	if err != nil {
 		return nil, err
@@ -132,9 +204,11 @@ func listVendorAttachments(ctx context.Context, vendorID string, documents Docum
 }
 
 // attachmentMessages renders the machine code (the gRPC message) as a
-// human sentence; unknown messages pass through verbatim.
+// human sentence; unknown messages pass through verbatim. attachment_entity_invalid
+// is neutralized ("owner type", not "vendor") because the map is shared by
+// the vendor and requisition attachment routes.
 var attachmentMessages = map[string]string{
-	"attachment_entity_invalid":    "attachment owner must be a vendor",
+	"attachment_entity_invalid":    "attachment owner type is not supported",
 	"attachment_filename_invalid":  "filename must be 1-255 characters without path separators",
 	"attachment_mime_invalid":      "mime type is not allowed (pdf, png, jpeg, webp, docx, xlsx)",
 	"attachment_too_large":         "file exceeds the size limit",

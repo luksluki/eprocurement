@@ -36,6 +36,7 @@ type fakeDocumentsClient struct {
 	completeResp *documentsv1.Attachment
 	completeErr  error
 
+	listReq  *documentsv1.ListAttachmentsRequest
 	listResp *documentsv1.ListAttachmentsResponse
 	listErr  error
 
@@ -60,7 +61,7 @@ func (f *fakeDocumentsClient) CompleteUpload(ctx context.Context, in *documentsv
 }
 
 func (f *fakeDocumentsClient) ListAttachments(ctx context.Context, in *documentsv1.ListAttachmentsRequest, opts ...grpc.CallOption) (*documentsv1.ListAttachmentsResponse, error) {
-	f.lastCtx = ctx
+	f.lastCtx, f.listReq = ctx, in
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -269,6 +270,187 @@ func TestAttachmentRoutesRequirePermission(t *testing.T) {
 	for _, target := range []string{
 		"POST /api/v1/vendors/v-1/attachments",
 		"POST /api/v1/vendors/v-1/attachments/a/complete",
+	} {
+		parts := strings.SplitN(target, " ", 2)
+		resp := doReq(t, app, viewerHeader, parts[0], parts[1], "{}")
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s as viewer: status = %d, want 403", target, resp.StatusCode)
+		}
+	}
+}
+
+// requisitionAttachmentTestApp wires requisition + attachment routes
+// against fakes. The requisition fake replies with a draft owned by user-29
+// (the token's subject) unless overridden.
+func requisitionAttachmentTestApp(t *testing.T) (*fiber.App, *fakeRequisitionClient, *fakeDocumentsClient, http.Header, func(roles ...string) string) {
+	t.Helper()
+	requisitions := &fakeRequisitionClient{fakeVendorClient: &fakeVendorClient{}, getRes: sampleRequisition()}
+	documents := &fakeDocumentsClient{}
+
+	app, verifier, priv, kid := newTestApp(t)
+	registerRequisitionRoutes(app, verifier, requisitions, documents)
+
+	sign := func(roles ...string) string {
+		t.Helper()
+		now := time.Now()
+		token, err := jwt.Sign(priv, kid, auth.AccessClaims{
+			Sub: "user-29", TenantID: "tenant-29", Roles: roles,
+			IAT: now.Unix(), EXP: now.Add(time.Minute).Unix(),
+		}, now)
+		if err != nil {
+			t.Fatalf("sign: %v", err)
+		}
+		return token
+	}
+
+	header := http.Header{}
+	header.Set("Authorization", "Bearer "+sign(rbac.RoleRequester))
+	header.Set("Content-Type", "application/json")
+	return app, requisitions, documents, header, sign
+}
+
+// Declare on a draft the caller owns: the requisition is fetched first (the
+// vendor-pattern existence check), documents receives entity_type
+// "requisition" plus the requisition's id, and the upload URL envelope comes
+// back unchanged.
+func TestRequisitionAttachmentDeclare(t *testing.T) {
+	app, requisitions, documents, header, _ := requisitionAttachmentTestApp(t)
+	documents.createResp = &documentsv1.CreateUploadResponse{
+		Attachment: &documentsv1.Attachment{
+			Id: "att-1", TenantId: "tenant-29", EntityType: "requisition", EntityId: "pr-1",
+			Filename: "quote.pdf", MimeType: "application/pdf", SizeBytes: 12,
+			ChecksumSha256: strings.Repeat("ab", 32), Status: "pending",
+			CreatedBy: "user-29", CreatedAt: "2026-10-25T10:00:00Z",
+		},
+		UploadUrl: "http://minio:9000/attachments/tenant-29/requisition/att-1?X-Amz-Signature=sig",
+		Method:    "PUT", ExpiresAt: "2026-10-25T10:15:00Z",
+	}
+
+	resp := doReq(t, app, header, http.MethodPost, "/api/v1/requisitions/pr-1/attachments",
+		`{"filename":"quote.pdf","mime_type":"application/pdf","size_bytes":12,"checksum_sha256":"`+strings.Repeat("ab", 32)+`"}`)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("declare status = %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), `"entity_type":"requisition"`) ||
+		!strings.Contains(string(body), "X-Amz-Signature") {
+		t.Fatalf("body = %s", body)
+	}
+	if requisitions.getReq.GetId() != "pr-1" {
+		t.Fatalf("existence check = %+v", requisitions.getReq)
+	}
+	if documents.createReq.GetEntityType() != "requisition" || documents.createReq.GetEntityId() != "pr-1" {
+		t.Fatalf("documents request = %+v", documents.createReq)
+	}
+}
+
+// Declare on another requester's draft of the same tenant: the edge mirrors
+// procurement's ownership rule (403 requisition_forbidden) — attachments on
+// a requisition are writes to it. An admin is excepted, and an unknown
+// requisition 404s before any documents call.
+func TestRequisitionAttachmentDeclareOwnership(t *testing.T) {
+	app, requisitions, documents, header, sign := requisitionAttachmentTestApp(t)
+
+	// Not the requester, not an admin.
+	other := sampleRequisition()
+	other.RequesterId = "user-OTHER"
+	requisitions.getRes = other
+	resp := doReq(t, app, header, http.MethodPost, "/api/v1/requisitions/pr-1/attachments", `{"filename":"a.pdf","mime_type":"application/pdf","size_bytes":1,"checksum_sha256":"`+strings.Repeat("ab", 32)+`"}`)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("foreign draft status = %d, want 403", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), `"code":"requisition_forbidden"`) {
+		t.Fatalf("body = %s", body)
+	}
+	if documents.createReq != nil {
+		t.Fatal("documents must not be called for a foreign draft")
+	}
+
+	// Admins may act on any requisition of the tenant (requireOwner parity).
+	adminHeader := header.Clone()
+	adminHeader.Set("Authorization", "Bearer "+sign(rbac.RoleAdmin))
+	documents.createResp = &documentsv1.CreateUploadResponse{
+		Attachment: &documentsv1.Attachment{Id: "att-9", EntityType: "requisition", EntityId: "pr-1", Status: "pending"},
+		UploadUrl:  "http://minio/x", Method: "PUT", ExpiresAt: "z",
+	}
+	resp = doReq(t, app, adminHeader, http.MethodPost, "/api/v1/requisitions/pr-1/attachments", `{"filename":"a.pdf","mime_type":"application/pdf","size_bytes":1,"checksum_sha256":"`+strings.Repeat("ab", 32)+`"}`)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("admin declare status = %d, want 201", resp.StatusCode)
+	}
+
+	// Unknown requisition: procurement's 404 rides through, documents untouched.
+	requisitions.getErr = status.Error(codes.NotFound, "requisition_not_found")
+	documents.createReq = nil
+	resp = doReq(t, app, header, http.MethodPost, "/api/v1/requisitions/nope/attachments", `{"filename":"a.pdf","mime_type":"application/pdf","size_bytes":1,"checksum_sha256":"`+strings.Repeat("ab", 32)+`"}`)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown requisition status = %d, want 404", resp.StatusCode)
+	}
+	if documents.createReq != nil {
+		t.Fatal("documents must not be called for an unknown requisition")
+	}
+}
+
+// Complete and download bind the attachment to the path's requisition id
+// (vendor-route parity): another requisition's attachment is a 404, and
+// documents' machine codes ride through with the shared mapping.
+func TestRequisitionAttachmentCompleteDownload(t *testing.T) {
+	app, _, documents, header, _ := requisitionAttachmentTestApp(t)
+
+	documents.completeResp = &documentsv1.Attachment{Id: "att-1", EntityId: "pr-1", Status: "ready"}
+	resp := doReq(t, app, header, http.MethodPost, "/api/v1/requisitions/pr-1/attachments/att-1/complete", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("complete status = %d", resp.StatusCode)
+	}
+
+	documents.completeResp = &documentsv1.Attachment{Id: "att-2", EntityId: "pr-OTHER", Status: "ready"}
+	resp = doReq(t, app, header, http.MethodPost, "/api/v1/requisitions/pr-1/attachments/att-2/complete", "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("cross-requisition complete status = %d, want 404", resp.StatusCode)
+	}
+
+	documents.downloadResp = &documentsv1.GetDownloadUrlResponse{
+		Attachment:  &documentsv1.Attachment{Id: "att-1", EntityId: "pr-1", Status: "ready"},
+		DownloadUrl: "http://minio:9000/attachments/t/r/att-1?sig",
+		ExpiresAt:   "2026-10-25T10:15:00Z",
+	}
+	resp = doReq(t, app, header, http.MethodGet, "/api/v1/requisitions/pr-1/attachments/att-1/download", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("download status = %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), `"download":{`) {
+		t.Fatalf("body = %s", body)
+	}
+
+	// Checksum mismatch from documents: 412 with the machine code — the UI
+	// maps this per-step (#33).
+	documents.downloadResp = nil
+	documents.downloadErr = status.Error(codes.FailedPrecondition, "attachment_checksum_mismatch")
+	resp = doReq(t, app, header, http.MethodGet, "/api/v1/requisitions/pr-1/attachments/att-1/download", "")
+	if resp.StatusCode != http.StatusPreconditionFailed {
+		t.Fatalf("mismatch status = %d, want 412", resp.StatusCode)
+	}
+}
+
+// The entity-invalid message is neutralized because the map is shared by
+// vendor and requisition routes ("owner type", not "vendor").
+func TestAttachmentEntityInvalidMessageNeutralized(t *testing.T) {
+	if got := attachmentMessages["attachment_entity_invalid"]; got != "attachment owner type is not supported" {
+		t.Fatalf("attachment_entity_invalid message = %q", got)
+	}
+}
+
+// Viewer holds requisition:read but not requisition:write: declare/complete
+// are 403 at the edge, download is allowed.
+func TestRequisitionAttachmentPermissions(t *testing.T) {
+	app, _, _, header, sign := requisitionAttachmentTestApp(t)
+	viewerHeader := header.Clone()
+	viewerHeader.Set("Authorization", "Bearer "+sign(rbac.RoleViewer))
+
+	for _, target := range []string{
+		"POST /api/v1/requisitions/pr-1/attachments",
+		"POST /api/v1/requisitions/pr-1/attachments/a/complete",
 	} {
 		parts := strings.SplitN(target, " ", 2)
 		resp := doReq(t, app, viewerHeader, parts[0], parts[1], "{}")

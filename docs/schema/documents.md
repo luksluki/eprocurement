@@ -22,8 +22,8 @@ reaper → pending older than ATTACHMENT_PENDING_TTL (default 24h):
 
 - Object keys follow PRD §13: `attachments/{tenant_id}/{entity}/{uuid}`.
   Entity types and ids are validated to a path-safe charset before they
-  become key segments; `vendor` is the only entity today (requisitions and
-  invoices reuse the same shape later).
+  become key segments; accepted owner kinds are `vendor` (#26) and
+  `requisition` (#33) — invoices reuse the same shape later.
 - Declarations are bounded: mime allowlist (pdf, png, jpeg, webp, docx,
   xlsx), `ATTACHMENT_MAX_SIZE_MB` (default 25), filename 1–255 chars with no
   path separators, checksum must be sha256 hex (lowercased on accept).
@@ -38,15 +38,21 @@ reaper → pending older than ATTACHMENT_PENDING_TTL (default 24h):
 
 | Method | Permission | Notes |
 |---|---|---|
-| `CreateUpload` | `vendor:write` | validates the declaration, returns presigned PUT + pending metadata |
-| `CompleteUpload` | `vendor:write` | verifies size/mime/checksum, flips to `ready` |
-| `ListAttachments` | `vendor:read` | by owner (entity type + id), oldest first |
-| `GetDownloadUrl` | `vendor:read` | ready attachments only, returns presigned GET |
+| `CreateUpload` | per entity: `vendor:write` / `requisition:write` | validates the declaration, returns presigned PUT + pending metadata |
+| `CompleteUpload` | per entity: `vendor:write` / `requisition:write` | verifies size/mime/checksum, flips to `ready` |
+| `ListAttachments` | per entity: `vendor:read` / `requisition:read` | by owner (entity type + id), oldest first |
+| `GetDownloadUrl` | per entity: `vendor:read` / `requisition:read` | ready attachments only, returns presigned GET |
+| `ListEvents` | `requisition:read` | interceptor map (single permission) |
 
-Permissions are re-checked service-side from the propagated gRPC metadata
-(`x-user-id` / `x-tenant-id` / `x-role`) — the same defense-in-depth map as
-procurement. When new entity types arrive, the map moves to per-entity
-permissions.
+Since #33 the attachment methods are **absent from the interceptor's
+methodPermissions map on purpose**: their permission depends on the
+attachment's entity type, which the interceptor cannot see before the call
+runs. Each handler resolves the entity type (from the request for
+CreateUpload/ListAttachments, from the stored attachment for
+CompleteUpload/GetDownloadUrl) and re-checks the per-entity permission
+in-handler via `rbac.Check` — the same defense-in-depth depth, one level
+deeper. Unknown entity types fail with 400 `attachment_entity_invalid`,
+never a silent pass.
 
 ## REST surface (gateway)
 
@@ -56,11 +62,24 @@ permissions.
 | `POST .../attachments/:attachmentId/complete` | `vendor:write` | → attachment metadata, `status: ready` |
 | `GET .../attachments/:attachmentId/download` | `vendor:read` | → `download: {url, expires_at}` |
 | `GET /api/v1/vendors/:id` | `vendor:read` | vendor detail embeds `attachments: [...]` |
+| `POST /api/v1/requisitions/:id/attachments` (#33) | `requisition:write` + requester ownership | same body → `201` with the presigned PUT envelope |
+| `POST /api/v1/requisitions/:id/attachments/:attachmentId/complete` (#33) | `requisition:write` | → attachment metadata, `status: ready` |
+| `GET /api/v1/requisitions/:id/attachments/:attachmentId/download` (#33) | `requisition:read` | → `download: {url, expires_at}` |
+| `GET /api/v1/requisitions/:id` (#33) | `requisition:read` | requisition detail embeds `attachments: [...]` (absent when documents is not wired) |
 
-The gateway verifies the vendor exists (procurement) before any documents
-call; `object_key` never appears in REST responses. Machine error codes
-(`attachment_too_large`, `attachment_checksum_mismatch`, …) pass through
-unchanged; validation → 400, missing → 404, lifecycle violations → 412.
+The gateway verifies the owner exists (procurement `GetVendor` /
+`GetRequisition`) before any documents call. The requisition declare route
+additionally mirrors procurement's ownership rule — the caller must be the
+draft's `requester_id` (admins excepted), else 403 `requisition_forbidden`;
+attachments on a requisition are writes to it. Complete/download only bind
+the attachment to the path's owner id (vendor parity). `object_key` never
+appears in REST responses. Machine error codes (`attachment_too_large`,
+`attachment_checksum_mismatch`, …) pass through unchanged; validation →
+400, missing → 404, lifecycle violations → 412. The human message for
+`attachment_entity_invalid` is neutral ("attachment owner type is not
+supported") because the mapping is shared by the vendor and requisition
+routes. These requisition routes are sanctioned by the #33 issue decision
+(agent 2026-10-25); PRD §15 does not list them.
 
 ## Storage
 

@@ -22,9 +22,22 @@ const (
 	StatusReady   = "ready"
 )
 
-// EntityTypeVendor is the only owner kind wired so far; requisitions and
-// invoices follow the same shape in later issues.
-const EntityTypeVendor = "vendor"
+// Attachment owner kinds wired so far: vendor (#26) and requisition (#33).
+// Invoices follow the same shape in later issues.
+const (
+	EntityTypeVendor      = "vendor"
+	EntityTypeRequisition = "requisition"
+)
+
+// entityTypes is the accepted owner-kind set; entity types become object-key
+// segments, so membership doubles as the path-safety whitelist.
+var entityTypes = map[string]bool{
+	EntityTypeVendor:      true,
+	EntityTypeRequisition: true,
+}
+
+// ValidEntity reports whether entityType is an accepted owner kind.
+func ValidEntity(entityType string) bool { return entityTypes[entityType] }
 
 // Limits bounds the declaration at create time.
 type Limits struct {
@@ -98,7 +111,7 @@ func NormalizeCanonical(mime, checksum string) (string, string) {
 // ValidateCreate checks the upload declaration. entityType and entityID are
 // validated strictly because they become path segments of the object key.
 func ValidateCreate(limits Limits, entityType, entityID, filename, mime string, size int64, checksum string) error {
-	if entityType != EntityTypeVendor {
+	if !ValidEntity(entityType) {
 		return ErrEntityInvalid
 	}
 	if !idPattern.MatchString(entityID) {

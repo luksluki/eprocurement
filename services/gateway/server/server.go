@@ -24,7 +24,7 @@ import (
 type Option func(*gatewayOptions)
 
 // ProcurementClient is the full procurement surface the gateway proxies: the
-// vendor API, the requisition create/edit/submit/list API, and the approval
+// vendor API, the requisition create/edit/submit/read API, and the approval
 // decide/rules API. The generated gRPC client satisfies it; tests substitute
 // a fake.
 type ProcurementClient interface {
@@ -33,6 +33,7 @@ type ProcurementClient interface {
 	UpdateRequisition(ctx context.Context, in *procurementv1.UpdateRequisitionRequest, opts ...grpc.CallOption) (*procurementv1.Requisition, error)
 	SubmitRequisition(ctx context.Context, in *procurementv1.SubmitRequisitionRequest, opts ...grpc.CallOption) (*procurementv1.Requisition, error)
 	ListRequisitions(ctx context.Context, in *procurementv1.ListRequisitionsRequest, opts ...grpc.CallOption) (*procurementv1.ListRequisitionsResponse, error)
+	GetRequisition(ctx context.Context, in *procurementv1.GetRequisitionRequest, opts ...grpc.CallOption) (*procurementv1.Requisition, error)
 	DecideApproval(ctx context.Context, in *procurementv1.DecideApprovalRequest, opts ...grpc.CallOption) (*procurementv1.DecideApprovalResponse, error)
 	GetApprovalRules(ctx context.Context, in *procurementv1.GetApprovalRulesRequest, opts ...grpc.CallOption) (*procurementv1.ApprovalRulesResponse, error)
 	ReplaceApprovalRules(ctx context.Context, in *procurementv1.ReplaceApprovalRulesRequest, opts ...grpc.CallOption) (*procurementv1.ApprovalRulesResponse, error)
@@ -105,7 +106,7 @@ func New(log *slog.Logger, verifier *token.Verifier, opts ...Option) *fiber.App 
 	}
 	if o.procurement != nil {
 		registerVendorRoutes(app, verifier, o.procurement, o.documents)
-		registerRequisitionRoutes(app, verifier, o.procurement)
+		registerRequisitionRoutes(app, verifier, o.procurement, o.documents)
 		registerApprovalRoutes(app, verifier, o.procurement)
 	}
 

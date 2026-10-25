@@ -12,17 +12,52 @@ import (
 )
 
 // registerRequisitionRoutes wires /api/v1/requisitions: Bearer auth, RBAC
-// (writes: requisition:write — requester/admin at both layers; list:
+// (writes: requisition:write — requester/admin at both layers; reads:
 // requisition:read — everyone in the tenant), and the verified claims
 // propagated to procurement as gRPC metadata. The requester-ownership rule
-// on edit/submit is enforced by procurement (docs/rbac.md).
-func registerRequisitionRoutes(app *fiber.App, verifier *token.Verifier, client ProcurementClient) {
+// on edit/submit is enforced by procurement (docs/rbac.md); declare on
+// attachments checks it at the edge (see attachments.go). When documents is
+// present, GET /:id embeds attachment metadata and the attachment routes
+// are registered.
+func registerRequisitionRoutes(app *fiber.App, verifier *token.Verifier, client ProcurementClient, documents DocumentsClient) {
 	reqs := app.Group("/api/v1/requisitions", bearerAuth(verifier))
 
 	reqs.Get("/", RequirePermission(rbac.RequisitionRead), listRequisitions(client))
 	reqs.Post("/", RequirePermission(rbac.RequisitionWrite), createRequisition(client))
+	reqs.Get("/:id", RequirePermission(rbac.RequisitionRead), getRequisition(client, documents))
 	reqs.Put("/:id", RequirePermission(rbac.RequisitionWrite), updateRequisition(client))
 	reqs.Post("/:id/submit", RequirePermission(rbac.RequisitionWrite), submitRequisition(client))
+	if documents != nil {
+		registerRequisitionAttachmentRoutes(reqs, verifier, client, documents)
+	}
+}
+
+// getRequisition serves GET /api/v1/requisitions/:id — the detail read
+// behind the wizard's draft restore (#33). Requisition bodies (items,
+// approval steps) come from procurement; when documents is wired, attachment
+// metadata is embedded (parity with the vendor detail) so a reload restores
+// the attachment list without a second round trip. A documents failure
+// fails the whole read rather than silently dropping attachments.
+func getRequisition(client ProcurementClient, documents DocumentsClient) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		claims, ok := claimsOf(c)
+		if !ok {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "missing bearer token"})
+		}
+		r, err := client.GetRequisition(forwardContext(c, claims), &procurementv1.GetRequisitionRequest{Id: c.Params("id")})
+		if err != nil {
+			return requisitionError(c, err)
+		}
+		out := requisitionJSON(r)
+		if documents != nil {
+			attachments, err := listEntityAttachments(forwardContext(c, claims), entityRequisition, r.GetId(), documents)
+			if err != nil {
+				return attachmentError(c, err)
+			}
+			out["attachments"] = attachments
+		}
+		return c.JSON(out)
+	}
 }
 
 // listRequisitions serves GET /api/v1/requisitions: query params q (number
