@@ -101,8 +101,8 @@ func row(id, tenantID, eventType string) outbox.PendingEvent {
 	}
 }
 
-// Envelope is assembled 1:1 from the row columns with exactly the §14.5
-// field set and names.
+// Envelope is assembled 1:1 from the row columns: the §14.5 field set plus
+// entity_type/entity_id (required by consumers, see #47).
 func TestEnvelopeFromRow(t *testing.T) {
 	env := EnvelopeFromRow(row("ev-1", "t-1", "pr.submitted"))
 	body, err := json.Marshal(env)
@@ -110,6 +110,7 @@ func TestEnvelopeFromRow(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	want := `{"event_id":"ev-1","tenant_id":"t-1","type":"pr.submitted","version":1,` +
+		`"entity_type":"requisition","entity_id":"eeeeeeee-0000-0000-0000-0000000000cc",` +
 		`"occurred_at":"2026-10-25T08:00:00Z","actor_id":"","trace_id":"trace-45",` +
 		`"payload":{"number":"PR-000001"}}`
 	if string(body) != want {
