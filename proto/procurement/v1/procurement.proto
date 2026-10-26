@@ -48,6 +48,12 @@ service Procurement {
   // of matching rows across all pages. Rows are header-only: items and
   // approval_steps are always empty here — the detail reads own them.
   rpc ListRequisitions(ListRequisitionsRequest) returns (ListRequisitionsResponse);
+  // GetRequisition returns one requisition of the caller's tenant — the
+  // detail read that owns the items and approval steps the list rows never
+  // carry. Other tenants' requisitions are indistinguishable from missing
+  // ones. Read is tenant-wide (requisition:read); ownership applies to edits
+  // and submit only.
+  rpc GetRequisition(GetRequisitionRequest) returns (Requisition);
   // DecideApproval applies one approve/reject decision to an approval step.
   // Only the current step (the smallest pending step_no of a submitted
   // requisition) may be decided; the decider must hold the step's
@@ -235,6 +241,10 @@ message ListRequisitionsResponse {
   int32 total = 2;      // matching rows across all pages
   int32 page = 3;       // normalized values actually applied
   int32 page_size = 4;
+}
+
+message GetRequisitionRequest {
+  string id = 1;
 }
 
 message DecideApprovalRequest {

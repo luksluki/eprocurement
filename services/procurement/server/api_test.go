@@ -661,6 +661,99 @@ func TestRequisitionGRPCList(t *testing.T) {
 	}
 }
 
+// GetRequisition through the full gRPC wiring (#33): the detail read owns the
+// bodies the list never carries (items, approval steps), read is tenant-wide
+// (another same-tenant requester may read), cross-tenant is NotFound, and the
+// method is inside the RBAC map — a metadata-less call is rejected by the
+// interceptor, proving the re-check runs (methods absent from the map would
+// pass through; see internal/platform/rbac/grpc.go).
+func TestRequisitionGRPCGet(t *testing.T) {
+	client, db, cleanup := startProcurement(t)
+	defer cleanup()
+	grpcCleanupRequisition(t, db)
+	t.Cleanup(func() { grpcCleanupRequisition(t, db) })
+
+	draft, err := client.CreateRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.CreateRequisitionRequest{Currency: "IDR", Items: testItems()})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Another same-tenant requester reads the draft (requisition:read is
+	// tenant-wide; ownership governs edit/submit only).
+	got, err := client.GetRequisition(callerCtxAs(gUserB, gTenantA, rbac.RoleRequester),
+		&procurementv1.GetRequisitionRequest{Id: draft.GetId()})
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.GetId() != draft.GetId() || got.GetNumber() != draft.GetNumber() ||
+		got.GetCurrency() != "IDR" || got.GetStatus() != "draft" ||
+		len(got.GetItems()) != len(testItems()) || got.GetTotalCents() != 15450000 {
+		t.Fatalf("detail = %+v", got)
+	}
+	// Items ride in storage order (created_at ties break on the random uuid,
+	// so the order of one insert is not deterministic) — assert the set.
+	byDesc := map[string]*procurementv1.RequisitionItem{}
+	for _, it := range got.GetItems() {
+		byDesc[it.GetDescription()] = it
+	}
+	if len(byDesc) != 2 || byDesc["Laptop"] == nil || byDesc["Mouse"] == nil ||
+		byDesc["Laptop"].GetQty() != 2 || byDesc["Laptop"].GetUnitPriceCents() != 7500000 {
+		t.Fatalf("items not loaded: %+v", got.GetItems())
+	}
+	// A draft carries no materialized steps (nil on the wire).
+	if len(got.GetApprovalSteps()) != 0 {
+		t.Fatalf("draft steps = %+v", got.GetApprovalSteps())
+	}
+
+	// A submitted requisition reads back with its steps (the detail read owns
+	// them; list rows never do).
+	if _, err := client.ReplaceApprovalRules(callerCtx(gTenantA, rbac.RoleAdmin),
+		&procurementv1.ReplaceApprovalRulesRequest{Rules: testRules()[:1]}); err != nil {
+		t.Fatalf("configure rules: %v", err)
+	}
+	submitted, err := client.SubmitRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.SubmitRequisitionRequest{Id: draft.GetId()})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	got, err = client.GetRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.GetRequisitionRequest{Id: draft.GetId()})
+	if err != nil || got.GetStatus() != "submitted" {
+		t.Fatalf("get submitted = (%+v, %v)", got, err)
+	}
+	if len(got.GetApprovalSteps()) != len(submitted.GetApprovalSteps()) ||
+		got.GetApprovalSteps()[0].GetId() != submitted.GetApprovalSteps()[0].GetId() {
+		t.Fatalf("steps not loaded: %+v", got.GetApprovalSteps())
+	}
+
+	// Cross-tenant read is indistinguishable from missing.
+	if _, err := client.GetRequisition(callerCtx(gTenantB, rbac.RoleViewer),
+		&procurementv1.GetRequisitionRequest{Id: draft.GetId()}); status.Code(err) != codes.NotFound ||
+		status.Convert(err).Message() != "requisition_not_found" {
+		t.Fatalf("cross-tenant get: (%v, %q), want NotFound requisition_not_found", status.Code(err), status.Convert(err).Message())
+	}
+
+	// Non-UUID id fails fast; metadata-less call is rejected by the
+	// interceptor's re-check (the method must stay in methodPermissions).
+	if _, err := client.GetRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.GetRequisitionRequest{Id: "not-a-uuid"}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("bad id: code = %v, want InvalidArgument", status.Code(err))
+	}
+	if _, err := client.GetRequisition(context.Background(),
+		&procurementv1.GetRequisitionRequest{Id: draft.GetId()}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("anonymous: code = %v, want Unauthenticated", status.Code(err))
+	}
+	// Tenant metadata but no roles: the interceptor's map entry fires before
+	// the handler (a pass-through method would fail later in authTenant).
+	noRoles := metadata.NewOutgoingContext(context.Background(),
+		metadata.Pairs(rbac.MDTenantID, gTenantA, rbac.MDUserID, gUser))
+	_, err = client.GetRequisition(noRoles, &procurementv1.GetRequisitionRequest{Id: draft.GetId()})
+	if status.Code(err) != codes.Unauthenticated || !strings.Contains(status.Convert(err).Message(), "no caller roles") {
+		t.Fatalf("no roles: (%v, %q), want the interceptor's Unauthenticated", status.Code(err), status.Convert(err).Message())
+	}
+}
+
 // testRules is the two-step IDR chain (approver@5M then finance@10M) plus a
 // USD rule that must never match an IDR requisition.
 func testRules() []*procurementv1.ApprovalRule {

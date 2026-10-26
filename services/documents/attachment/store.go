@@ -108,7 +108,7 @@ func (s *Store) Get(ctx context.Context, tenantID, id string) (Attachment, error
 // List returns the attachments of one owner, oldest first, pending and
 // ready alike.
 func (s *Store) List(ctx context.Context, tenantID, entityType, entityID string) ([]Attachment, error) {
-	if entityType != EntityTypeVendor || !ValidID(entityID) {
+	if !ValidEntity(entityType) || !ValidID(entityID) {
 		return nil, ErrEntityInvalid
 	}
 	cursor, err := s.coll.Find(ctx, bson.M{

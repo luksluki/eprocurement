@@ -370,6 +370,27 @@ func (a *api) ListRequisitions(ctx context.Context, req *procurementv1.ListRequi
 	return out, nil
 }
 
+// GetRequisition serves the detail read (requisition:read, tenant-wide per
+// docs/rbac.md — no ownership check, unlike edit/submit): header plus items
+// and the materialized approval steps, the bodies the list rows never carry.
+// The wizard's draft restore (#33) reads drafts through it; other tenants'
+// requisitions are indistinguishable from missing.
+func (a *api) GetRequisition(ctx context.Context, req *procurementv1.GetRequisitionRequest) (*procurementv1.Requisition, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	r, err := a.requisitions.Get(ctx, auth.TenantID, req.GetId())
+	if err != nil {
+		return nil, mapRequisitionError(err)
+	}
+	steps, err := a.approvals.ListSteps(ctx, auth.TenantID, r.ID)
+	if err != nil {
+		return nil, mapApprovalError(err)
+	}
+	return requisitionPB(r, steps), nil
+}
+
 // DecideApproval applies one approve/reject decision to the current approval
 // step (approval:decide at both layers). Authorization beyond the
 // permission: the decider must not be the requester (self-approval is

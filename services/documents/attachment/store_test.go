@@ -97,8 +97,24 @@ func TestStoreList(t *testing.T) {
 	}
 
 	// Unknown entity kind is rejected before any query.
-	if _, err := store.List(t.Context(), "t-a", "requisition", "v-9"); err != ErrEntityInvalid {
+	if _, err := store.List(t.Context(), "t-a", "invoice", "v-9"); err != ErrEntityInvalid {
 		t.Fatalf("List entity error = %v, want ErrEntityInvalid", err)
+	}
+
+	// Requisition is an accepted owner kind since #33: its listing is
+	// isolated from the vendor listing above (entity_type scoping).
+	reqAtt := newAttachment("dddddddd-0000-0000-0000-000000000004", "t-a", "v-9", StatusReady, now)
+	reqAtt.EntityType = EntityTypeRequisition
+	if err := store.Insert(t.Context(), reqAtt); err != nil {
+		t.Fatalf("Insert requisition-owned: %v", err)
+	}
+	list, err = store.List(t.Context(), "t-a", EntityTypeVendor, "v-9")
+	if err != nil || len(list) != 2 {
+		t.Fatalf("vendor listing after requisition insert = %+v, %v", list, err)
+	}
+	reqList, err := store.List(t.Context(), "t-a", EntityTypeRequisition, "v-9")
+	if err != nil || len(reqList) != 1 || reqList[0].EntityType != EntityTypeRequisition {
+		t.Fatalf("requisition listing = %+v, %v", reqList, err)
 	}
 }
 

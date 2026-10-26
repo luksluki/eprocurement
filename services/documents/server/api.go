@@ -23,10 +23,53 @@ import (
 // presignTTL bounds both upload and download URL validity.
 const presignTTL = 15 * time.Minute
 
+// entityPermissions maps an attachment owner kind to the permissions its
+// attachments require (#33: vendors and requisitions live under different
+// areas of the rbac matrix). The attachment gRPC methods are absent from the
+// interceptor's methodPermissions map on purpose — the interceptor cannot
+// know the entity type before the call runs — so each handler re-checks the
+// per-entity permission here, as soon as the entity type is known (for
+// CreateUpload/ListAttachments from the request, for CompleteUpload/
+// GetDownloadUrl from the stored attachment). This is the same
+// defense-in-depth depth the interceptor provides for single-entity methods.
+type entityPerm struct{ read, write string }
+
+var entityPermissions = map[string]entityPerm{
+	attachment.EntityTypeVendor:      {rbac.VendorRead, rbac.VendorWrite},
+	attachment.EntityTypeRequisition: {rbac.RequisitionRead, rbac.RequisitionWrite},
+}
+
+// requireEntityWrite enforces the entity's write permission (declare,
+// complete) against the caller's roles; requireEntityRead the read side
+// (list, download). An unknown entity type is the domain's
+// attachment_entity_invalid (InvalidArgument), never a silent pass.
+func requireEntityWrite(auth *rbac.AuthContext, entityType string) error {
+	perm, known := entityPermissions[entityType]
+	if !known {
+		return status.Error(codes.InvalidArgument, attachment.ErrEntityInvalid.Error())
+	}
+	if !rbac.Check(auth.Roles, perm.write) {
+		return status.Errorf(codes.PermissionDenied, "permission_denied: requires %s", perm.write)
+	}
+	return nil
+}
+
+func requireEntityRead(auth *rbac.AuthContext, entityType string) error {
+	perm, known := entityPermissions[entityType]
+	if !known {
+		return status.Error(codes.InvalidArgument, attachment.ErrEntityInvalid.Error())
+	}
+	if !rbac.Check(auth.Roles, perm.read) {
+		return status.Errorf(codes.PermissionDenied, "permission_denied: requires %s", perm.read)
+	}
+	return nil
+}
+
 // api adapts the attachment and history domains to the documents.v1 gRPC
 // contract. Every method reads the caller identity the gateway propagated
-// (tenant scoping, audit ids); the RBAC interceptor has already re-checked
-// the permission.
+// (tenant scoping, audit ids); attachment methods re-check their per-entity
+// permission in-handler (entityPermissions) since the interceptor map cannot
+// express it.
 type api struct {
 	documentsv1.UnimplementedDocumentsServer
 	store   *attachment.Store
@@ -50,6 +93,11 @@ func authTenant(ctx context.Context) (*rbac.AuthContext, error) {
 func (a *api) CreateUpload(ctx context.Context, req *documentsv1.CreateUploadRequest) (*documentsv1.CreateUploadResponse, error) {
 	auth, err := authTenant(ctx)
 	if err != nil {
+		return nil, err
+	}
+	// Per-entity permission re-check (the interceptor map cannot express it):
+	// the entity type is right here in the request.
+	if err := requireEntityWrite(auth, req.GetEntityType()); err != nil {
 		return nil, err
 	}
 	filename := strings.TrimSpace(req.GetFilename())
@@ -99,6 +147,9 @@ func (a *api) CompleteUpload(ctx context.Context, req *documentsv1.CompleteUploa
 	if err != nil {
 		return nil, mapAttachmentError(err)
 	}
+	if err := requireEntityWrite(auth, att.EntityType); err != nil {
+		return nil, err
+	}
 	if att.Status == attachment.StatusReady {
 		return attachmentPB(att), nil // idempotent re-complete
 	}
@@ -141,6 +192,9 @@ func (a *api) ListAttachments(ctx context.Context, req *documentsv1.ListAttachme
 	if err != nil {
 		return nil, err
 	}
+	if err := requireEntityRead(auth, req.GetEntityType()); err != nil {
+		return nil, err
+	}
 	list, err := a.store.List(ctx, auth.TenantID, req.GetEntityType(), req.GetEntityId())
 	if err != nil {
 		return nil, mapAttachmentError(err)
@@ -160,6 +214,9 @@ func (a *api) GetDownloadUrl(ctx context.Context, req *documentsv1.GetDownloadUr
 	att, err := a.store.Get(ctx, auth.TenantID, req.GetAttachmentId())
 	if err != nil {
 		return nil, mapAttachmentError(err)
+	}
+	if err := requireEntityRead(auth, att.EntityType); err != nil {
+		return nil, err
 	}
 	if att.Status != attachment.StatusReady {
 		return nil, status.Error(codes.FailedPrecondition, attachment.ErrNotReady.Error())
