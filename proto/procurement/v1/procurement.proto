@@ -80,6 +80,28 @@ service Procurement {
   // outbox event commits atomically with the PO. The issue transition,
   // issued_at, and po.issued belong to the lifecycle API (#36).
   rpc CreatePurchaseOrder(CreatePurchaseOrderRequest) returns (CreatePurchaseOrderResponse);
+  // IssuePurchaseOrder moves a draft PO of the caller's tenant to issued and
+  // stamps issued_at (FR-06) — the PO leaves the buyer and the
+  // acknowledgement SLA clock starts. Anything but draft is rejected
+  // (po_illegal_transition); exactly one po.issued outbox event commits with
+  // the transition.
+  rpc IssuePurchaseOrder(IssuePurchaseOrderRequest) returns (PurchaseOrder);
+  // AcknowledgePurchaseOrder moves an issued PO to acknowledged — the
+  // vendor's confirmation (po.acknowledged). Anything but issued is
+  // rejected; exactly one po.acknowledged outbox event commits with the
+  // transition.
+  rpc AcknowledgePurchaseOrder(AcknowledgePurchaseOrderRequest) returns (PurchaseOrder);
+  // CancelPurchaseOrder moves a draft, issued, or acknowledged PO to
+  // cancelled — but only while nothing has been received (the total
+  // qty_received over all lines is 0); receipts pin the PO and the only exit
+  // is close (po_has_receipts). Any other source status is
+  // po_illegal_transition; exactly one po.cancelled outbox event commits
+  // with the transition.
+  rpc CancelPurchaseOrder(CancelPurchaseOrderRequest) returns (PurchaseOrder);
+  // ClosePurchaseOrder moves a partially_received (short-close) or received
+  // PO to closed. Any other source status is po_illegal_transition; exactly
+  // one po.closed outbox event commits with the transition.
+  rpc ClosePurchaseOrder(ClosePurchaseOrderRequest) returns (PurchaseOrder);
 }
 
 message Vendor {
@@ -299,4 +321,26 @@ message CreatePurchaseOrderRequest {
 message CreatePurchaseOrderResponse {
   PurchaseOrder purchase_order = 1;
   bool created = 2;
+}
+
+// IssuePurchaseOrderRequest names the draft PO to issue (FR-06).
+message IssuePurchaseOrderRequest {
+  string id = 1;
+}
+
+// AcknowledgePurchaseOrderRequest names the issued PO to acknowledge.
+message AcknowledgePurchaseOrderRequest {
+  string id = 1;
+}
+
+// CancelPurchaseOrderRequest names the PO to cancel (draft, issued, or
+// acknowledged — and only while nothing has been received).
+message CancelPurchaseOrderRequest {
+  string id = 1;
+}
+
+// ClosePurchaseOrderRequest names the PO to close (partially_received or
+// received).
+message ClosePurchaseOrderRequest {
+  string id = 1;
 }

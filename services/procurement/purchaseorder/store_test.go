@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -238,6 +239,325 @@ func poNum(number string) int {
 		return -1
 	}
 	return v
+}
+
+// poStatus reads the stored status under RLS bypass.
+func poStatus(t *testing.T, db *pgxpool.Pool, id string) string {
+	t.Helper()
+	var status string
+	if err := tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		return tx.QueryRow(context.Background(),
+			`SELECT status FROM procurement.purchase_orders WHERE id = $1`, id).Scan(&status)
+	}); err != nil {
+		t.Fatalf("read po status: %v", err)
+	}
+	return status
+}
+
+// forcePOStatus flips a PO straight to a post-acknowledgement status and
+// bumps one line's qty_received — the #37 stand-in (goods receipts advance
+// qty_received and drive the receipt edges; #36 only needs the state to
+// exist to test close/cancel). WithReceipts=false leaves qty_received at 0,
+// which cannot happen past acknowledgement in production but isolates the
+// edge guard from the receipt guard here.
+func forcePOStatus(t *testing.T, db *pgxpool.Pool, id, status string, withReceipts bool) {
+	t.Helper()
+	if err := tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		ctx := context.Background()
+		if _, err := tx.Exec(ctx,
+			`UPDATE procurement.purchase_orders SET status = $2 WHERE id = $1`, id, status); err != nil {
+			return err
+		}
+		if withReceipts {
+			_, err := tx.Exec(ctx, `
+				UPDATE procurement.po_items SET qty_received = 1
+				WHERE po_id = $1 AND id = (
+					SELECT id FROM procurement.po_items WHERE po_id = $1
+					ORDER BY created_at, id LIMIT 1)`, id)
+			return err
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("force po %s: %v", status, err)
+	}
+}
+
+// poLifecycleRows loads the outbox rows of one lifecycle event type for a PO
+// — transitions must write exactly one each, failures none.
+func poLifecycleRows(t *testing.T, db *pgxpool.Pool, poID, eventType string) []map[string]any {
+	t.Helper()
+	rows := []map[string]any{}
+	if err := tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		r, err := tx.Query(context.Background(), `
+			SELECT entity_type, entity_id::text, version, payload, actor_id::text, trace_id
+			FROM procurement.outbox
+			WHERE entity_id = $1 AND event_type = $2`, poID, eventType)
+		if err != nil {
+			return err
+		}
+		defer r.Close()
+		for r.Next() {
+			var entityType, entityID, actorID, traceID string
+			var version int32
+			var payload []byte
+			if err := r.Scan(&entityType, &entityID, &version, &payload, &actorID, &traceID); err != nil {
+				return err
+			}
+			var p map[string]any
+			if err := json.Unmarshal(payload, &p); err != nil {
+				return err
+			}
+			rows = append(rows, map[string]any{
+				"entity_type": entityType, "entity_id": entityID, "version": version,
+				"payload": p, "actor_id": actorID, "trace_id": traceID,
+			})
+		}
+		return r.Err()
+	}); err != nil {
+		t.Fatalf("load %s rows: %v", eventType, err)
+	}
+	return rows
+}
+
+// draftPO converts a fresh approved requisition into the draft PO every
+// lifecycle test starts from. The vendor code carries a process-unique
+// suffix so parallel drafts never collide on the tenant's unique code.
+var poVendorSeq int64
+
+func draftPO(t *testing.T, db *pgxpool.Pool, tenantID string) PurchaseOrder {
+	t.Helper()
+	req := sqlApproved(t, db, tenantID)
+	seq := atomic.AddInt64(&poVendorSeq, 1)
+	v := poVendor(t, db, tenantID, fmt.Sprintf("L%d", seq))
+	po, _, err := NewStore(db).CreateFromRequisition(context.Background(), tenantID, req.ID, v.ID, poBuyer)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	return po
+}
+
+// AC: each legal store transition moves the status, stamps issued_at on
+// issue, and commits exactly one matching outbox row with the pinned
+// transition payload — issue → acknowledge → close (short-close from
+// partially_received, normal close from received).
+func TestStoreLifecycleHappyPath(t *testing.T) {
+	db := openTestDB(t)
+	s := NewStore(db)
+	cleanupPO(t, db)
+	t.Cleanup(func() { cleanupPO(t, db) })
+	ctx := context.Background()
+
+	// Short-close arm: acknowledge, partial receipt, close.
+	short := draftPO(t, db, poTenantA)
+	issued, err := s.Issue(ctx, poTenantA, short.ID, poBuyer)
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	if issued.Status != StatusIssued || issued.IssuedAt == nil || issued.IssuedAt.IsZero() {
+		t.Fatalf("issue result = %s/%v, want issued/<stamped>", issued.Status, issued.IssuedAt)
+	}
+	rows := poLifecycleRows(t, db, short.ID, OutboxIssued)
+	if len(rows) != 1 {
+		t.Fatalf("po.issued rows = %d, want 1", len(rows))
+	}
+	row := rows[0]
+	if row["entity_type"] != "purchase_order" || row["entity_id"] != short.ID ||
+		row["version"] != int32(1) || row["actor_id"] != poBuyer {
+		t.Fatalf("po.issued row = %+v", row)
+	}
+	payload := row["payload"].(map[string]any)
+	want := map[string]any{
+		"number": short.Number, "requisition_id": short.RequisitionID,
+		"vendor_id": short.VendorID, "status": StatusIssued,
+		"total_cents": float64(short.TotalCents), "currency": "IDR", "performed_by": poBuyer,
+	}
+	for k, v := range want {
+		if payload[k] != v {
+			t.Errorf("po.issued payload[%s] = %v, want %v", k, payload[k], v)
+		}
+	}
+	if len(payload) != len(want) {
+		t.Errorf("po.issued payload has extra fields: %+v", payload)
+	}
+
+	acknowledged, err := s.Acknowledge(ctx, poTenantA, short.ID, poBuyer)
+	if err != nil || acknowledged.Status != StatusAcknowledged {
+		t.Fatalf("acknowledge = (%s, %v), want acknowledged", acknowledged.Status, err)
+	}
+	if got := len(poLifecycleRows(t, db, short.ID, OutboxAcknowledged)); got != 1 {
+		t.Fatalf("po.acknowledged rows = %d, want 1", got)
+	}
+
+	forcePOStatus(t, db, short.ID, StatusPartiallyReceived, true)
+	closed, err := s.Close(ctx, poTenantA, short.ID, poBuyer)
+	if err != nil || closed.Status != StatusClosed {
+		t.Fatalf("short-close = (%s, %v), want closed", closed.Status, err)
+	}
+	if got := len(poLifecycleRows(t, db, short.ID, OutboxClosed)); got != 1 {
+		t.Fatalf("po.closed rows = %d, want 1", got)
+	}
+	if got := poStatus(t, db, short.ID); got != StatusClosed {
+		t.Fatalf("stored status = %s, want closed", got)
+	}
+
+	// Normal-close arm: acknowledge, full receipt, close.
+	full := draftPO(t, db, poTenantA)
+	if _, err := s.Issue(ctx, poTenantA, full.ID, poBuyer); err != nil {
+		t.Fatalf("issue full: %v", err)
+	}
+	if _, err := s.Acknowledge(ctx, poTenantA, full.ID, poBuyer); err != nil {
+		t.Fatalf("acknowledge full: %v", err)
+	}
+	forcePOStatus(t, db, full.ID, StatusReceived, true)
+	if _, err := s.Close(ctx, poTenantA, full.ID, poBuyer); err != nil {
+		t.Fatalf("close full: %v", err)
+	}
+	if got := poStatus(t, db, full.ID); got != StatusClosed {
+		t.Fatalf("stored status = %s, want closed", got)
+	}
+
+	// Cancel arm: draft → cancelled commits po.cancelled.
+	direct := draftPO(t, db, poTenantA)
+	cancelled, err := s.Cancel(ctx, poTenantA, direct.ID, poBuyer)
+	if err != nil || cancelled.Status != StatusCancelled {
+		t.Fatalf("cancel = (%s, %v), want cancelled", cancelled.Status, err)
+	}
+	if got := len(poLifecycleRows(t, db, direct.ID, OutboxCancelled)); got != 1 {
+		t.Fatalf("po.cancelled rows = %d, want 1", got)
+	}
+	// issued → cancelled as well.
+	mid := draftPO(t, db, poTenantA)
+	if _, err := s.Issue(ctx, poTenantA, mid.ID, poBuyer); err != nil {
+		t.Fatalf("issue mid: %v", err)
+	}
+	if _, err := s.Cancel(ctx, poTenantA, mid.ID, poBuyer); err != nil {
+		t.Fatalf("cancel mid: %v", err)
+	}
+	if got := len(poLifecycleRows(t, db, mid.ID, OutboxCancelled)); got != 1 {
+		t.Fatalf("po.cancelled rows (from issued) = %d, want 1", got)
+	}
+}
+
+// AC (guards + rollback): an illegal transition fails with the sentinel,
+// leaves the stored status untouched, and writes no outbox row — the whole
+// transaction rolls back. Cancel after a receipt is ErrHasReceipts, also with
+// no write. Cross-tenant ids are indistinguishable from missing; bad ids
+// fail fast.
+func TestStoreLifecycleGuards(t *testing.T) {
+	db := openTestDB(t)
+	s := NewStore(db)
+	cleanupPO(t, db)
+	t.Cleanup(func() { cleanupPO(t, db) })
+	ctx := context.Background()
+
+	// Each case gets a fresh draft PO so the cases stay order-independent
+	// (the cancel case consumes its PO's one legal cancel).
+	cases := []struct {
+		name    string
+		call    func(id string) error
+		want    string // stored status after the case
+		wantRow string // event type whose rows must stay 0 (the failing write)
+	}{
+		{"acknowledge draft", func(id string) error {
+			_, err := s.Acknowledge(ctx, poTenantA, id, poBuyer)
+			return err
+		}, StatusDraft, OutboxAcknowledged},
+		{"close draft", func(id string) error {
+			_, err := s.Close(ctx, poTenantA, id, poBuyer)
+			return err
+		}, StatusDraft, OutboxClosed},
+		{"cancel then reissue", func(id string) error { // cancelled is terminal
+			if _, err := s.Cancel(ctx, poTenantA, id, poBuyer); err != nil {
+				t.Fatalf("cancel: %v", err)
+			}
+			_, err := s.Issue(ctx, poTenantA, id, poBuyer)
+			return err
+		}, StatusCancelled, OutboxIssued},
+	}
+	for _, tc := range cases {
+		po := draftPO(t, db, poTenantA)
+		if err := tc.call(po.ID); !errors.Is(err, ErrIllegalTransition) {
+			t.Fatalf("%s: err = %v, want ErrIllegalTransition", tc.name, err)
+		}
+		if got := poStatus(t, db, po.ID); got != tc.want {
+			t.Fatalf("%s: stored status = %s, want %s", tc.name, got, tc.want)
+		}
+		if got := len(poLifecycleRows(t, db, po.ID, tc.wantRow)); got != 0 {
+			t.Fatalf("%s: %s rows = %d, want 0 (full rollback)", tc.name, tc.wantRow, got)
+		}
+	}
+
+	// Cancel after a receipt: the PO is pinned — po_has_receipts, no write.
+	pinned := draftPO(t, db, poTenantA)
+	if _, err := s.Issue(ctx, poTenantA, pinned.ID, poBuyer); err != nil {
+		t.Fatalf("issue pinned: %v", err)
+	}
+	if _, err := s.Acknowledge(ctx, poTenantA, pinned.ID, poBuyer); err != nil {
+		t.Fatalf("acknowledge pinned: %v", err)
+	}
+	forcePOStatus(t, db, pinned.ID, StatusAcknowledged, true)
+	if _, err := s.Cancel(ctx, poTenantA, pinned.ID, poBuyer); !errors.Is(err, ErrHasReceipts) {
+		t.Fatalf("cancel with receipts: err = %v, want ErrHasReceipts", err)
+	}
+	if got := poStatus(t, db, pinned.ID); got != StatusAcknowledged {
+		t.Fatalf("status after pinned cancel = %s, want acknowledged", got)
+	}
+	if got := len(poLifecycleRows(t, db, pinned.ID, OutboxCancelled)); got != 0 {
+		t.Fatalf("pinned cancel rows = %d, want 0", got)
+	}
+
+	// Multi-tenancy: tenant B cannot see tenant A's PO (RLS → 404); a
+	// non-UUID id fails fast.
+	if _, err := s.Issue(ctx, poTenantB, pinned.ID, poBuyer); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-tenant issue: err = %v, want ErrNotFound", err)
+	}
+	if _, err := s.Issue(ctx, poTenantA, "not-a-uuid", poBuyer); !errors.Is(err, ErrIDInvalid) {
+		t.Fatalf("bad id: err = %v, want ErrIDInvalid", err)
+	}
+}
+
+// AC (serialization): two concurrent issues of one draft PO serialize on the
+// row lock — exactly one wins, the loser gets ErrIllegalTransition, and
+// exactly one po.issued row commits.
+func TestStoreIssueConcurrency(t *testing.T) {
+	db := openTestDB(t)
+	s := NewStore(db)
+	cleanupPO(t, db)
+	t.Cleanup(func() { cleanupPO(t, db) })
+	ctx := context.Background()
+
+	po := draftPO(t, db, poTenantA)
+	const racers = 2
+	errs := make([]error, racers)
+	var wg sync.WaitGroup
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = s.Issue(ctx, poTenantA, po.ID, poBuyer)
+		}(i)
+	}
+	wg.Wait()
+	winners := 0
+	for i, err := range errs {
+		switch {
+		case err == nil:
+			winners++
+		case errors.Is(err, ErrIllegalTransition):
+			// the loser
+		default:
+			t.Fatalf("racer %d: err = %v, want success or ErrIllegalTransition", i, err)
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("winners = %d, want exactly 1", winners)
+	}
+	if got := poStatus(t, db, po.ID); got != StatusIssued {
+		t.Fatalf("stored status = %s, want issued", got)
+	}
+	if got := len(poLifecycleRows(t, db, po.ID, OutboxIssued)); got != 1 {
+		t.Fatalf("po.issued rows = %d, want 1", got)
+	}
 }
 
 // AC: converting an approved requisition creates a draft PO — lines copied

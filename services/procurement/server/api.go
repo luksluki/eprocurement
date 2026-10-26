@@ -465,10 +465,12 @@ func rulesPB(rules []approval.Rule) *procurementv1.ApprovalRulesResponse {
 	return out
 }
 
-// mapPurchaseOrderError maps purchase-order conversion errors to gRPC codes.
-// Same contract as the vendor/requisition mappers: sentinels carry their
-// machine code verbatim in the gRPC message. The requisition and vendor
-// gate sentinels ride along bare (the conversion crosses those domains).
+// mapPurchaseOrderError maps purchase-order domain and store errors to gRPC
+// codes. Same contract as the vendor/requisition mappers: sentinels carry
+// their machine code verbatim in the gRPC message. The requisition and vendor
+// gate sentinels ride along bare (the conversion crosses those domains); the
+// #36 lifecycle guards (illegal transition, receipts pin the PO) map to
+// Aborted, which the gateway renders as HTTP 409 (FR-06).
 func mapPurchaseOrderError(err error) error {
 	switch {
 	case errors.Is(err, purchaseorder.ErrVendorIDInvalid),
@@ -477,12 +479,17 @@ func mapPurchaseOrderError(err error) error {
 		errors.Is(err, purchaseorder.ErrDescriptionInvalid),
 		errors.Is(err, purchaseorder.ErrQtyInvalid),
 		errors.Is(err, purchaseorder.ErrUnitPriceInvalid),
+		errors.Is(err, purchaseorder.ErrIDInvalid),
 		errors.Is(err, requisition.ErrIDInvalid):
 		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, purchaseorder.ErrRequisitionNotApproved),
+		errors.Is(err, purchaseorder.ErrIllegalTransition),
+		errors.Is(err, purchaseorder.ErrHasReceipts),
 		errors.Is(err, requisition.ErrIllegalTransition):
 		return status.Error(codes.Aborted, err.Error())
-	case errors.Is(err, requisition.ErrNotFound), errors.Is(err, vendor.ErrNotFound):
+	case errors.Is(err, purchaseorder.ErrNotFound),
+		errors.Is(err, requisition.ErrNotFound),
+		errors.Is(err, vendor.ErrNotFound):
 		return status.Error(codes.NotFound, err.Error())
 	case errors.Is(err, vendor.ErrDeactivated):
 		return status.Error(codes.FailedPrecondition, err.Error())
@@ -531,6 +538,68 @@ func (a *api) CreatePurchaseOrder(ctx context.Context, req *procurementv1.Create
 		return nil, mapPurchaseOrderError(err)
 	}
 	return &procurementv1.CreatePurchaseOrderResponse{PurchaseOrder: purchaseOrderPB(po), Created: created}, nil
+}
+
+// IssuePurchaseOrder moves a draft PO of the caller's tenant to issued and
+// stamps issued_at (po:write — buyer/admin at both layers; FR-06). The
+// store locks the row, re-checks the edge, and commits exactly one po.issued
+// outbox event with the transition.
+func (a *api) IssuePurchaseOrder(ctx context.Context, req *procurementv1.IssuePurchaseOrderRequest) (*procurementv1.PurchaseOrder, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	po, err := a.purchaseOrders.Issue(ctx, auth.TenantID, strings.TrimSpace(req.GetId()), auth.UserID)
+	if err != nil {
+		return nil, mapPurchaseOrderError(err)
+	}
+	return purchaseOrderPB(po), nil
+}
+
+// AcknowledgePurchaseOrder moves an issued PO to acknowledged (po:write) —
+// the vendor confirmation; exactly one po.acknowledged outbox event commits
+// with the transition.
+func (a *api) AcknowledgePurchaseOrder(ctx context.Context, req *procurementv1.AcknowledgePurchaseOrderRequest) (*procurementv1.PurchaseOrder, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	po, err := a.purchaseOrders.Acknowledge(ctx, auth.TenantID, strings.TrimSpace(req.GetId()), auth.UserID)
+	if err != nil {
+		return nil, mapPurchaseOrderError(err)
+	}
+	return purchaseOrderPB(po), nil
+}
+
+// CancelPurchaseOrder moves a draft/issued/acknowledged PO to cancelled
+// (po:write) — only while nothing has been received; receipts pin the PO and
+// the only exit is close. Exactly one po.cancelled outbox event commits with
+// the transition.
+func (a *api) CancelPurchaseOrder(ctx context.Context, req *procurementv1.CancelPurchaseOrderRequest) (*procurementv1.PurchaseOrder, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	po, err := a.purchaseOrders.Cancel(ctx, auth.TenantID, strings.TrimSpace(req.GetId()), auth.UserID)
+	if err != nil {
+		return nil, mapPurchaseOrderError(err)
+	}
+	return purchaseOrderPB(po), nil
+}
+
+// ClosePurchaseOrder moves a partially_received (short-close) or received PO
+// to closed (po:write); exactly one po.closed outbox event commits with the
+// transition.
+func (a *api) ClosePurchaseOrder(ctx context.Context, req *procurementv1.ClosePurchaseOrderRequest) (*procurementv1.PurchaseOrder, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	po, err := a.purchaseOrders.Close(ctx, auth.TenantID, strings.TrimSpace(req.GetId()), auth.UserID)
+	if err != nil {
+		return nil, mapPurchaseOrderError(err)
+	}
+	return purchaseOrderPB(po), nil
 }
 
 func vendorPB(v vendor.Vendor) *procurementv1.Vendor {

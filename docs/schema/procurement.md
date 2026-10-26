@@ -268,7 +268,8 @@ pattern on `tenant_id`.
 The storage mirror of the `purchaseorder` domain package: the draft PO that
 conversion (#35) creates from an approved requisition. The lifecycle
 transitions out of `draft` (issue → acknowledged → … → closed/cancelled,
-FR-06) belong to #36 and only move `status` / `issued_at` from here.
+FR-06) landed with #36 and only move `status` / `issued_at` here — see the
+[PO lifecycle state machine](#po-lifecycle-state-machine-36) section.
 
 `procurement.purchase_orders`:
 
@@ -381,6 +382,74 @@ before the transaction opens), `po_currency_invalid`, `po_items_empty` → 400
 carries them through the shared gRPC→HTTP mapping (`Aborted` → 409,
 `FailedPrecondition` → 412).
 
+## PO lifecycle state machine (#36)
+
+Ten legal edges over the seven 0007 statuses (FR-06): the linear happy path
+`draft → issued → acknowledged → partially_received → received → closed`, a
+loose cancel (`draft`, `issued`, and `acknowledged` may all cancel, subject
+to the receipt guard), and a short-close (`partially_received → closed` —
+accepting the shortfall). `closed` and `cancelled` are terminal. Every other
+move — self-loops, skips, and anything out of a terminal status — is
+`po_illegal_transition` (HTTP 409) with **no** state change and **no** event.
+
+```
+draft ──issue──▶ issued ──acknowledge──▶ acknowledged ──receipt──▶ partially_received ──receipt──▶ received
+  │                 │                        │                        │                               │
+  └──── cancel ─────┴──────── cancel ────────┘                        └───────── short-close ──────────┤
+                                                                                (receipts pin the PO:         ▼
+                                                                                 no cancel past this point)  closed
+```
+
+- **Cancel guard (receipts)** — cancel is legal only from
+  draft/issued/acknowledged **and** while the total `qty_received` over all
+  lines is 0. Any receipt pins the PO: `po_has_receipts` (409), nothing
+  written; the only exit from partially_received/received is `close`. The
+  edge check wins over the receipt check — cancelling a received PO answers
+  `po_illegal_transition`, not `po_has_receipts`.
+- **Receipt edges are domain-owned since #36 but driven by #37** — goods
+  receipts advance `po_items.qty_received` and call
+  `MarkPartiallyReceived`/`MarkReceived` under the same row lock (the #28
+  `Close` precedent: the method exists and is tested before its driver).
+- **Issue stamps `issued_at`** (NULL while draft, set on draft → issued,
+  preserved afterwards) and starts the acknowledgement SLA clock (PRD §16:
+  reminders for POs awaiting acknowledgement > 3 days).
+
+**Store contract** (`purchaseorder.Store.Issue/Acknowledge/Cancel/Close`):
+one tenant transaction per transition with a pinned step order — load the PO
+(header + items) `FOR UPDATE` on the row lock (the serialization point every
+lifecycle transition shares; #37's receipts will take the same lock, so a
+concurrent issue/receipt pair yields exactly one winner), run the domain
+method (guards + one aggregate event), land a guarded
+`UPDATE … WHERE id = $1 AND status = '<from>'` (the from-status re-check is
+belt and braces — losing that race is `po_illegal_transition`), and append
+**exactly one** outbox row. An illegal transition or the receipt guard fails
+before the UPDATE, so the whole transaction rolls back: no status move, no
+outbox row.
+
+**Events.** One outbox row per legal transition (entity =
+`purchase_order`/the PO id, `actor_id` = caller, `trace_id` = propagated REST
+trace, version 1): `po.issued` and `po.acknowledged` are §14.6 catalog
+entries; `po.cancelled` and `po.closed` **extend the catalog** (two segments
+so the §14.5 `po.*` bindings deliver them — the same documented extension as
+#35's `po.created` and #31's `pr.step_approved`). Pinned payload shared by
+all four: `{number, requisition_id, vendor_id, status, total_cents,
+currency, performed_by}` (`status` = the new status; `performed_by` = the
+actor, self-contained the way `DecisionPayload.decided_by` is). The receipt
+transitions write no outbox rows until #37 defines their event shape. The
+aggregate also keeps an in-memory event log (`Events()`/`PullEvents()`, the
+requisition pattern) with aggregate-local names (`po_issued`, …) — creation
+still records none in memory (dev-note 035: `po.created` is the outbox row).
+
+**API** (all `po:write` — buyer/admin at gateway and interceptor): gRPC
+`IssuePurchaseOrder` / `AcknowledgePurchaseOrder` / `CancelPurchaseOrder` /
+`ClosePurchaseOrder`; REST `POST /api/v1/purchase-orders/{id}/issue` (PRD
+§15) plus `/acknowledge`, `/cancel`, `/close` — no request body, the path id
+names the PO, the response is **200 + the updated PO**. Error codes:
+`po_id_invalid` → 400 · `po_not_found` → 404 (also the cross-tenant answer,
+via RLS) · `po_illegal_transition`, `po_has_receipts` → 409 (FR-06's
+"invalid transitions rejected with 409", through `Aborted` in the shared
+gRPC→HTTP mapping).
+
 ## Requisition state machine (#28)
 
 Seven legal edges (loose cancel — maintainer decision on #28):
@@ -482,7 +551,8 @@ missing (404 `requisition_not_found`).
 - #29: requisition create/edit/submit API (done — store, number generation, idempotent submit, REST/gRPC wiring, gateway `Aborted` → 409). Read endpoints: **list done in #32** (see below); get/timeline are separate issues.
 - #30: approval rules + sequential engine + decide API (done — matrix materialization, 412 rollback, self/role enforcement, reject-skips, admin rule configuration, steps in-band).
 - #31: idempotent decide + outbox audit/notification events (done — `procurement.outbox` + `decision_idempotency` in 0006, decide replay/conflict contract, `pr.*` decide events with actor + trace, gateway `x-trace-id` propagation). **Re-sequenced with #45** by an agent decision: the outbox table + writer moved from #45's scope into #31 (see dev-note 031's provenance block); #45 keeps the publisher loop only.
-- #35: PO creation from an approved requisition (done — 0007 tables, draft PO with copied lines, per-tenant gap-free `PO-%06d` numbering, conversion replay contract, tx-scoped active-vendor gate `ForUseTx`, guarded `approved → closed`, one `po.created` outbox event). PO lifecycle (#36), goods receipts (#37), and the missing `pr.converted` requisition-side event are follow-ups.
+- #35: PO creation from an approved requisition (done — 0007 tables, draft PO with copied lines, per-tenant gap-free `PO-%06d` numbering, conversion replay contract, tx-scoped active-vendor gate `ForUseTx`, guarded `approved → closed`, one `po.created` outbox event). Goods receipts (#37) and the missing `pr.converted` requisition-side event are follow-ups.
+- #36: PO lifecycle state machine (done — ten legal edges over the seven statuses, receipt-guarded cancel, `issued_at` on issue, guarded tenant-scoped transitions serialized on the PO row lock, one outbox event per transition, gRPC + REST issue/acknowledge/cancel/close at `po:write`). Goods receipts (#37) drive the receipt edges.
 - Approvals read endpoints/queue #32-34, outbox publisher (#45 — poll/publish/retry/DLQ only; table and writer landed with #31) (M2–M3).
 - The timeline/event read path (#42/#43/#47, `GET /api/v1/events`) consumes the outbox's `entity_type`/`entity_id` columns; a tenant+entity index arrives with whichever issue first queries them.
 
