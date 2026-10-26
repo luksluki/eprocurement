@@ -205,10 +205,11 @@ items pattern — the policy derives tenancy from the parent requisition via
 ## Migration 0006 — `procurement.outbox` + `procurement.decision_idempotency` (#31)
 
 The persistent half of the transactional outbox (PRD §14.3, ADR-0001):
-state writes and their events commit atomically in one transaction; the
-publisher loop that drains the table to RabbitMQ (poll 2 s, batch 50,
-`published_at` marker, retries, DLQ) stays with #45. `outbox.AppendTx`
-(`services/procurement/outbox`) is the writer; Decide is its first caller.
+state writes and their events commit atomically in one transaction.
+`outbox.AppendTx` (`services/procurement/outbox`) is the writer; Decide
+(#31) and Submit (#45, `pr.submitted`) are its callers. The publisher loop
+that drains the table to RabbitMQ landed with #45 — see the publisher
+section below.
 
 `procurement.outbox`:
 
@@ -262,6 +263,95 @@ uniqueness scope is the tenant, and `approval_steps` deliberately carries no
 `tenant_id` (0005) — a unique key column there would let a cross-tenant
 23505 leak which keys exist in other tenants. **RLS**: the 0001 tenant
 pattern on `tenant_id`.
+
+### Outbox publisher (#45)
+
+The worker's publisher loop (`services/worker/publisher`) drains the table
+to RabbitMQ per PRD §16: poll every 2 s (batch 50 — env overrides
+`WORKER_POLL_INTERVAL`/`WORKER_BATCH_SIZE` exist for tests only), oldest
+first, publish, mark. The read/write side (`outbox.Pending` /
+`outbox.MarkPublished`, `services/procurement/outbox/pending.go`) lives with
+the table's owning service and is executed by the worker — a conscious
+cross-service import inside the single Go module.
+
+- **Cross-tenant read on purpose.** Pending and MarkPublished run through
+  the transaction-scoped `app.rls_bypass` arm because one batch drains every
+  tenant's rows. This is the deliberate, documented inverse of the
+  "every query is tenant-scoped" convention — writer-side RLS stays
+  enforced (AppendTx only runs inside `WithTenant`; a tenant-scoped read
+  still sees only its own rows, verified by test).
+- **Envelope.** The PRD §14.5 envelope `{event_id, tenant_id, type,
+  version, occurred_at, actor_id, trace_id, payload}` is assembled 1:1 from
+  the row columns — no payload parsing. It is published as JSON to the
+  durable topic exchange `procurement.events` with routing key = event
+  type, `delivery_mode` persistent, on a confirm-mode channel; the loop
+  waits for the broker confirm before marking `published_at`.
+- **At-least-once.** A crash between publish and mark republishes the row
+  next tick; consumers dedupe on `event_id` (§14.8). A publish failure
+  (broker down, confirm timeout) or a poll failure (database restarting,
+  migrations not yet applied on a fresh volume) is non-fatal: warn log with
+  the event's `trace_id`, next tick retries. The worker deliberately runs
+  no migrations — procurement stays the sole applier — so its `depends_on`
+  in compose is only postgres + rabbitmq healthy.
+- **RabbitMQ topology (#46).** Connecting declares the full §14.5 topology
+  (next section) — the exchanges, the three consumer queues with their DLX
+  argument and TTL retry ladders, and the DLQ — replacing #45's PROVISIONAL
+  bootstrap. The `procurement.dlx`/`procurement.dlq` declarations stayed
+  argument-identical, so redeclaring on a broker that carries the #45 pair
+  cannot raise PRECONDITION_FAILED.
+- **Observability (#54 follow-up).** What exists now is the structured
+  publish log (`event_id`, `tenant_id`, `event_type`, `trace_id` from the
+  row). OTel spans, trace propagation into AMQP headers, and the outbox
+  lag metric (§18) are deferred to #54, which introduces the observability
+  stack (compose.yaml's profile note); the repo has no OTel/Prometheus code
+  yet.
+
+**`pr.submitted` payload (#45, pinned public contract)** — written by the
+Submit transaction (`requisition/store.go` appendSubmittedTx): the same
+basket of consumers as the decide events reads it (timeline #43;
+notifications reads `requester_id` as the recipient). snake_case follows
+the DecisionPayload convention: `requisition_id`, `number`, `requester_id`,
+`currency`, `total_cents`, `submitted_by`, `submitted_at`. One row on a
+successful submit; zero on an idempotent replay or any rollback (missing
+approval rules, empty basket, illegal transition).
+
+**Numbering mismatch, flagged:** `approval/store.go`'s DecisionPayload
+comment and dev-note 031 call the notification consumer "the #45 worker";
+issue #45's own scope text covers the publisher only. The consumers remain
+future issues — the references are historical, kept as-is.
+
+### RabbitMQ topology (#46)
+
+Declared once, idempotently, on every publisher connect (boot and
+reconnect) by `services/worker/topology`; the #47 consumers reuse the same
+declaration. It replaces #45's PROVISIONAL DLX bootstrap — the
+`procurement.dlx`/`procurement.dlq` declarations are argument-identical to
+that bootstrap, so the handover cannot raise PRECONDITION_FAILED on a
+broker that already carries it.
+
+- **Exchanges.** `procurement.events` (topic, durable) — the publisher's
+  target, routing key = event type (§14.6); `procurement.dlx` (topic,
+  durable) — the dead-letter destination.
+- **Main queues** (durable, `x-dead-letter-exchange: procurement.dlx`):
+  `documents.history` bound `#` (the history projection takes the whole
+  catalog), `notifications` bound the actor-facing subset `pr.submitted`,
+  `pr.approved`, `pr.rejected`, `po.issued`, `po.acknowledged`,
+  `invoice.discrepancy`, and `exports` bound `export.requested`. This
+  binding table is the repo's routing convention; the notifications subset
+  is the one judgement call in it, documented in dev-note 046 and open to
+  maintainer override.
+- **Retry ladder.** `<queue>.retry.1/2/3` per main queue — durable,
+  `x-message-ttl` 5 s → 30 s → 5 min, empty `x-dead-letter-exchange` (the
+  default exchange) and `x-dead-letter-routing-key` = the main queue's
+  name: a parked message returns to its own queue only, so one queue's
+  retries can never land in another's. Nothing consumes the tiers; the TTL
+  does the waiting, the broker does the dead-lettering back.
+- **Failure path.** Consumers (#47) track attempts in the `x-retry-count`
+  header through `topology.NextRetry` / `topology.RetryCount`: failures
+  1–3 republish to the next tier with a bumped count; the 4th failure
+  rejects without requeue, the queue's DLX argument routes it to
+  `procurement.dlx`, and the `#`-bound `procurement.dlq` is the final,
+  admin-visible destination (§14.5 "after max attempts → DLQ").
 
 ## Migration 0007 — `procurement.purchase_orders` / `po_items` / `po_counters` (#35)
 
@@ -459,10 +549,12 @@ Seven legal edges (loose cancel — maintainer decision on #28):
 `approved → closed` is driven by PO conversion (#35); the domain `Close`
 method exists now. Every successful transition appends exactly one domain
 event (`requisition_submitted`, …, plus `requisition_created` on draft
-creation) to the in-memory aggregate log (`Events()` / `PullEvents()`). The
-decide events are persisted to `procurement.outbox` since #31 (0006);
-submit/create events still live only in the in-memory log until #45 wires
-them.
+creation) to the in-memory aggregate log (`Events()` / `PullEvents()`).
+Since #31 the decide events and since #45 the `pr.submitted` event are
+persisted to `procurement.outbox` in the same transaction as their state
+change; the create/draft event deliberately stays in-memory only — the
+§14.6 catalog names no create event (`pr.submitted` is the first published
+step of the lifecycle) — until a catalog decision says otherwise.
 
 Error codes: `requisition_currency_invalid`, `requisition_description_invalid`,
 `requisition_qty_invalid`, `requisition_unit_price_invalid`,
@@ -551,9 +643,11 @@ missing (404 `requisition_not_found`).
 - #29: requisition create/edit/submit API (done — store, number generation, idempotent submit, REST/gRPC wiring, gateway `Aborted` → 409). Read endpoints: **list done in #32** (see below); get/timeline are separate issues.
 - #30: approval rules + sequential engine + decide API (done — matrix materialization, 412 rollback, self/role enforcement, reject-skips, admin rule configuration, steps in-band).
 - #31: idempotent decide + outbox audit/notification events (done — `procurement.outbox` + `decision_idempotency` in 0006, decide replay/conflict contract, `pr.*` decide events with actor + trace, gateway `x-trace-id` propagation). **Re-sequenced with #45** by an agent decision: the outbox table + writer moved from #45's scope into #31 (see dev-note 031's provenance block); #45 keeps the publisher loop only.
+- #45: transactional outbox publisher (done — worker publisher loop: poll 2 s / batch 50, §14.5 envelope to the durable topic exchange `procurement.events` with confirm-mode persistent publishes, `published_at` marking, non-fatal poll/publish errors, `pr.submitted` written by the Submit transaction; the PROVISIONAL DLX bootstrap is superseded by #46's full topology). AMQP consumers, retry queues, and DLQ handling remain with the consumer issues; observability (spans, AMQP trace headers, outbox lag metric) is #54. (M2–M3)
+- #46: RabbitMQ topology with DLX and TTL retry queues (done — durable `procurement.events`/`procurement.dlx` exchanges, `documents.history`/`notifications`/`exports` queues with DLX arguments, per-queue retry ladders 5 s → 30 s → 5 min returning to their own queue, `procurement.dlq` bound `#`; consumers arrive with #47). (M2–M3)
 - #35: PO creation from an approved requisition (done — 0007 tables, draft PO with copied lines, per-tenant gap-free `PO-%06d` numbering, conversion replay contract, tx-scoped active-vendor gate `ForUseTx`, guarded `approved → closed`, one `po.created` outbox event). Goods receipts (#37) and the missing `pr.converted` requisition-side event are follow-ups.
 - #36: PO lifecycle state machine (done — ten legal edges over the seven statuses, receipt-guarded cancel, `issued_at` on issue, guarded tenant-scoped transitions serialized on the PO row lock, one outbox event per transition, gRPC + REST issue/acknowledge/cancel/close at `po:write`). Goods receipts (#37) drive the receipt edges.
-- Approvals read endpoints/queue #32-34, outbox publisher (#45 — poll/publish/retry/DLQ only; table and writer landed with #31) (M2–M3).
+- Approvals read endpoints/queue #32-34 (M2–M3).
 - The timeline/event read path (#42/#43/#47, `GET /api/v1/events`) consumes the outbox's `entity_type`/`entity_id` columns; a tenant+entity index arrives with whichever issue first queries them.
 
 ## Vendor list — filters, pagination, query plans (#27)

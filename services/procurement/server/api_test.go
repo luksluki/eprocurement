@@ -1002,11 +1002,16 @@ func TestApprovalGRPCDecideIdempotencyOutbox(t *testing.T) {
 	}
 	steps := submitted.GetApprovalSteps()
 
+	// Decide-event counting: the requisition also carries its pr.submitted
+	// row since #45, so the count is filtered to the decide event types.
 	outboxCount := func() int {
 		var n int
 		if err := tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
 			return tx.QueryRow(context.Background(),
-				`SELECT count(*) FROM procurement.outbox WHERE entity_id = $1`, pr.GetId()).Scan(&n)
+				`SELECT count(*) FROM procurement.outbox
+				 WHERE entity_id = $1
+				   AND event_type IN ('pr.step_approved', 'pr.step_rejected', 'pr.approved', 'pr.rejected')`,
+				pr.GetId()).Scan(&n)
 		}); err != nil {
 			t.Fatalf("count outbox: %v", err)
 		}
@@ -1041,7 +1046,9 @@ func TestApprovalGRPCDecideIdempotencyOutbox(t *testing.T) {
 	if err := tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
 		return tx.QueryRow(context.Background(), `
 			SELECT event_type, actor_id::text, trace_id
-			FROM procurement.outbox WHERE entity_id = $1`, pr.GetId()).Scan(&eventType, &actorID, &traceID)
+			FROM procurement.outbox
+			WHERE entity_id = $1 AND event_type = 'pr.step_approved'`,
+			pr.GetId()).Scan(&eventType, &actorID, &traceID)
 	}); err != nil {
 		t.Fatalf("load outbox row: %v", err)
 	}

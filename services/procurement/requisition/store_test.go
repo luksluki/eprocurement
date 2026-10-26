@@ -7,11 +7,13 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/luksluki/eprocurement/internal/platform/dbmigrate"
+	"github.com/luksluki/eprocurement/internal/platform/logger"
 	"github.com/luksluki/eprocurement/internal/platform/tenant"
 	"github.com/luksluki/eprocurement/services/procurement/migrations"
 )
@@ -72,6 +74,12 @@ func num(number string) int {
 func cleanupRequisition(t *testing.T, db *pgxpool.Pool) {
 	t.Helper()
 	_ = tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		// The outbox has no FK to requisitions; its rows must be removed
+		// explicitly (the pr.submitted events of #45).
+		if _, err := tx.Exec(context.Background(),
+			`DELETE FROM procurement.outbox WHERE tenant_id IN ($1, $2, $3)`, tenantA, tenantB, tenantC); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(context.Background(),
 			`DELETE FROM procurement.requisitions WHERE tenant_id IN ($1, $2, $3) AND number LIKE 'PR-%'`,
 			tenantA, tenantB, tenantC); err != nil {
@@ -375,5 +383,121 @@ func TestStoreSubmitMaterializerRollback(t *testing.T) {
 	if replayed, err := s.Submit(ctx, tenantA, r.ID, userA, "key-30-a", nil); err != nil ||
 		replayed.Status != StatusSubmitted || !replayed.SubmittedAt.Equal(*submitted.SubmittedAt) {
 		t.Fatalf("replay = (%+v, %v), want the same submitted state", replayed, err)
+	}
+}
+
+// submitOutboxRows reads the pr.submitted events of one requisition straight
+// from the table (bypassing RLS on purpose — the count is the atomicity
+// evidence; the payload is the pinned cross-issue contract).
+func submitOutboxRows(t *testing.T, db *pgxpool.Pool, requisitionID string) []SubmitPayload {
+	t.Helper()
+	rows := []SubmitPayload{}
+	_ = tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		rs, err := tx.Query(context.Background(), `
+			SELECT payload FROM procurement.outbox
+			WHERE entity_id = $1 AND event_type = $2
+			ORDER BY created_at`, requisitionID, OutboxSubmitted)
+		if err != nil {
+			return err
+		}
+		defer rs.Close()
+		for rs.Next() {
+			var p SubmitPayload
+			if err := rs.Scan(&p); err != nil {
+				return err
+			}
+			rows = append(rows, p)
+		}
+		return rs.Err()
+	})
+	return rows
+}
+
+// AC (#45 write-in-same-transaction): a successful submit writes exactly one
+// pr.submitted outbox row in the same transaction — carrying the payload
+// contract, the actor, and the propagated trace id, published_at NULL until
+// the publisher marks it; an idempotent replay writes nothing; rollbacks
+// (approval rules missing, empty basket, illegal transition) write nothing.
+func TestStoreSubmitOutboxEvent(t *testing.T) {
+	s, db := testStoreDB(t)
+	t.Cleanup(func() { cleanupRequisition(t, db) })
+	cleanupRequisition(t, db)
+	// The trace id rides the context exactly as the TraceInterceptor puts
+	// it there for gRPC calls.
+	ctx := logger.WithTraceID(context.Background(), "trace-45-submit")
+
+	// Rollback path first: a submit whose materializer fails (approval
+	// rules missing) leaves no event, but the requisition stays a draft so
+	// the retry below can succeed.
+	r, err := s.Create(ctx, tenantA, CreateInput{RequesterID: userA, Currency: "IDR", Items: basketItems})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	boom := errors.New("approval_rules_missing")
+	failing := func(tx pgx.Tx, r Requisition) error { return boom }
+	if _, err := s.Submit(ctx, tenantA, r.ID, userA, "key-45-a", failing); !errors.Is(err, boom) {
+		t.Fatalf("failing materializer err = %v, want the materializer error", err)
+	}
+	if got := len(submitOutboxRows(t, db, r.ID)); got != 0 {
+		t.Fatalf("outbox rows after rollback = %d, want 0", got)
+	}
+
+	// Happy path: one row, full contract, committed with the transition.
+	submitted, err := s.Submit(ctx, tenantA, r.ID, userA, "key-45-a", nil)
+	if err != nil || submitted.Status != StatusSubmitted {
+		t.Fatalf("submit = (%+v, %v)", submitted, err)
+	}
+	rows := submitOutboxRows(t, db, r.ID)
+	if len(rows) != 1 {
+		t.Fatalf("outbox rows after submit = %d, want 1", len(rows))
+	}
+	got := rows[0]
+	if got.RequisitionID != r.ID || got.Number != r.Number || got.RequesterID != userA ||
+		got.Currency != "IDR" || got.TotalCents != 15450000 || got.SubmittedBy != userA ||
+		!got.SubmittedAt.Equal(*submitted.SubmittedAt) {
+		t.Fatalf("payload = %+v, want requisition %s / %s total 15450000 submitted at %v",
+			got, r.ID, r.Number, submitted.SubmittedAt)
+	}
+	var actor, traceID string
+	var published *time.Time
+	if err := tenant.WithBypass(ctx, db, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT coalesce(actor_id::text, ''), trace_id, published_at
+			FROM procurement.outbox WHERE entity_id = $1 AND event_type = $2`,
+			r.ID, OutboxSubmitted).Scan(&actor, &traceID, &published)
+	}); err != nil {
+		t.Fatalf("load submit event row: %v", err)
+	}
+	if actor != userA || traceID != "trace-45-submit" || published != nil {
+		t.Fatalf("row = (actor %s, trace %s, published %v), want (%s, trace-45-submit, NULL)",
+			actor, traceID, published, userA)
+	}
+
+	// Idempotent replay: the current state returns, nothing is written.
+	if _, err := s.Submit(ctx, tenantA, r.ID, userA, "key-45-a", nil); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if got := len(submitOutboxRows(t, db, r.ID)); got != 1 {
+		t.Fatalf("outbox rows after replay = %d, want 1", got)
+	}
+
+	// A resubmit without the key is an illegal transition — no second event.
+	if _, err := s.Submit(ctx, tenantA, r.ID, userA, "", nil); !errors.Is(err, ErrIllegalTransition) {
+		t.Fatalf("resubmit err = %v, want ErrIllegalTransition", err)
+	}
+	if got := len(submitOutboxRows(t, db, r.ID)); got != 1 {
+		t.Fatalf("outbox rows after resubmit = %d, want 1", got)
+	}
+
+	// An empty basket fails domain validation before any write.
+	empty, err := s.Create(ctx, tenantA, CreateInput{RequesterID: userA, Currency: "IDR"})
+	if err != nil {
+		t.Fatalf("create empty: %v", err)
+	}
+	if _, err := s.Submit(ctx, tenantA, empty.ID, userA, "", nil); !errors.Is(err, ErrItemsEmpty) {
+		t.Fatalf("empty submit err = %v, want ErrItemsEmpty", err)
+	}
+	if got := len(submitOutboxRows(t, db, empty.ID)); got != 0 {
+		t.Fatalf("empty requisition outbox rows = %d, want 0", got)
 	}
 }
