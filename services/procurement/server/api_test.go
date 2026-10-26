@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -27,6 +28,7 @@ import (
 	"github.com/luksluki/eprocurement/internal/platform/tenant"
 	"github.com/luksluki/eprocurement/services/procurement/approval"
 	"github.com/luksluki/eprocurement/services/procurement/migrations"
+	"github.com/luksluki/eprocurement/services/procurement/purchaseorder"
 	"github.com/luksluki/eprocurement/services/procurement/requisition"
 	"github.com/luksluki/eprocurement/services/procurement/vendor"
 )
@@ -64,7 +66,7 @@ func startProcurement(t *testing.T) (procurementv1.ProcurementClient, *pgxpool.P
 	}
 
 	log := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
-	srv := New(log, db, vendor.NewStore(db), requisition.NewStore(db), approval.NewStore(db))
+	srv := New(log, db, vendor.NewStore(db), requisition.NewStore(db), approval.NewStore(db), purchaseorder.NewStore(db))
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -318,13 +320,22 @@ func TestMapRequisitionError(t *testing.T) {
 	}
 }
 
-// grpcCleanupRequisition wipes the PR rows, counters, and approval rules
-// this test creates in the shared test tenants (items and steps cascade).
+// grpcCleanupRequisition wipes the PR rows, counters, approval rules, and
+// PO rows this test family creates in the shared test tenants (items and
+// steps cascade).
 func grpcCleanupRequisition(t *testing.T, db *pgxpool.Pool) {
 	t.Helper()
 	_ = tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(context.Background(),
 			`DELETE FROM procurement.outbox WHERE tenant_id IN ($1, $2)`, gTenantA, gTenantB); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(context.Background(),
+			`DELETE FROM procurement.purchase_orders WHERE tenant_id IN ($1, $2)`, gTenantA, gTenantB); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(context.Background(),
+			`DELETE FROM procurement.po_counters WHERE tenant_id IN ($1, $2)`, gTenantA, gTenantB); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(context.Background(),
@@ -1077,5 +1088,271 @@ func TestApprovalGRPCDecideIdempotencyOutbox(t *testing.T) {
 	}
 	if n := outboxCount(); n != 3 {
 		t.Fatalf("outbox after terminal decide = %d, want 3", n)
+	}
+}
+
+// grpcCleanupPOVendor deletes the PO test vendors by prefix (G-PO35-%) —
+// the shared vendor cleanup matches one exact code, which would leave the
+// -A/-B/-D rows behind between runs of the PO suite.
+func grpcCleanupPOVendor(t *testing.T, db *pgxpool.Pool) {
+	t.Helper()
+	_ = tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		_, err := tx.Exec(context.Background(),
+			`DELETE FROM procurement.vendors WHERE tenant_id IN ($1, $2) AND code LIKE 'G-PO35-%'`,
+			gTenantA, gTenantB)
+		return err
+	})
+}
+
+// grpcApprovedRequisition drives the real flow to an approved requisition of
+// tenant A: create (requester), submit (rules materialize), approve step 1
+// (a different approver — the self-approval ban).
+func grpcApprovedRequisition(t *testing.T, client procurementv1.ProcurementClient) *procurementv1.Requisition {
+	t.Helper()
+	pr, err := client.CreateRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.CreateRequisitionRequest{Currency: "IDR", Items: testItems()})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	submitted, err := client.SubmitRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.SubmitRequisitionRequest{Id: pr.GetId()})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	after, err := client.DecideApproval(callerCtxAs(gUserB, gTenantA, rbac.RoleApprover),
+		&procurementv1.DecideApprovalRequest{
+			StepId: submitted.GetApprovalSteps()[0].GetId(), Decision: "approve",
+		})
+	if err != nil || after.GetRequisition().GetStatus() != "approved" {
+		t.Fatalf("decide = (%s, %v), want approved", after.GetRequisition().GetStatus(), err)
+	}
+	return after.GetRequisition()
+}
+
+// The #35 conversion through the full gRPC wiring: RBAC (po:write is
+// buyer-only), validation and gate machine codes, the draft PO with copied
+// lines, the closed requisition, the single po.created outbox row carrying
+// the caller as actor and the propagated trace, and the replay contract
+// (different vendor_id ignored).
+func TestPurchaseOrderGRPCConversion(t *testing.T) {
+	client, db, cleanup := startProcurement(t)
+	defer cleanup()
+	grpcCleanupRequisition(t, db)
+	grpcCleanupPOVendor(t, db)
+	t.Cleanup(func() {
+		grpcCleanupRequisition(t, db)
+		grpcCleanupPOVendor(t, db)
+	})
+
+	// Configure the one-step IDR chain and get an approved requisition.
+	if _, err := client.ReplaceApprovalRules(callerCtx(gTenantA, rbac.RoleAdmin),
+		&procurementv1.ReplaceApprovalRulesRequest{Rules: testRules()[:1]}); err != nil {
+		t.Fatalf("configure rules: %v", err)
+	}
+	approved := grpcApprovedRequisition(t, client)
+
+	vendorA, err := client.CreateVendor(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.CreateVendorRequest{Code: "G-PO35-A", Name: "PT Satu"})
+	if err != nil {
+		t.Fatalf("create vendor A: %v", err)
+	}
+	vendorB, err := client.CreateVendor(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.CreateVendorRequest{Code: "G-PO35-B", Name: "PT Dua"})
+	if err != nil {
+		t.Fatalf("create vendor B: %v", err)
+	}
+
+	// po:write is buyer-only: requester, approver, and viewer are denied at
+	// the service-layer re-check.
+	for _, role := range []string{rbac.RoleRequester, rbac.RoleViewer, rbac.RoleApprover} {
+		_, err := client.CreatePurchaseOrder(callerCtx(gTenantA, role),
+			&procurementv1.CreatePurchaseOrderRequest{RequisitionId: approved.GetId(), VendorId: vendorA.GetId()})
+		if status.Code(err) != codes.PermissionDenied {
+			t.Fatalf("convert as %s: code = %v, want PermissionDenied", role, status.Code(err))
+		}
+	}
+
+	// Validation and gates with machine codes: bad vendor id, unknown
+	// requisition, non-approved requisition, deactivated vendor.
+	_, err = client.CreatePurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.CreatePurchaseOrderRequest{RequisitionId: approved.GetId(), VendorId: "nope"})
+	if status.Code(err) != codes.InvalidArgument || status.Convert(err).Message() != "po_vendor_id_invalid" {
+		t.Fatalf("bad vendor id: got (%v, %q), want InvalidArgument po_vendor_id_invalid", status.Code(err), status.Convert(err).Message())
+	}
+	_, err = client.CreatePurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.CreatePurchaseOrderRequest{
+			RequisitionId: "dddddddd-0000-0000-0000-0000000000ff", VendorId: vendorA.GetId()})
+	if status.Code(err) != codes.NotFound || status.Convert(err).Message() != "requisition_not_found" {
+		t.Fatalf("unknown requisition: got (%v, %q), want NotFound requisition_not_found", status.Code(err), status.Convert(err).Message())
+	}
+	draft, err := client.CreateRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.CreateRequisitionRequest{Currency: "IDR", Items: testItems()})
+	if err != nil {
+		t.Fatalf("create draft: %v", err)
+	}
+	_, err = client.CreatePurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.CreatePurchaseOrderRequest{RequisitionId: draft.GetId(), VendorId: vendorA.GetId()})
+	if status.Code(err) != codes.Aborted || status.Convert(err).Message() != "po_requisition_not_approved" {
+		t.Fatalf("draft convert: got (%v, %q), want Aborted po_requisition_not_approved", status.Code(err), status.Convert(err).Message())
+	}
+	dead, err := client.CreateVendor(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.CreateVendorRequest{Code: "G-PO35-D", Name: "PT Mati"})
+	if err != nil {
+		t.Fatalf("create vendor D: %v", err)
+	}
+	if _, err := client.DeactivateVendor(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.DeactivateVendorRequest{Id: dead.GetId()}); err != nil {
+		t.Fatalf("deactivate: %v", err)
+	}
+	_, err = client.CreatePurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.CreatePurchaseOrderRequest{RequisitionId: approved.GetId(), VendorId: dead.GetId()})
+	if status.Code(err) != codes.FailedPrecondition || status.Convert(err).Message() != "vendor_deactivated" {
+		t.Fatalf("deactivated vendor: got (%v, %q), want FailedPrecondition vendor_deactivated", status.Code(err), status.Convert(err).Message())
+	}
+	// The blocked attempts burned no number and left the requisition
+	// approved — the first successful conversion below is PO-000001.
+	reqStatus := func(id string) string {
+		var s string
+		if err := tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+			return tx.QueryRow(context.Background(),
+				`SELECT status FROM procurement.requisitions WHERE id = $1`, id).Scan(&s)
+		}); err != nil {
+			t.Fatalf("read status: %v", err)
+		}
+		return s
+	}
+	if got := reqStatus(approved.GetId()); got != "approved" {
+		t.Fatalf("requisition after blocked convert = %s, want approved", got)
+	}
+
+	// Happy path with a trace: draft PO, lines copied, server-side total.
+	buyer := metadata.AppendToOutgoingContext(callerCtx(gTenantA, rbac.RoleBuyer), "x-trace-id", "trace-grpc-35")
+	wrapped, err := client.CreatePurchaseOrder(buyer,
+		&procurementv1.CreatePurchaseOrderRequest{RequisitionId: approved.GetId(), VendorId: vendorA.GetId()})
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	if !wrapped.GetCreated() {
+		t.Fatal("first conversion reports created=false")
+	}
+	po := wrapped.GetPurchaseOrder()
+	if po.GetNumber() != "PO-000001" || po.GetStatus() != "draft" || po.GetIssuedAt() != "" {
+		t.Fatalf("po = %s/%s/%q, want PO-000001/draft/empty issued_at", po.GetNumber(), po.GetStatus(), po.GetIssuedAt())
+	}
+	if po.GetRequisitionId() != approved.GetId() || po.GetVendorId() != vendorA.GetId() || po.GetTenantId() != gTenantA {
+		t.Fatalf("po linkage = %+v", po)
+	}
+	// Items are compared as a multiset: po_items rows inside one conversion
+	// share created_at, so their load order is not the requisition's line
+	// order (same note as the store test).
+	if po.GetCurrency() != "IDR" || po.GetTotalCents() != 15450000 || len(po.GetItems()) != 2 ||
+		po.GetCreatedBy() != gUser {
+		t.Fatalf("po content = %+v", po)
+	}
+	poLines := map[string]bool{}
+	for _, it := range po.GetItems() {
+		if it.GetQtyReceived() != 0 {
+			t.Fatalf("qty_received = %d on creation, want 0: %+v", it.GetQtyReceived(), po.GetItems())
+		}
+		poLines[fmt.Sprintf("%s/%d/%d", it.GetDescription(), it.GetQtyOrdered(), it.GetUnitPriceCents())] = true
+	}
+	if !poLines["Laptop/2/7500000"] || !poLines["Mouse/3/150000"] || len(poLines) != 2 {
+		t.Fatalf("po lines = %v, want the copied basket", poLines)
+	}
+	if got := reqStatus(approved.GetId()); got != "closed" {
+		t.Fatalf("requisition after convert = %s, want closed", got)
+	}
+
+	// Exactly one po.created outbox row: entity = the PO, actor = caller,
+	// trace propagated, payload pins requisition_number.
+	var eventType, entityType, actorID, traceID string
+	var payload []byte
+	if err := tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		return tx.QueryRow(context.Background(), `
+			SELECT event_type, entity_type, actor_id::text, trace_id, payload
+			FROM procurement.outbox WHERE entity_id = $1 AND event_type = 'po.created'`,
+			po.GetId()).Scan(&eventType, &entityType, &actorID, &traceID, &payload)
+	}); err != nil {
+		t.Fatalf("load po.created row: %v", err)
+	}
+	if eventType != "po.created" || entityType != "purchase_order" || actorID != gUser || traceID != "trace-grpc-35" {
+		t.Fatalf("po.created row = (%s, %s, %s, %s)", eventType, entityType, actorID, traceID)
+	}
+	var created struct {
+		Number            string `json:"number"`
+		RequisitionID     string `json:"requisition_id"`
+		RequisitionNumber string `json:"requisition_number"`
+		VendorID          string `json:"vendor_id"`
+		TotalCents        int64  `json:"total_cents"`
+		Currency          string `json:"currency"`
+		CreatedBy         string `json:"created_by"`
+	}
+	if err := json.Unmarshal(payload, &created); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if created.Number != "PO-000001" || created.RequisitionID != approved.GetId() ||
+		created.RequisitionNumber != approved.GetNumber() || created.VendorID != vendorA.GetId() ||
+		created.TotalCents != 15450000 || created.Currency != "IDR" || created.CreatedBy != gUser {
+		t.Fatalf("po.created payload = %+v", created)
+	}
+
+	// Replay with a different vendor_id: the original PO (created=false),
+	// no second event.
+	replayResp, err := client.CreatePurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.CreatePurchaseOrderRequest{RequisitionId: approved.GetId(), VendorId: vendorB.GetId()})
+	if err != nil || replayResp.GetCreated() {
+		t.Fatalf("replay flag = (%v, %v), want created=false", replayResp.GetCreated(), err)
+	}
+	replayed := replayResp.GetPurchaseOrder()
+	if replayed.GetId() != po.GetId() || replayed.GetVendorId() != vendorA.GetId() ||
+		replayed.GetCreatedAt() != po.GetCreatedAt() {
+		t.Fatalf("replay = (%+v, %v), want the original PO", replayed, err)
+	}
+	var poCreatedRows int
+	if err := tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		return tx.QueryRow(context.Background(), `
+			SELECT count(*) FROM procurement.outbox WHERE entity_id = $1 AND event_type = 'po.created'`,
+			po.GetId()).Scan(&poCreatedRows)
+	}); err != nil || poCreatedRows != 1 {
+		t.Fatalf("po.created rows after replay = (%d, %v), want 1", poCreatedRows, err)
+	}
+
+	// Cross-tenant conversion: tenant B's buyer cannot even see the
+	// requisition (RLS) — indistinguishable from missing.
+	_, err = client.CreatePurchaseOrder(callerCtx(gTenantB, rbac.RoleBuyer),
+		&procurementv1.CreatePurchaseOrderRequest{RequisitionId: approved.GetId(), VendorId: vendorA.GetId()})
+	if status.Code(err) != codes.NotFound || status.Convert(err).Message() != "requisition_not_found" {
+		t.Fatalf("cross-tenant convert: got (%v, %q), want NotFound requisition_not_found", status.Code(err), status.Convert(err).Message())
+	}
+
+	// No propagated auth metadata: Unauthenticated before any store hit.
+	if _, err := client.CreatePurchaseOrder(context.Background(),
+		&procurementv1.CreatePurchaseOrderRequest{RequisitionId: approved.GetId(), VendorId: vendorA.GetId()}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("anonymous: code = %v, want Unauthenticated", status.Code(err))
+	}
+}
+
+// The #35 error mapping as a pure unit test (no database): machine codes
+// verbatim in the gRPC message, Aborted for the status gate (gateway renders
+// 409), FailedPrecondition for the vendor gate (412).
+func TestMapPurchaseOrderError(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err  error
+		code codes.Code
+		msg  string
+	}{
+		"vendor id invalid":      {purchaseorder.ErrVendorIDInvalid, codes.InvalidArgument, "po_vendor_id_invalid"},
+		"not approved":           {purchaseorder.ErrRequisitionNotApproved, codes.Aborted, "po_requisition_not_approved"},
+		"requisition not found":  {requisition.ErrNotFound, codes.NotFound, "requisition_not_found"},
+		"requisition id invalid": {requisition.ErrIDInvalid, codes.InvalidArgument, "requisition_id_invalid"},
+		"vendor not found":       {vendor.ErrNotFound, codes.NotFound, "vendor_not_found"},
+		"vendor deactivated":     {vendor.ErrDeactivated, codes.FailedPrecondition, "vendor_deactivated"},
+		"unknown error internal": {errors.New("boom"), codes.Internal, "internal error"},
+	} {
+		got := mapPurchaseOrderError(tc.err)
+		if status.Code(got) != tc.code || status.Convert(got).Message() != tc.msg {
+			t.Errorf("%s: got (%v, %q), want (%v, %q)",
+				name, status.Code(got), status.Convert(got).Message(), tc.code, tc.msg)
+		}
 	}
 }

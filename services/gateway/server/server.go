@@ -24,9 +24,9 @@ import (
 type Option func(*gatewayOptions)
 
 // ProcurementClient is the full procurement surface the gateway proxies: the
-// vendor API, the requisition create/edit/submit/list API, and the approval
-// decide/rules API. The generated gRPC client satisfies it; tests substitute
-// a fake.
+// vendor API, the requisition create/edit/submit/list API, the approval
+// decide/rules API, and the PO conversion API. The generated gRPC client
+// satisfies it; tests substitute a fake.
 type ProcurementClient interface {
 	VendorClient
 	CreateRequisition(ctx context.Context, in *procurementv1.CreateRequisitionRequest, opts ...grpc.CallOption) (*procurementv1.Requisition, error)
@@ -36,6 +36,7 @@ type ProcurementClient interface {
 	DecideApproval(ctx context.Context, in *procurementv1.DecideApprovalRequest, opts ...grpc.CallOption) (*procurementv1.DecideApprovalResponse, error)
 	GetApprovalRules(ctx context.Context, in *procurementv1.GetApprovalRulesRequest, opts ...grpc.CallOption) (*procurementv1.ApprovalRulesResponse, error)
 	ReplaceApprovalRules(ctx context.Context, in *procurementv1.ReplaceApprovalRulesRequest, opts ...grpc.CallOption) (*procurementv1.ApprovalRulesResponse, error)
+	CreatePurchaseOrder(ctx context.Context, in *procurementv1.CreatePurchaseOrderRequest, opts ...grpc.CallOption) (*procurementv1.CreatePurchaseOrderResponse, error)
 }
 
 type gatewayOptions struct {
@@ -45,15 +46,17 @@ type gatewayOptions struct {
 	loginLimit  *loginLimiter
 }
 
-// WithProcurement proxies the procurement API under /api/v1/vendors and
-// /api/v1/requisitions.
+// WithProcurement proxies the procurement API under /api/v1/vendors,
+// /api/v1/requisitions, /api/v1/approvals, and /api/v1/purchase-orders.
 func WithProcurement(client ProcurementClient) Option {
 	return func(o *gatewayOptions) { o.procurement = client }
 }
 
 // WithDocuments adds attachment upload/download under
-// /api/v1/vendors/:id/attachments and embeds attachment metadata in vendor
-// detail responses. Requires WithProcurement.
+// /api/v1/vendors/:id/attachments, embeds attachment metadata in vendor
+// detail responses, and serves the event history under /api/v1/events (the
+// events route needs documents only; the vendor routes need
+// WithProcurement).
 func WithDocuments(client DocumentsClient) Option {
 	return func(o *gatewayOptions) { o.documents = client }
 }
@@ -107,6 +110,10 @@ func New(log *slog.Logger, verifier *token.Verifier, opts ...Option) *fiber.App 
 		registerVendorRoutes(app, verifier, o.procurement, o.documents)
 		registerRequisitionRoutes(app, verifier, o.procurement)
 		registerApprovalRoutes(app, verifier, o.procurement)
+		registerPurchaseOrderRoutes(app, verifier, o.procurement)
+	}
+	if o.documents != nil {
+		registerEventRoutes(app, verifier, o.documents)
 	}
 
 	return app

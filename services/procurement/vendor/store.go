@@ -134,13 +134,36 @@ func (s *Store) deactivate(ctx context.Context, tenantID, id, userID string) (Ve
 }
 
 // GetForUse is the gate purchase-order creation (#35) must pass: only active
-// vendors of the caller's tenant may be used in new POs.
+// vendors of the caller's tenant may be used in new POs. It opens its own
+// transaction via tenant.WithTenant, so it cannot run inside a caller's
+// transaction — use ForUseTx there.
 func (s *Store) GetForUse(ctx context.Context, tenantID, id string) (Vendor, error) {
 	v, err := s.Get(ctx, tenantID, id)
 	if err != nil {
 		return Vendor{}, err
 	}
 	if v.Status != "active" {
+		return Vendor{}, ErrDeactivated
+	}
+	return v, nil
+}
+
+// ForUseTx is the tx-scoped twin of GetForUse: the same active-vendor gate,
+// read on the caller's transaction (RLS still scopes the tenant through the
+// tx's app.tenant_id setting). The PO conversion (#35) runs it inside its
+// transaction so a vendor cannot be deactivated between the check and the
+// insert (anti-TOCTOU) — the pool-based GetForUse cannot offer that
+// guarantee. Free function on the requisition.LoadForUpdate precedent (#30).
+func ForUseTx(ctx context.Context, tx pgx.Tx, id string) (Vendor, error) {
+	var v Vendor
+	if err := scanVendor(tx.QueryRow(ctx,
+		`SELECT `+vendorColumns+` FROM procurement.vendors WHERE id = $1`, id), &v); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Vendor{}, ErrNotFound
+		}
+		return Vendor{}, fmt.Errorf("vendor: get for use: %w", err)
+	}
+	if v.Status != StatusActive {
 		return Vendor{}, ErrDeactivated
 	}
 	return v, nil
