@@ -98,7 +98,6 @@ services:
     networks: [backend]
 
   # Observability profile (Jaeger + Prometheus/Grafana) arrives with #54.
-  # Remaining application services (procurement/documents/worker) join in later issues.
 
   identity:
     build:
@@ -186,6 +185,34 @@ services:
       timeout: 5s
       retries: 12
       start_period: 10s
+    networks: [backend]
+
+  # Background jobs (#45: transactional outbox publisher). No ports — the
+  # worker only dials out (postgres, rabbitmq). It deliberately runs no
+  # migrations: procurement is the sole applier, so on a fresh volume the
+  # publisher loop's first polls can fail until procurement has booted; the
+  # loop logs and keeps ticking instead of crash-looping the container.
+  worker:
+    build:
+      context: .
+      dockerfile: deploy/docker/service.Dockerfile
+      args:
+        SERVICE: worker
+    environment:
+      APP_ENV: ${APP_ENV:-local}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgres://${POSTGRES_USER:-eprocurement}:${POSTGRES_PASSWORD:-eprocurement}@postgres:5432/${POSTGRES_DB:-eprocurement}?sslmode=disable
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-eprocurement}:${RABBITMQ_PASSWORD:-eprocurement}@rabbitmq:5672/
+      # consumer side (#47): same credentials the documents service uses
+      MONGO_URI: mongodb://${MONGO_ROOT_USER:-eprocurement}:${MONGO_ROOT_PASSWORD:-eprocurement}@mongo:27017/${MONGO_DB:-eprocurement}?authSource=admin
+      MONGO_DB: ${MONGO_DB:-eprocurement}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
     networks: [backend]
 
   gateway:

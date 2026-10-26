@@ -17,7 +17,9 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/luksluki/eprocurement/internal/platform/logger"
 	"github.com/luksluki/eprocurement/internal/platform/tenant"
+	"github.com/luksluki/eprocurement/services/procurement/outbox"
 )
 
 // IO failure codes; the gRPC API and the gateway carry them through to
@@ -222,6 +224,9 @@ func (s *Store) UpdateItems(ctx context.Context, tenantID, id string, items []It
 // here, so a submit without applicable rules (approval.ErrRulesMissing) rolls
 // the whole submit back — status stays draft and the idempotency key is not
 // recorded. It is nil in tests that exercise the requisition store alone.
+//
+// Since #45 the transaction also appends the pr.submitted outbox row
+// (appendSubmittedTx below): state change, steps, and event commit atomically.
 func (s *Store) Submit(ctx context.Context, tenantID, id, actor, idempotencyKey string, materialize func(tx pgx.Tx, r Requisition) error) (Requisition, error) {
 	if _, err := uuid.Parse(id); err != nil {
 		return Requisition{}, ErrIDInvalid
@@ -262,6 +267,13 @@ func (s *Store) Submit(ctx context.Context, tenantID, id, actor, idempotencyKey 
 				return err // rolls the whole submit back with the steps
 			}
 		}
+		// The submit event rides the same transaction (#45, issue scope
+		// "write in same transaction as state"): exactly one pr.submitted
+		// row commits with the transition — never on a replay, never on a
+		// rollback.
+		if err := appendSubmittedTx(ctx, tx, updated, actor); err != nil {
+			return err
+		}
 		updated.Items = append([]Item(nil), agg.Items...)
 		out = updated
 		return nil
@@ -270,6 +282,45 @@ func (s *Store) Submit(ctx context.Context, tenantID, id, actor, idempotencyKey 
 		return Requisition{}, wrap("submit", err)
 	}
 	return out, nil
+}
+
+// OutboxSubmitted is the PRD §14.6 catalog event Submit writes to the
+// outbox. Two segments keep it deliverable by the pr.* topic bindings
+// (PRD §14.5 — same pinned naming as the decide events, #31).
+const OutboxSubmitted = "pr.submitted"
+
+// SubmitPayload is the pr.submitted outbox payload — a pinned public
+// contract for the downstream consumers (#43 timeline, notifications), not a
+// private struct: the notification consumer reads requester_id as the
+// recipient (dev-note 031). snake_case follows the DecisionPayload
+// convention of the decide events (approval/store.go).
+type SubmitPayload struct {
+	RequisitionID string    `json:"requisition_id"`
+	Number        string    `json:"number"`
+	RequesterID   string    `json:"requester_id"`
+	Currency      string    `json:"currency"`
+	TotalCents    int64     `json:"total_cents"`
+	SubmittedBy   string    `json:"submitted_by"`
+	SubmittedAt   time.Time `json:"submitted_at"`
+}
+
+// appendSubmittedTx writes the pr.submitted outbox row inside the submit
+// transaction — same pattern as the decide writer (#31): the row commits
+// with the guarded state write above or not at all.
+func appendSubmittedTx(ctx context.Context, tx pgx.Tx, r Requisition, actor string) error {
+	if r.SubmittedAt == nil {
+		return fmt.Errorf("requisition: submit event requires submitted_at")
+	}
+	return outbox.AppendTx(ctx, tx, outbox.Event{
+		ID: uuid.NewString(), TenantID: r.TenantID, EventType: OutboxSubmitted, Version: 1,
+		Payload: SubmitPayload{
+			RequisitionID: r.ID, Number: r.Number, RequesterID: r.RequesterID,
+			Currency: r.Currency, TotalCents: r.TotalCents,
+			SubmittedBy: actor, SubmittedAt: *r.SubmittedAt,
+		},
+		ActorID: actor, TraceID: logger.TraceID(ctx),
+		EntityType: "requisition", EntityID: r.ID, OccurredAt: *r.SubmittedAt,
+	})
 }
 
 // LoadForUpdate loads one requisition (header plus items) inside tx under

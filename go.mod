@@ -7,6 +7,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.7.4
 	github.com/minio/minio-go/v7 v7.0.83
+	github.com/rabbitmq/amqp091-go v1.16.0
 	go.mongodb.org/mongo-driver v1.17.2
 	golang.org/x/crypto v0.47.0
 	google.golang.org/grpc v1.80.0
