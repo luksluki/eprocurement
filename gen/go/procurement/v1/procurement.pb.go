@@ -1507,6 +1507,519 @@ func (x *ApprovalRulesResponse) GetRules() []*ApprovalRule {
 	return nil
 }
 
+// PurchaseOrder is the aggregate as conversion (#35) creates it: a draft
+// linked to its requisition and vendor, lines copied verbatim, total and
+// currency from the requisition, issued_at empty until #36 issues it.
+type PurchaseOrder struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	TenantId      string                 `protobuf:"bytes,2,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
+	Number        string                 `protobuf:"bytes,3,opt,name=number,proto3" json:"number,omitempty"`                                    // server-generated per tenant, e.g. "PO-000042"
+	RequisitionId string                 `protobuf:"bytes,4,opt,name=requisition_id,json=requisitionId,proto3" json:"requisition_id,omitempty"` // the converted requisition (one PO per requisition)
+	VendorId      string                 `protobuf:"bytes,5,opt,name=vendor_id,json=vendorId,proto3" json:"vendor_id,omitempty"`                // chosen at conversion; requisitions carry no vendor
+	Status        string                 `protobuf:"bytes,6,opt,name=status,proto3" json:"status,omitempty"`                                    // draft | issued | acknowledged | partially_received | received | closed | cancelled
+	Currency      string                 `protobuf:"bytes,7,opt,name=currency,proto3" json:"currency,omitempty"`                                // IDR | USD — copied from the requisition
+	TotalCents    int64                  `protobuf:"varint,8,opt,name=total_cents,json=totalCents,proto3" json:"total_cents,omitempty"`         // server-computed sum of qty_ordered × unit_price_cents
+	Items         []*PurchaseOrderItem   `protobuf:"bytes,9,rep,name=items,proto3" json:"items,omitempty"`
+	IssuedAt      string                 `protobuf:"bytes,10,opt,name=issued_at,json=issuedAt,proto3" json:"issued_at,omitempty"`    // RFC 3339, empty while draft (#36 sets it)
+	CreatedAt     string                 `protobuf:"bytes,11,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"` // RFC 3339
+	CreatedBy     string                 `protobuf:"bytes,12,opt,name=created_by,json=createdBy,proto3" json:"created_by,omitempty"` // user id
+	UpdatedAt     string                 `protobuf:"bytes,13,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"` // RFC 3339
+	UpdatedBy     string                 `protobuf:"bytes,14,opt,name=updated_by,json=updatedBy,proto3" json:"updated_by,omitempty"` // user id
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PurchaseOrder) Reset() {
+	*x = PurchaseOrder{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PurchaseOrder) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PurchaseOrder) ProtoMessage() {}
+
+func (x *PurchaseOrder) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PurchaseOrder.ProtoReflect.Descriptor instead.
+func (*PurchaseOrder) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *PurchaseOrder) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *PurchaseOrder) GetTenantId() string {
+	if x != nil {
+		return x.TenantId
+	}
+	return ""
+}
+
+func (x *PurchaseOrder) GetNumber() string {
+	if x != nil {
+		return x.Number
+	}
+	return ""
+}
+
+func (x *PurchaseOrder) GetRequisitionId() string {
+	if x != nil {
+		return x.RequisitionId
+	}
+	return ""
+}
+
+func (x *PurchaseOrder) GetVendorId() string {
+	if x != nil {
+		return x.VendorId
+	}
+	return ""
+}
+
+func (x *PurchaseOrder) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *PurchaseOrder) GetCurrency() string {
+	if x != nil {
+		return x.Currency
+	}
+	return ""
+}
+
+func (x *PurchaseOrder) GetTotalCents() int64 {
+	if x != nil {
+		return x.TotalCents
+	}
+	return 0
+}
+
+func (x *PurchaseOrder) GetItems() []*PurchaseOrderItem {
+	if x != nil {
+		return x.Items
+	}
+	return nil
+}
+
+func (x *PurchaseOrder) GetIssuedAt() string {
+	if x != nil {
+		return x.IssuedAt
+	}
+	return ""
+}
+
+func (x *PurchaseOrder) GetCreatedAt() string {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return ""
+}
+
+func (x *PurchaseOrder) GetCreatedBy() string {
+	if x != nil {
+		return x.CreatedBy
+	}
+	return ""
+}
+
+func (x *PurchaseOrder) GetUpdatedAt() string {
+	if x != nil {
+		return x.UpdatedAt
+	}
+	return ""
+}
+
+func (x *PurchaseOrder) GetUpdatedBy() string {
+	if x != nil {
+		return x.UpdatedBy
+	}
+	return ""
+}
+
+// PurchaseOrderItem is one line, copied verbatim from a requisition item.
+type PurchaseOrderItem struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Description    string                 `protobuf:"bytes,1,opt,name=description,proto3" json:"description,omitempty"`
+	QtyOrdered     int32                  `protobuf:"varint,2,opt,name=qty_ordered,json=qtyOrdered,proto3" json:"qty_ordered,omitempty"`               // > 0
+	QtyReceived    int32                  `protobuf:"varint,3,opt,name=qty_received,json=qtyReceived,proto3" json:"qty_received,omitempty"`            // 0 on creation; goods receipts (#37) advance it
+	UnitPriceCents int64                  `protobuf:"varint,4,opt,name=unit_price_cents,json=unitPriceCents,proto3" json:"unit_price_cents,omitempty"` // >= 0, integer cents in the header currency
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *PurchaseOrderItem) Reset() {
+	*x = PurchaseOrderItem{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PurchaseOrderItem) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PurchaseOrderItem) ProtoMessage() {}
+
+func (x *PurchaseOrderItem) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PurchaseOrderItem.ProtoReflect.Descriptor instead.
+func (*PurchaseOrderItem) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *PurchaseOrderItem) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *PurchaseOrderItem) GetQtyOrdered() int32 {
+	if x != nil {
+		return x.QtyOrdered
+	}
+	return 0
+}
+
+func (x *PurchaseOrderItem) GetQtyReceived() int32 {
+	if x != nil {
+		return x.QtyReceived
+	}
+	return 0
+}
+
+func (x *PurchaseOrderItem) GetUnitPriceCents() int64 {
+	if x != nil {
+		return x.UnitPriceCents
+	}
+	return 0
+}
+
+type CreatePurchaseOrderRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The requisition to convert; must be approved (else 409
+	// po_requisition_not_approved). One PO per requisition — replay returns it.
+	RequisitionId string `protobuf:"bytes,1,opt,name=requisition_id,json=requisitionId,proto3" json:"requisition_id,omitempty"`
+	// Required UUID of the vendor to order from; must be active (else 412
+	// vendor_deactivated). Checked on the creation path only — replays ignore it.
+	VendorId      string `protobuf:"bytes,2,opt,name=vendor_id,json=vendorId,proto3" json:"vendor_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreatePurchaseOrderRequest) Reset() {
+	*x = CreatePurchaseOrderRequest{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreatePurchaseOrderRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreatePurchaseOrderRequest) ProtoMessage() {}
+
+func (x *CreatePurchaseOrderRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreatePurchaseOrderRequest.ProtoReflect.Descriptor instead.
+func (*CreatePurchaseOrderRequest) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *CreatePurchaseOrderRequest) GetRequisitionId() string {
+	if x != nil {
+		return x.RequisitionId
+	}
+	return ""
+}
+
+func (x *CreatePurchaseOrderRequest) GetVendorId() string {
+	if x != nil {
+		return x.VendorId
+	}
+	return ""
+}
+
+// CreatePurchaseOrderResponse carries the PO and whether this call created
+// it: created=false means the requisition had already been converted and the
+// existing PO is returned as-is (the REST edge answers 200 instead of 201).
+type CreatePurchaseOrderResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	PurchaseOrder *PurchaseOrder         `protobuf:"bytes,1,opt,name=purchase_order,json=purchaseOrder,proto3" json:"purchase_order,omitempty"`
+	Created       bool                   `protobuf:"varint,2,opt,name=created,proto3" json:"created,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreatePurchaseOrderResponse) Reset() {
+	*x = CreatePurchaseOrderResponse{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreatePurchaseOrderResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreatePurchaseOrderResponse) ProtoMessage() {}
+
+func (x *CreatePurchaseOrderResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreatePurchaseOrderResponse.ProtoReflect.Descriptor instead.
+func (*CreatePurchaseOrderResponse) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *CreatePurchaseOrderResponse) GetPurchaseOrder() *PurchaseOrder {
+	if x != nil {
+		return x.PurchaseOrder
+	}
+	return nil
+}
+
+func (x *CreatePurchaseOrderResponse) GetCreated() bool {
+	if x != nil {
+		return x.Created
+	}
+	return false
+}
+
+// IssuePurchaseOrderRequest names the draft PO to issue (FR-06).
+type IssuePurchaseOrderRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IssuePurchaseOrderRequest) Reset() {
+	*x = IssuePurchaseOrderRequest{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IssuePurchaseOrderRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IssuePurchaseOrderRequest) ProtoMessage() {}
+
+func (x *IssuePurchaseOrderRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IssuePurchaseOrderRequest.ProtoReflect.Descriptor instead.
+func (*IssuePurchaseOrderRequest) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *IssuePurchaseOrderRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+// AcknowledgePurchaseOrderRequest names the issued PO to acknowledge.
+type AcknowledgePurchaseOrderRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AcknowledgePurchaseOrderRequest) Reset() {
+	*x = AcknowledgePurchaseOrderRequest{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AcknowledgePurchaseOrderRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AcknowledgePurchaseOrderRequest) ProtoMessage() {}
+
+func (x *AcknowledgePurchaseOrderRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AcknowledgePurchaseOrderRequest.ProtoReflect.Descriptor instead.
+func (*AcknowledgePurchaseOrderRequest) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *AcknowledgePurchaseOrderRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+// CancelPurchaseOrderRequest names the PO to cancel (draft, issued, or
+// acknowledged — and only while nothing has been received).
+type CancelPurchaseOrderRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CancelPurchaseOrderRequest) Reset() {
+	*x = CancelPurchaseOrderRequest{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CancelPurchaseOrderRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CancelPurchaseOrderRequest) ProtoMessage() {}
+
+func (x *CancelPurchaseOrderRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CancelPurchaseOrderRequest.ProtoReflect.Descriptor instead.
+func (*CancelPurchaseOrderRequest) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *CancelPurchaseOrderRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+// ClosePurchaseOrderRequest names the PO to close (partially_received or
+// received).
+type ClosePurchaseOrderRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ClosePurchaseOrderRequest) Reset() {
+	*x = ClosePurchaseOrderRequest{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ClosePurchaseOrderRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ClosePurchaseOrderRequest) ProtoMessage() {}
+
+func (x *ClosePurchaseOrderRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ClosePurchaseOrderRequest.ProtoReflect.Descriptor instead.
+func (*ClosePurchaseOrderRequest) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *ClosePurchaseOrderRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
 var File_procurement_v1_procurement_proto protoreflect.FileDescriptor
 
 const file_procurement_v1_procurement_proto_rawDesc = "" +
@@ -1629,7 +2142,48 @@ const file_procurement_v1_procurement_proto_rawDesc = "" +
 	"\x1bReplaceApprovalRulesRequest\x122\n" +
 	"\x05rules\x18\x01 \x03(\v2\x1c.procurement.v1.ApprovalRuleR\x05rules\"K\n" +
 	"\x15ApprovalRulesResponse\x122\n" +
-	"\x05rules\x18\x01 \x03(\v2\x1c.procurement.v1.ApprovalRuleR\x05rules2\x9d\t\n" +
+	"\x05rules\x18\x01 \x03(\v2\x1c.procurement.v1.ApprovalRuleR\x05rules\"\xbf\x03\n" +
+	"\rPurchaseOrder\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
+	"\ttenant_id\x18\x02 \x01(\tR\btenantId\x12\x16\n" +
+	"\x06number\x18\x03 \x01(\tR\x06number\x12%\n" +
+	"\x0erequisition_id\x18\x04 \x01(\tR\rrequisitionId\x12\x1b\n" +
+	"\tvendor_id\x18\x05 \x01(\tR\bvendorId\x12\x16\n" +
+	"\x06status\x18\x06 \x01(\tR\x06status\x12\x1a\n" +
+	"\bcurrency\x18\a \x01(\tR\bcurrency\x12\x1f\n" +
+	"\vtotal_cents\x18\b \x01(\x03R\n" +
+	"totalCents\x127\n" +
+	"\x05items\x18\t \x03(\v2!.procurement.v1.PurchaseOrderItemR\x05items\x12\x1b\n" +
+	"\tissued_at\x18\n" +
+	" \x01(\tR\bissuedAt\x12\x1d\n" +
+	"\n" +
+	"created_at\x18\v \x01(\tR\tcreatedAt\x12\x1d\n" +
+	"\n" +
+	"created_by\x18\f \x01(\tR\tcreatedBy\x12\x1d\n" +
+	"\n" +
+	"updated_at\x18\r \x01(\tR\tupdatedAt\x12\x1d\n" +
+	"\n" +
+	"updated_by\x18\x0e \x01(\tR\tupdatedBy\"\xa3\x01\n" +
+	"\x11PurchaseOrderItem\x12 \n" +
+	"\vdescription\x18\x01 \x01(\tR\vdescription\x12\x1f\n" +
+	"\vqty_ordered\x18\x02 \x01(\x05R\n" +
+	"qtyOrdered\x12!\n" +
+	"\fqty_received\x18\x03 \x01(\x05R\vqtyReceived\x12(\n" +
+	"\x10unit_price_cents\x18\x04 \x01(\x03R\x0eunitPriceCents\"`\n" +
+	"\x1aCreatePurchaseOrderRequest\x12%\n" +
+	"\x0erequisition_id\x18\x01 \x01(\tR\rrequisitionId\x12\x1b\n" +
+	"\tvendor_id\x18\x02 \x01(\tR\bvendorId\"}\n" +
+	"\x1bCreatePurchaseOrderResponse\x12D\n" +
+	"\x0epurchase_order\x18\x01 \x01(\v2\x1d.procurement.v1.PurchaseOrderR\rpurchaseOrder\x12\x18\n" +
+	"\acreated\x18\x02 \x01(\bR\acreated\"+\n" +
+	"\x19IssuePurchaseOrderRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"1\n" +
+	"\x1fAcknowledgePurchaseOrderRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\",\n" +
+	"\x1aCancelPurchaseOrderRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"+\n" +
+	"\x19ClosePurchaseOrderRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id2\x9b\r\n" +
 	"\vProcurement\x12K\n" +
 	"\fCreateVendor\x12#.procurement.v1.CreateVendorRequest\x1a\x16.procurement.v1.Vendor\x12E\n" +
 	"\tGetVendor\x12 .procurement.v1.GetVendorRequest\x1a\x16.procurement.v1.Vendor\x12K\n" +
@@ -1643,7 +2197,12 @@ const file_procurement_v1_procurement_proto_rawDesc = "" +
 	"\x0eGetRequisition\x12%.procurement.v1.GetRequisitionRequest\x1a\x1b.procurement.v1.Requisition\x12_\n" +
 	"\x0eDecideApproval\x12%.procurement.v1.DecideApprovalRequest\x1a&.procurement.v1.DecideApprovalResponse\x12b\n" +
 	"\x10GetApprovalRules\x12'.procurement.v1.GetApprovalRulesRequest\x1a%.procurement.v1.ApprovalRulesResponse\x12j\n" +
-	"\x14ReplaceApprovalRules\x12+.procurement.v1.ReplaceApprovalRulesRequest\x1a%.procurement.v1.ApprovalRulesResponseBFZDgithub.com/luksluki/eprocurement/gen/go/procurement/v1;procurementv1b\x06proto3"
+	"\x14ReplaceApprovalRules\x12+.procurement.v1.ReplaceApprovalRulesRequest\x1a%.procurement.v1.ApprovalRulesResponse\x12n\n" +
+	"\x13CreatePurchaseOrder\x12*.procurement.v1.CreatePurchaseOrderRequest\x1a+.procurement.v1.CreatePurchaseOrderResponse\x12^\n" +
+	"\x12IssuePurchaseOrder\x12).procurement.v1.IssuePurchaseOrderRequest\x1a\x1d.procurement.v1.PurchaseOrder\x12j\n" +
+	"\x18AcknowledgePurchaseOrder\x12/.procurement.v1.AcknowledgePurchaseOrderRequest\x1a\x1d.procurement.v1.PurchaseOrder\x12`\n" +
+	"\x13CancelPurchaseOrder\x12*.procurement.v1.CancelPurchaseOrderRequest\x1a\x1d.procurement.v1.PurchaseOrder\x12^\n" +
+	"\x12ClosePurchaseOrder\x12).procurement.v1.ClosePurchaseOrderRequest\x1a\x1d.procurement.v1.PurchaseOrderBFZDgithub.com/luksluki/eprocurement/gen/go/procurement/v1;procurementv1b\x06proto3"
 
 var (
 	file_procurement_v1_procurement_proto_rawDescOnce sync.Once
@@ -1657,30 +2216,38 @@ func file_procurement_v1_procurement_proto_rawDescGZIP() []byte {
 	return file_procurement_v1_procurement_proto_rawDescData
 }
 
-var file_procurement_v1_procurement_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_procurement_v1_procurement_proto_msgTypes = make([]protoimpl.MessageInfo, 30)
 var file_procurement_v1_procurement_proto_goTypes = []any{
-	(*Vendor)(nil),                      // 0: procurement.v1.Vendor
-	(*CreateVendorRequest)(nil),         // 1: procurement.v1.CreateVendorRequest
-	(*GetVendorRequest)(nil),            // 2: procurement.v1.GetVendorRequest
-	(*UpdateVendorRequest)(nil),         // 3: procurement.v1.UpdateVendorRequest
-	(*DeactivateVendorRequest)(nil),     // 4: procurement.v1.DeactivateVendorRequest
-	(*ListVendorsRequest)(nil),          // 5: procurement.v1.ListVendorsRequest
-	(*ListVendorsResponse)(nil),         // 6: procurement.v1.ListVendorsResponse
-	(*Requisition)(nil),                 // 7: procurement.v1.Requisition
-	(*ApprovalStep)(nil),                // 8: procurement.v1.ApprovalStep
-	(*RequisitionItem)(nil),             // 9: procurement.v1.RequisitionItem
-	(*CreateRequisitionRequest)(nil),    // 10: procurement.v1.CreateRequisitionRequest
-	(*UpdateRequisitionRequest)(nil),    // 11: procurement.v1.UpdateRequisitionRequest
-	(*SubmitRequisitionRequest)(nil),    // 12: procurement.v1.SubmitRequisitionRequest
-	(*ListRequisitionsRequest)(nil),     // 13: procurement.v1.ListRequisitionsRequest
-	(*ListRequisitionsResponse)(nil),    // 14: procurement.v1.ListRequisitionsResponse
-	(*GetRequisitionRequest)(nil),       // 15: procurement.v1.GetRequisitionRequest
-	(*DecideApprovalRequest)(nil),       // 16: procurement.v1.DecideApprovalRequest
-	(*DecideApprovalResponse)(nil),      // 17: procurement.v1.DecideApprovalResponse
-	(*ApprovalRule)(nil),                // 18: procurement.v1.ApprovalRule
-	(*GetApprovalRulesRequest)(nil),     // 19: procurement.v1.GetApprovalRulesRequest
-	(*ReplaceApprovalRulesRequest)(nil), // 20: procurement.v1.ReplaceApprovalRulesRequest
-	(*ApprovalRulesResponse)(nil),       // 21: procurement.v1.ApprovalRulesResponse
+	(*Vendor)(nil),                          // 0: procurement.v1.Vendor
+	(*CreateVendorRequest)(nil),             // 1: procurement.v1.CreateVendorRequest
+	(*GetVendorRequest)(nil),                // 2: procurement.v1.GetVendorRequest
+	(*UpdateVendorRequest)(nil),             // 3: procurement.v1.UpdateVendorRequest
+	(*DeactivateVendorRequest)(nil),         // 4: procurement.v1.DeactivateVendorRequest
+	(*ListVendorsRequest)(nil),              // 5: procurement.v1.ListVendorsRequest
+	(*ListVendorsResponse)(nil),             // 6: procurement.v1.ListVendorsResponse
+	(*Requisition)(nil),                     // 7: procurement.v1.Requisition
+	(*ApprovalStep)(nil),                    // 8: procurement.v1.ApprovalStep
+	(*RequisitionItem)(nil),                 // 9: procurement.v1.RequisitionItem
+	(*CreateRequisitionRequest)(nil),        // 10: procurement.v1.CreateRequisitionRequest
+	(*UpdateRequisitionRequest)(nil),        // 11: procurement.v1.UpdateRequisitionRequest
+	(*SubmitRequisitionRequest)(nil),        // 12: procurement.v1.SubmitRequisitionRequest
+	(*ListRequisitionsRequest)(nil),         // 13: procurement.v1.ListRequisitionsRequest
+	(*ListRequisitionsResponse)(nil),        // 14: procurement.v1.ListRequisitionsResponse
+	(*GetRequisitionRequest)(nil),           // 15: procurement.v1.GetRequisitionRequest
+	(*DecideApprovalRequest)(nil),           // 16: procurement.v1.DecideApprovalRequest
+	(*DecideApprovalResponse)(nil),          // 17: procurement.v1.DecideApprovalResponse
+	(*ApprovalRule)(nil),                    // 18: procurement.v1.ApprovalRule
+	(*GetApprovalRulesRequest)(nil),         // 19: procurement.v1.GetApprovalRulesRequest
+	(*ReplaceApprovalRulesRequest)(nil),     // 20: procurement.v1.ReplaceApprovalRulesRequest
+	(*ApprovalRulesResponse)(nil),           // 21: procurement.v1.ApprovalRulesResponse
+	(*PurchaseOrder)(nil),                   // 22: procurement.v1.PurchaseOrder
+	(*PurchaseOrderItem)(nil),               // 23: procurement.v1.PurchaseOrderItem
+	(*CreatePurchaseOrderRequest)(nil),      // 24: procurement.v1.CreatePurchaseOrderRequest
+	(*CreatePurchaseOrderResponse)(nil),     // 25: procurement.v1.CreatePurchaseOrderResponse
+	(*IssuePurchaseOrderRequest)(nil),       // 26: procurement.v1.IssuePurchaseOrderRequest
+	(*AcknowledgePurchaseOrderRequest)(nil), // 27: procurement.v1.AcknowledgePurchaseOrderRequest
+	(*CancelPurchaseOrderRequest)(nil),      // 28: procurement.v1.CancelPurchaseOrderRequest
+	(*ClosePurchaseOrderRequest)(nil),       // 29: procurement.v1.ClosePurchaseOrderRequest
 }
 var file_procurement_v1_procurement_proto_depIdxs = []int32{
 	0,  // 0: procurement.v1.ListVendorsResponse.vendors:type_name -> procurement.v1.Vendor
@@ -1692,37 +2259,49 @@ var file_procurement_v1_procurement_proto_depIdxs = []int32{
 	7,  // 6: procurement.v1.DecideApprovalResponse.requisition:type_name -> procurement.v1.Requisition
 	18, // 7: procurement.v1.ReplaceApprovalRulesRequest.rules:type_name -> procurement.v1.ApprovalRule
 	18, // 8: procurement.v1.ApprovalRulesResponse.rules:type_name -> procurement.v1.ApprovalRule
-	1,  // 9: procurement.v1.Procurement.CreateVendor:input_type -> procurement.v1.CreateVendorRequest
-	2,  // 10: procurement.v1.Procurement.GetVendor:input_type -> procurement.v1.GetVendorRequest
-	3,  // 11: procurement.v1.Procurement.UpdateVendor:input_type -> procurement.v1.UpdateVendorRequest
-	4,  // 12: procurement.v1.Procurement.DeactivateVendor:input_type -> procurement.v1.DeactivateVendorRequest
-	5,  // 13: procurement.v1.Procurement.ListVendors:input_type -> procurement.v1.ListVendorsRequest
-	10, // 14: procurement.v1.Procurement.CreateRequisition:input_type -> procurement.v1.CreateRequisitionRequest
-	11, // 15: procurement.v1.Procurement.UpdateRequisition:input_type -> procurement.v1.UpdateRequisitionRequest
-	12, // 16: procurement.v1.Procurement.SubmitRequisition:input_type -> procurement.v1.SubmitRequisitionRequest
-	13, // 17: procurement.v1.Procurement.ListRequisitions:input_type -> procurement.v1.ListRequisitionsRequest
-	15, // 18: procurement.v1.Procurement.GetRequisition:input_type -> procurement.v1.GetRequisitionRequest
-	16, // 19: procurement.v1.Procurement.DecideApproval:input_type -> procurement.v1.DecideApprovalRequest
-	19, // 20: procurement.v1.Procurement.GetApprovalRules:input_type -> procurement.v1.GetApprovalRulesRequest
-	20, // 21: procurement.v1.Procurement.ReplaceApprovalRules:input_type -> procurement.v1.ReplaceApprovalRulesRequest
-	0,  // 22: procurement.v1.Procurement.CreateVendor:output_type -> procurement.v1.Vendor
-	0,  // 23: procurement.v1.Procurement.GetVendor:output_type -> procurement.v1.Vendor
-	0,  // 24: procurement.v1.Procurement.UpdateVendor:output_type -> procurement.v1.Vendor
-	0,  // 25: procurement.v1.Procurement.DeactivateVendor:output_type -> procurement.v1.Vendor
-	6,  // 26: procurement.v1.Procurement.ListVendors:output_type -> procurement.v1.ListVendorsResponse
-	7,  // 27: procurement.v1.Procurement.CreateRequisition:output_type -> procurement.v1.Requisition
-	7,  // 28: procurement.v1.Procurement.UpdateRequisition:output_type -> procurement.v1.Requisition
-	7,  // 29: procurement.v1.Procurement.SubmitRequisition:output_type -> procurement.v1.Requisition
-	14, // 30: procurement.v1.Procurement.ListRequisitions:output_type -> procurement.v1.ListRequisitionsResponse
-	7,  // 31: procurement.v1.Procurement.GetRequisition:output_type -> procurement.v1.Requisition
-	17, // 32: procurement.v1.Procurement.DecideApproval:output_type -> procurement.v1.DecideApprovalResponse
-	21, // 33: procurement.v1.Procurement.GetApprovalRules:output_type -> procurement.v1.ApprovalRulesResponse
-	21, // 34: procurement.v1.Procurement.ReplaceApprovalRules:output_type -> procurement.v1.ApprovalRulesResponse
-	22, // [22:35] is the sub-list for method output_type
-	9,  // [9:22] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	23, // 9: procurement.v1.PurchaseOrder.items:type_name -> procurement.v1.PurchaseOrderItem
+	22, // 10: procurement.v1.CreatePurchaseOrderResponse.purchase_order:type_name -> procurement.v1.PurchaseOrder
+	1,  // 11: procurement.v1.Procurement.CreateVendor:input_type -> procurement.v1.CreateVendorRequest
+	2,  // 12: procurement.v1.Procurement.GetVendor:input_type -> procurement.v1.GetVendorRequest
+	3,  // 13: procurement.v1.Procurement.UpdateVendor:input_type -> procurement.v1.UpdateVendorRequest
+	4,  // 14: procurement.v1.Procurement.DeactivateVendor:input_type -> procurement.v1.DeactivateVendorRequest
+	5,  // 15: procurement.v1.Procurement.ListVendors:input_type -> procurement.v1.ListVendorsRequest
+	10, // 16: procurement.v1.Procurement.CreateRequisition:input_type -> procurement.v1.CreateRequisitionRequest
+	11, // 17: procurement.v1.Procurement.UpdateRequisition:input_type -> procurement.v1.UpdateRequisitionRequest
+	12, // 18: procurement.v1.Procurement.SubmitRequisition:input_type -> procurement.v1.SubmitRequisitionRequest
+	13, // 19: procurement.v1.Procurement.ListRequisitions:input_type -> procurement.v1.ListRequisitionsRequest
+	15, // 20: procurement.v1.Procurement.GetRequisition:input_type -> procurement.v1.GetRequisitionRequest
+	16, // 21: procurement.v1.Procurement.DecideApproval:input_type -> procurement.v1.DecideApprovalRequest
+	19, // 22: procurement.v1.Procurement.GetApprovalRules:input_type -> procurement.v1.GetApprovalRulesRequest
+	20, // 23: procurement.v1.Procurement.ReplaceApprovalRules:input_type -> procurement.v1.ReplaceApprovalRulesRequest
+	24, // 24: procurement.v1.Procurement.CreatePurchaseOrder:input_type -> procurement.v1.CreatePurchaseOrderRequest
+	26, // 25: procurement.v1.Procurement.IssuePurchaseOrder:input_type -> procurement.v1.IssuePurchaseOrderRequest
+	27, // 26: procurement.v1.Procurement.AcknowledgePurchaseOrder:input_type -> procurement.v1.AcknowledgePurchaseOrderRequest
+	28, // 27: procurement.v1.Procurement.CancelPurchaseOrder:input_type -> procurement.v1.CancelPurchaseOrderRequest
+	29, // 28: procurement.v1.Procurement.ClosePurchaseOrder:input_type -> procurement.v1.ClosePurchaseOrderRequest
+	0,  // 29: procurement.v1.Procurement.CreateVendor:output_type -> procurement.v1.Vendor
+	0,  // 30: procurement.v1.Procurement.GetVendor:output_type -> procurement.v1.Vendor
+	0,  // 31: procurement.v1.Procurement.UpdateVendor:output_type -> procurement.v1.Vendor
+	0,  // 32: procurement.v1.Procurement.DeactivateVendor:output_type -> procurement.v1.Vendor
+	6,  // 33: procurement.v1.Procurement.ListVendors:output_type -> procurement.v1.ListVendorsResponse
+	7,  // 34: procurement.v1.Procurement.CreateRequisition:output_type -> procurement.v1.Requisition
+	7,  // 35: procurement.v1.Procurement.UpdateRequisition:output_type -> procurement.v1.Requisition
+	7,  // 36: procurement.v1.Procurement.SubmitRequisition:output_type -> procurement.v1.Requisition
+	14, // 37: procurement.v1.Procurement.ListRequisitions:output_type -> procurement.v1.ListRequisitionsResponse
+	7,  // 38: procurement.v1.Procurement.GetRequisition:output_type -> procurement.v1.Requisition
+	17, // 39: procurement.v1.Procurement.DecideApproval:output_type -> procurement.v1.DecideApprovalResponse
+	21, // 40: procurement.v1.Procurement.GetApprovalRules:output_type -> procurement.v1.ApprovalRulesResponse
+	21, // 41: procurement.v1.Procurement.ReplaceApprovalRules:output_type -> procurement.v1.ApprovalRulesResponse
+	25, // 42: procurement.v1.Procurement.CreatePurchaseOrder:output_type -> procurement.v1.CreatePurchaseOrderResponse
+	22, // 43: procurement.v1.Procurement.IssuePurchaseOrder:output_type -> procurement.v1.PurchaseOrder
+	22, // 44: procurement.v1.Procurement.AcknowledgePurchaseOrder:output_type -> procurement.v1.PurchaseOrder
+	22, // 45: procurement.v1.Procurement.CancelPurchaseOrder:output_type -> procurement.v1.PurchaseOrder
+	22, // 46: procurement.v1.Procurement.ClosePurchaseOrder:output_type -> procurement.v1.PurchaseOrder
+	29, // [29:47] is the sub-list for method output_type
+	11, // [11:29] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_procurement_v1_procurement_proto_init() }
@@ -1736,7 +2315,7 @@ func file_procurement_v1_procurement_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_procurement_v1_procurement_proto_rawDesc), len(file_procurement_v1_procurement_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   22,
+			NumMessages:   30,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

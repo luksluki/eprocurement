@@ -205,10 +205,11 @@ items pattern — the policy derives tenancy from the parent requisition via
 ## Migration 0006 — `procurement.outbox` + `procurement.decision_idempotency` (#31)
 
 The persistent half of the transactional outbox (PRD §14.3, ADR-0001):
-state writes and their events commit atomically in one transaction; the
-publisher loop that drains the table to RabbitMQ (poll 2 s, batch 50,
-`published_at` marker, retries, DLQ) stays with #45. `outbox.AppendTx`
-(`services/procurement/outbox`) is the writer; Decide is its first caller.
+state writes and their events commit atomically in one transaction.
+`outbox.AppendTx` (`services/procurement/outbox`) is the writer; Decide
+(#31) and Submit (#45, `pr.submitted`) are its callers. The publisher loop
+that drains the table to RabbitMQ landed with #45 — see the publisher
+section below.
 
 `procurement.outbox`:
 
@@ -263,6 +264,282 @@ uniqueness scope is the tenant, and `approval_steps` deliberately carries no
 23505 leak which keys exist in other tenants. **RLS**: the 0001 tenant
 pattern on `tenant_id`.
 
+### Outbox publisher (#45)
+
+The worker's publisher loop (`services/worker/publisher`) drains the table
+to RabbitMQ per PRD §16: poll every 2 s (batch 50 — env overrides
+`WORKER_POLL_INTERVAL`/`WORKER_BATCH_SIZE` exist for tests only), oldest
+first, publish, mark. The read/write side (`outbox.Pending` /
+`outbox.MarkPublished`, `services/procurement/outbox/pending.go`) lives with
+the table's owning service and is executed by the worker — a conscious
+cross-service import inside the single Go module.
+
+- **Cross-tenant read on purpose.** Pending and MarkPublished run through
+  the transaction-scoped `app.rls_bypass` arm because one batch drains every
+  tenant's rows. This is the deliberate, documented inverse of the
+  "every query is tenant-scoped" convention — writer-side RLS stays
+  enforced (AppendTx only runs inside `WithTenant`; a tenant-scoped read
+  still sees only its own rows, verified by test).
+- **Envelope.** The PRD §14.5 envelope `{event_id, tenant_id, type,
+  version, occurred_at, actor_id, trace_id, payload}` is assembled 1:1 from
+  the row columns — no payload parsing. It is published as JSON to the
+  durable topic exchange `procurement.events` with routing key = event
+  type, `delivery_mode` persistent, on a confirm-mode channel; the loop
+  waits for the broker confirm before marking `published_at`.
+- **At-least-once.** A crash between publish and mark republishes the row
+  next tick; consumers dedupe on `event_id` (§14.8). A publish failure
+  (broker down, confirm timeout) or a poll failure (database restarting,
+  migrations not yet applied on a fresh volume) is non-fatal: warn log with
+  the event's `trace_id`, next tick retries. The worker deliberately runs
+  no migrations — procurement stays the sole applier — so its `depends_on`
+  in compose is only postgres + rabbitmq healthy.
+- **RabbitMQ topology (#46).** Connecting declares the full §14.5 topology
+  (next section) — the exchanges, the three consumer queues with their DLX
+  argument and TTL retry ladders, and the DLQ — replacing #45's PROVISIONAL
+  bootstrap. The `procurement.dlx`/`procurement.dlq` declarations stayed
+  argument-identical, so redeclaring on a broker that carries the #45 pair
+  cannot raise PRECONDITION_FAILED.
+- **Observability (#54 follow-up).** What exists now is the structured
+  publish log (`event_id`, `tenant_id`, `event_type`, `trace_id` from the
+  row). OTel spans, trace propagation into AMQP headers, and the outbox
+  lag metric (§18) are deferred to #54, which introduces the observability
+  stack (compose.yaml's profile note); the repo has no OTel/Prometheus code
+  yet.
+
+**`pr.submitted` payload (#45, pinned public contract)** — written by the
+Submit transaction (`requisition/store.go` appendSubmittedTx): the same
+basket of consumers as the decide events reads it (timeline #43;
+notifications reads `requester_id` as the recipient). snake_case follows
+the DecisionPayload convention: `requisition_id`, `number`, `requester_id`,
+`currency`, `total_cents`, `submitted_by`, `submitted_at`. One row on a
+successful submit; zero on an idempotent replay or any rollback (missing
+approval rules, empty basket, illegal transition).
+
+**Numbering mismatch, flagged:** `approval/store.go`'s DecisionPayload
+comment and dev-note 031 call the notification consumer "the #45 worker";
+issue #45's own scope text covers the publisher only. The consumers remain
+future issues — the references are historical, kept as-is.
+
+### RabbitMQ topology (#46)
+
+Declared once, idempotently, on every publisher connect (boot and
+reconnect) by `services/worker/topology`; the #47 consumers reuse the same
+declaration. It replaces #45's PROVISIONAL DLX bootstrap — the
+`procurement.dlx`/`procurement.dlq` declarations are argument-identical to
+that bootstrap, so the handover cannot raise PRECONDITION_FAILED on a
+broker that already carries it.
+
+- **Exchanges.** `procurement.events` (topic, durable) — the publisher's
+  target, routing key = event type (§14.6); `procurement.dlx` (topic,
+  durable) — the dead-letter destination.
+- **Main queues** (durable, `x-dead-letter-exchange: procurement.dlx`):
+  `documents.history` bound `#` (the history projection takes the whole
+  catalog), `notifications` bound the actor-facing subset `pr.submitted`,
+  `pr.approved`, `pr.rejected`, `po.issued`, `po.acknowledged`,
+  `invoice.discrepancy`, and `exports` bound `export.requested`. This
+  binding table is the repo's routing convention; the notifications subset
+  is the one judgement call in it, documented in dev-note 046 and open to
+  maintainer override.
+- **Retry ladder.** `<queue>.retry.1/2/3` per main queue — durable,
+  `x-message-ttl` 5 s → 30 s → 5 min, empty `x-dead-letter-exchange` (the
+  default exchange) and `x-dead-letter-routing-key` = the main queue's
+  name: a parked message returns to its own queue only, so one queue's
+  retries can never land in another's. Nothing consumes the tiers; the TTL
+  does the waiting, the broker does the dead-lettering back.
+- **Failure path.** Consumers (#47) track attempts in the `x-retry-count`
+  header through `topology.NextRetry` / `topology.RetryCount`: failures
+  1–3 republish to the next tier with a bumped count; the 4th failure
+  rejects without requeue, the queue's DLX argument routes it to
+  `procurement.dlx`, and the `#`-bound `procurement.dlq` is the final,
+  admin-visible destination (§14.5 "after max attempts → DLQ").
+
+## Migration 0007 — `procurement.purchase_orders` / `po_items` / `po_counters` (#35)
+
+The storage mirror of the `purchaseorder` domain package: the draft PO that
+conversion (#35) creates from an approved requisition. The lifecycle
+transitions out of `draft` (issue → acknowledged → … → closed/cancelled,
+FR-06) landed with #36 and only move `status` / `issued_at` here — see the
+[PO lifecycle state machine](#po-lifecycle-state-machine-36) section.
+
+`procurement.purchase_orders`:
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | `gen_random_uuid()` |
+| `tenant_id` | uuid NOT NULL | RLS scoping key |
+| `number` | text NOT NULL | `UNIQUE (tenant_id, number)` — `PO-%06d`, allocated per tenant |
+| `requisition_id` | uuid NOT NULL | FK → `requisitions` (no cascade — a converted requisition must not be deletable); **`UNIQUE (tenant_id, requisition_id)` = "cannot convert twice" as a database guarantee** |
+| `vendor_id` | uuid NOT NULL | FK → `vendors`; chosen at conversion (requisitions carry no vendor, PRD §13) |
+| `status` | text NOT NULL DEFAULT `draft` | CHECK: all **seven** FR-06 statuses (`draft`, `issued`, `acknowledged`, `partially_received`, `received`, `closed`, `cancelled`) from day one, so #36 never needs an ALTER CHECK; #35 writes `draft` only |
+| `currency` | text NOT NULL | CHECK `IDR` \| `USD` — **delta vs §13**: the requisition's currency, copied verbatim (every money field needs its unit) |
+| `total_cents` | bigint NOT NULL DEFAULT 0 | §13's `total` as integer cents; recomputed server-side from the copied lines (= the requisition's total) |
+| `issued_at` | timestamptz NULL | NULL while draft; #36 sets it on issue |
+| `created_at`/`created_by`, `updated_at`/`updated_by` | timestamptz / uuid | audit fields, same shape as vendors/requisitions (**delta vs §13**) |
+
+`procurement.po_items` (no `tenant_id` — PRD §13; tenancy derives from the
+parent PO, exactly like `requisition_items`):
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | `gen_random_uuid()` |
+| `po_id` | uuid NOT NULL | FK → `purchase_orders` `ON DELETE CASCADE` |
+| `description` | text NOT NULL | copied verbatim from the requisition line |
+| `qty_ordered` | integer NOT NULL | CHECK `> 0`; copied verbatim |
+| `qty_received` | integer NOT NULL DEFAULT 0 | CHECK `>= 0`; 0 on creation, advanced by goods receipts (#37) |
+| `unit_price_cents` | bigint NOT NULL | CHECK `>= 0`; §13's `unit_price` as integer cents, copied verbatim |
+| `created_at` | timestamptz NOT NULL | |
+
+The requisition line's `category` is not carried — §13's po_items has no
+category column.
+
+`procurement.po_counters` — one row per tenant (`tenant_id` PK,
+`last_number`), the exact 0004 pattern. **A counter table, not a native
+PostgreSQL SEQUENCE**: `nextval()` is not transactional — it never rolls
+back — so a conversion that fails after allocation (vendor deactivated,
+requisition not approved) would burn a number and leave a gap in the
+per-tenant sequence (FR-05). `UPDATE … RETURNING` under the counter row lock
+rolls the increment back with the transaction, keeping numbers gap-free.
+**RLS**: the 0001/0004 tenant pattern on all three tables (items derive
+tenancy from the parent PO via `EXISTS`, like `requisition_items`).
+
+### PO creation — the conversion contract (#35)
+
+`POST /api/v1/purchase-orders/from-requisition/{id}` (`po:write`, buyer/admin
+at both layers; PRD §15) with `{"vendor_id": "<uuid>"}` — **vendor_id is
+required**: the requisition carries no vendor (PRD §13). The whole flow is
+one tenant transaction whose step order is pinned
+(`purchaseorder.Store.CreateFromRequisition`):
+
+1. **Lock** the requisition row `FOR UPDATE` (`requisition.LoadForUpdate`) —
+   the serialization point shared with submit/edit/decide.
+2. **Replay lookup** by `(tenant_id, requisition_id)`: a PO that already
+   exists is returned **as-is** with `created=false` — HTTP **200** (201 only
+   when this call created the PO), the vendor gate skipped, a differing
+   `vendor_id` ignored, no second write, no second outbox row.
+   This includes replays after the vendor has since been deactivated: the
+   gate runs on the creation path only.
+3. **Vendor gate inside the transaction** — `vendor.ForUseTx(ctx, tx, id)`,
+   the tx-scoped twin of #25's pool-based `GetForUse` (which opens its own
+   transaction and cannot run inside the caller's): only an **active** vendor
+   of the tenant converts, and it cannot be deactivated between the check
+   and the insert (anti-TOCTOU). Deactivated → 412 `vendor_deactivated`, the
+   whole transaction rolls back (requisition stays approved, no number
+   burned).
+4. **Status gate**: only an `approved` requisition converts — anything else
+   → 409 `po_requisition_not_approved`.
+5. **Number allocation**: `PO-%06d` from `po_counters` (lazy init + UPDATE …
+   RETURNING under the row lock) **after** the gates, so failures roll the
+   increment back.
+6. **Guarded close**: the requisition moves `approved → closed` — the domain
+   edge #28's state machine reserved for this flow (`Close`), re-checked by a
+   `status = 'approved'`-guarded UPDATE.
+7. **Insert** the PO + copy the requisition lines verbatim (`qty_received`
+   starts 0); `total_cents` is recomputed server-side and must equal the
+   requisition's total (asserted).
+8. **Outbox**: exactly one `po.created` row commits atomically with the PO
+   (below).
+
+Concurrent conversions of one requisition serialize on the requisition lock:
+one creates, the other replays the winner's PO — the
+`(tenant_id, requisition_id)` unique index is the belt-and-braces backstop.
+**Gap-free numbering evidence lives in the store test suite**
+(`services/procurement/purchaseorder/store_test.go`): sequential conversions
+number `PO-000001..N`, a failed conversion burns no number (the next success
+is still sequential), concurrent conversions of different requisitions form
+one consecutive run, and the two tenants' counters are independent. The seed
+cannot prove this: it writes POs straight into `demo.purchase_orders`
+(`scripts/seed`), which never passes through the conversion path.
+
+**Events.** One `po.created` outbox row per conversion (entity =
+`purchase_order`/the PO id, `actor_id` = caller, `trace_id` = propagated REST
+trace, version 1). Two segments so the §14.5 `po.*` bindings deliver it; it
+**extends the §14.6 catalog** (whose first PO event is `po.issued`, #36's)
+the same way #31's `pr.step_approved` did. Pinned payload:
+`{number, requisition_id, requisition_number, vendor_id, total_cents,
+currency, created_by}` — `requisition_number` so a PO timeline can link back
+to its requisition (#43). **Known gap (conscious)**: closing the requisition
+writes **no requisition-side event** — submit/cancel also write none today;
+only Decide writes `pr.*` rows. The requisition timeline (#43, already
+shipped) therefore does not show the conversion, despite FR-11's "every
+state change appears in document timeline". A `pr.converted`/`pr.closed`
+event is a follow-up candidate for #36/#45.
+
+Error codes: `po_vendor_id_invalid` (empty/non-UUID vendor_id, rejected
+before the transaction opens), `po_currency_invalid`, `po_items_empty` → 400
+· `po_requisition_not_approved` → 409 · `requisition_not_found`,
+`vendor_not_found` → 404 (both also the cross-tenant answer) ·
+`requisition_id_invalid` → 400 · `vendor_deactivated` → 412. The gateway
+carries them through the shared gRPC→HTTP mapping (`Aborted` → 409,
+`FailedPrecondition` → 412).
+
+## PO lifecycle state machine (#36)
+
+Ten legal edges over the seven 0007 statuses (FR-06): the linear happy path
+`draft → issued → acknowledged → partially_received → received → closed`, a
+loose cancel (`draft`, `issued`, and `acknowledged` may all cancel, subject
+to the receipt guard), and a short-close (`partially_received → closed` —
+accepting the shortfall). `closed` and `cancelled` are terminal. Every other
+move — self-loops, skips, and anything out of a terminal status — is
+`po_illegal_transition` (HTTP 409) with **no** state change and **no** event.
+
+```
+draft ──issue──▶ issued ──acknowledge──▶ acknowledged ──receipt──▶ partially_received ──receipt──▶ received
+  │                 │                        │                        │                               │
+  └──── cancel ─────┴──────── cancel ────────┘                        └───────── short-close ──────────┤
+                                                                                (receipts pin the PO:         ▼
+                                                                                 no cancel past this point)  closed
+```
+
+- **Cancel guard (receipts)** — cancel is legal only from
+  draft/issued/acknowledged **and** while the total `qty_received` over all
+  lines is 0. Any receipt pins the PO: `po_has_receipts` (409), nothing
+  written; the only exit from partially_received/received is `close`. The
+  edge check wins over the receipt check — cancelling a received PO answers
+  `po_illegal_transition`, not `po_has_receipts`.
+- **Receipt edges are domain-owned since #36 but driven by #37** — goods
+  receipts advance `po_items.qty_received` and call
+  `MarkPartiallyReceived`/`MarkReceived` under the same row lock (the #28
+  `Close` precedent: the method exists and is tested before its driver).
+- **Issue stamps `issued_at`** (NULL while draft, set on draft → issued,
+  preserved afterwards) and starts the acknowledgement SLA clock (PRD §16:
+  reminders for POs awaiting acknowledgement > 3 days).
+
+**Store contract** (`purchaseorder.Store.Issue/Acknowledge/Cancel/Close`):
+one tenant transaction per transition with a pinned step order — load the PO
+(header + items) `FOR UPDATE` on the row lock (the serialization point every
+lifecycle transition shares; #37's receipts will take the same lock, so a
+concurrent issue/receipt pair yields exactly one winner), run the domain
+method (guards + one aggregate event), land a guarded
+`UPDATE … WHERE id = $1 AND status = '<from>'` (the from-status re-check is
+belt and braces — losing that race is `po_illegal_transition`), and append
+**exactly one** outbox row. An illegal transition or the receipt guard fails
+before the UPDATE, so the whole transaction rolls back: no status move, no
+outbox row.
+
+**Events.** One outbox row per legal transition (entity =
+`purchase_order`/the PO id, `actor_id` = caller, `trace_id` = propagated REST
+trace, version 1): `po.issued` and `po.acknowledged` are §14.6 catalog
+entries; `po.cancelled` and `po.closed` **extend the catalog** (two segments
+so the §14.5 `po.*` bindings deliver them — the same documented extension as
+#35's `po.created` and #31's `pr.step_approved`). Pinned payload shared by
+all four: `{number, requisition_id, vendor_id, status, total_cents,
+currency, performed_by}` (`status` = the new status; `performed_by` = the
+actor, self-contained the way `DecisionPayload.decided_by` is). The receipt
+transitions write no outbox rows until #37 defines their event shape. The
+aggregate also keeps an in-memory event log (`Events()`/`PullEvents()`, the
+requisition pattern) with aggregate-local names (`po_issued`, …) — creation
+still records none in memory (dev-note 035: `po.created` is the outbox row).
+
+**API** (all `po:write` — buyer/admin at gateway and interceptor): gRPC
+`IssuePurchaseOrder` / `AcknowledgePurchaseOrder` / `CancelPurchaseOrder` /
+`ClosePurchaseOrder`; REST `POST /api/v1/purchase-orders/{id}/issue` (PRD
+§15) plus `/acknowledge`, `/cancel`, `/close` — no request body, the path id
+names the PO, the response is **200 + the updated PO**. Error codes:
+`po_id_invalid` → 400 · `po_not_found` → 404 (also the cross-tenant answer,
+via RLS) · `po_illegal_transition`, `po_has_receipts` → 409 (FR-06's
+"invalid transitions rejected with 409", through `Aborted` in the shared
+gRPC→HTTP mapping).
+
 ## Requisition state machine (#28)
 
 Seven legal edges (loose cancel — maintainer decision on #28):
@@ -272,10 +549,12 @@ Seven legal edges (loose cancel — maintainer decision on #28):
 `approved → closed` is driven by PO conversion (#35); the domain `Close`
 method exists now. Every successful transition appends exactly one domain
 event (`requisition_submitted`, …, plus `requisition_created` on draft
-creation) to the in-memory aggregate log (`Events()` / `PullEvents()`). The
-decide events are persisted to `procurement.outbox` since #31 (0006);
-submit/create events still live only in the in-memory log until #45 wires
-them.
+creation) to the in-memory aggregate log (`Events()` / `PullEvents()`).
+Since #31 the decide events and since #45 the `pr.submitted` event are
+persisted to `procurement.outbox` in the same transaction as their state
+change; the create/draft event deliberately stays in-memory only — the
+§14.6 catalog names no create event (`pr.submitted` is the first published
+step of the lifecycle) — until a catalog decision says otherwise.
 
 Error codes: `requisition_currency_invalid`, `requisition_description_invalid`,
 `requisition_qty_invalid`, `requisition_unit_price_invalid`,
@@ -374,7 +653,11 @@ missing (404 `requisition_not_found`).
 - #29: requisition create/edit/submit API (done — store, number generation, idempotent submit, REST/gRPC wiring, gateway `Aborted` → 409). Read endpoints: **list done in #32**, **get done in #33** (see below); timeline is a separate issue.
 - #30: approval rules + sequential engine + decide API (done — matrix materialization, 412 rollback, self/role enforcement, reject-skips, admin rule configuration, steps in-band).
 - #31: idempotent decide + outbox audit/notification events (done — `procurement.outbox` + `decision_idempotency` in 0006, decide replay/conflict contract, `pr.*` decide events with actor + trace, gateway `x-trace-id` propagation). **Re-sequenced with #45** by an agent decision: the outbox table + writer moved from #45's scope into #31 (see dev-note 031's provenance block); #45 keeps the publisher loop only.
-- Approvals read endpoints/queue #32-34, PO conversion (#35), outbox publisher (#45 — poll/publish/retry/DLQ only; table and writer landed with #31) (M2–M3).
+- #45: transactional outbox publisher (done — worker publisher loop: poll 2 s / batch 50, §14.5 envelope to the durable topic exchange `procurement.events` with confirm-mode persistent publishes, `published_at` marking, non-fatal poll/publish errors, `pr.submitted` written by the Submit transaction; the PROVISIONAL DLX bootstrap is superseded by #46's full topology). AMQP consumers, retry queues, and DLQ handling remain with the consumer issues; observability (spans, AMQP trace headers, outbox lag metric) is #54. (M2–M3)
+- #46: RabbitMQ topology with DLX and TTL retry queues (done — durable `procurement.events`/`procurement.dlx` exchanges, `documents.history`/`notifications`/`exports` queues with DLX arguments, per-queue retry ladders 5 s → 30 s → 5 min returning to their own queue, `procurement.dlq` bound `#`; consumers arrive with #47). (M2–M3)
+- #35: PO creation from an approved requisition (done — 0007 tables, draft PO with copied lines, per-tenant gap-free `PO-%06d` numbering, conversion replay contract, tx-scoped active-vendor gate `ForUseTx`, guarded `approved → closed`, one `po.created` outbox event). Goods receipts (#37) and the missing `pr.converted` requisition-side event are follow-ups.
+- #36: PO lifecycle state machine (done — ten legal edges over the seven statuses, receipt-guarded cancel, `issued_at` on issue, guarded tenant-scoped transitions serialized on the PO row lock, one outbox event per transition, gRPC + REST issue/acknowledge/cancel/close at `po:write`). Goods receipts (#37) drive the receipt edges.
+- Approvals read endpoints/queue #32-34 (M2–M3).
 - The timeline/event read path (#42/#43/#47, `GET /api/v1/events`) consumes the outbox's `entity_type`/`entity_id` columns; a tenant+entity index arrives with whichever issue first queries them.
 
 ## Vendor list — filters, pagination, query plans (#27)

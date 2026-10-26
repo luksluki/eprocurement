@@ -42,6 +42,10 @@ type fakeDocumentsClient struct {
 
 	downloadResp *documentsv1.GetDownloadUrlResponse
 	downloadErr  error
+
+	listEventsReq  *documentsv1.ListEventsRequest
+	listEventsResp *documentsv1.ListEventsResponse
+	listEventsErr  error
 }
 
 func (f *fakeDocumentsClient) CreateUpload(ctx context.Context, in *documentsv1.CreateUploadRequest, opts ...grpc.CallOption) (*documentsv1.CreateUploadResponse, error) {
@@ -74,6 +78,14 @@ func (f *fakeDocumentsClient) GetDownloadUrl(ctx context.Context, in *documentsv
 		return nil, f.downloadErr
 	}
 	return f.downloadResp, nil
+}
+
+func (f *fakeDocumentsClient) ListEvents(ctx context.Context, in *documentsv1.ListEventsRequest, opts ...grpc.CallOption) (*documentsv1.ListEventsResponse, error) {
+	f.lastCtx, f.listEventsReq = ctx, in
+	if f.listEventsErr != nil {
+		return nil, f.listEventsErr
+	}
+	return f.listEventsResp, nil
 }
 
 // attachmentTestApp wires vendor + attachment routes against fakes and

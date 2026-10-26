@@ -19,28 +19,33 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Procurement_CreateVendor_FullMethodName         = "/procurement.v1.Procurement/CreateVendor"
-	Procurement_GetVendor_FullMethodName            = "/procurement.v1.Procurement/GetVendor"
-	Procurement_UpdateVendor_FullMethodName         = "/procurement.v1.Procurement/UpdateVendor"
-	Procurement_DeactivateVendor_FullMethodName     = "/procurement.v1.Procurement/DeactivateVendor"
-	Procurement_ListVendors_FullMethodName          = "/procurement.v1.Procurement/ListVendors"
-	Procurement_CreateRequisition_FullMethodName    = "/procurement.v1.Procurement/CreateRequisition"
-	Procurement_UpdateRequisition_FullMethodName    = "/procurement.v1.Procurement/UpdateRequisition"
-	Procurement_SubmitRequisition_FullMethodName    = "/procurement.v1.Procurement/SubmitRequisition"
-	Procurement_ListRequisitions_FullMethodName     = "/procurement.v1.Procurement/ListRequisitions"
-	Procurement_GetRequisition_FullMethodName       = "/procurement.v1.Procurement/GetRequisition"
-	Procurement_DecideApproval_FullMethodName       = "/procurement.v1.Procurement/DecideApproval"
-	Procurement_GetApprovalRules_FullMethodName     = "/procurement.v1.Procurement/GetApprovalRules"
-	Procurement_ReplaceApprovalRules_FullMethodName = "/procurement.v1.Procurement/ReplaceApprovalRules"
+	Procurement_CreateVendor_FullMethodName             = "/procurement.v1.Procurement/CreateVendor"
+	Procurement_GetVendor_FullMethodName                = "/procurement.v1.Procurement/GetVendor"
+	Procurement_UpdateVendor_FullMethodName             = "/procurement.v1.Procurement/UpdateVendor"
+	Procurement_DeactivateVendor_FullMethodName         = "/procurement.v1.Procurement/DeactivateVendor"
+	Procurement_ListVendors_FullMethodName              = "/procurement.v1.Procurement/ListVendors"
+	Procurement_CreateRequisition_FullMethodName        = "/procurement.v1.Procurement/CreateRequisition"
+	Procurement_UpdateRequisition_FullMethodName        = "/procurement.v1.Procurement/UpdateRequisition"
+	Procurement_SubmitRequisition_FullMethodName        = "/procurement.v1.Procurement/SubmitRequisition"
+	Procurement_ListRequisitions_FullMethodName         = "/procurement.v1.Procurement/ListRequisitions"
+	Procurement_GetRequisition_FullMethodName           = "/procurement.v1.Procurement/GetRequisition"
+	Procurement_DecideApproval_FullMethodName           = "/procurement.v1.Procurement/DecideApproval"
+	Procurement_GetApprovalRules_FullMethodName         = "/procurement.v1.Procurement/GetApprovalRules"
+	Procurement_ReplaceApprovalRules_FullMethodName     = "/procurement.v1.Procurement/ReplaceApprovalRules"
+	Procurement_CreatePurchaseOrder_FullMethodName      = "/procurement.v1.Procurement/CreatePurchaseOrder"
+	Procurement_IssuePurchaseOrder_FullMethodName       = "/procurement.v1.Procurement/IssuePurchaseOrder"
+	Procurement_AcknowledgePurchaseOrder_FullMethodName = "/procurement.v1.Procurement/AcknowledgePurchaseOrder"
+	Procurement_CancelPurchaseOrder_FullMethodName      = "/procurement.v1.Procurement/CancelPurchaseOrder"
+	Procurement_ClosePurchaseOrder_FullMethodName       = "/procurement.v1.Procurement/ClosePurchaseOrder"
 )
 
 // ProcurementClient is the client API for Procurement service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// Procurement is the internal domain API (vendors first; requisitions, POs,
-// GRNs, and invoices arrive with later issues). Reachable only inside the
-// backend network; clients go through the gateway.
+// Procurement is the internal domain API (vendors and requisitions first;
+// PO conversion below; GRNs and invoices arrive with later issues). Reachable
+// only inside the backend network; clients go through the gateway.
 type ProcurementClient interface {
 	// CreateVendor validates and inserts a vendor. The caller's tenant and user
 	// come from the auth metadata (x-tenant-id / x-user-id / x-role) injected
@@ -107,6 +112,41 @@ type ProcurementClient interface {
 	// transaction (delete + insert). Rules are a live configuration: replacing
 	// them never changes steps already materialized on submitted requisitions.
 	ReplaceApprovalRules(ctx context.Context, in *ReplaceApprovalRulesRequest, opts ...grpc.CallOption) (*ApprovalRulesResponse, error)
+	// CreatePurchaseOrder converts one approved requisition of the caller's
+	// tenant into a draft purchase order (FR-05): lines are copied exactly
+	// once, total_cents is recomputed server-side (= the requisition's), and
+	// the PO number (PO-%06d) is allocated per tenant inside the conversion
+	// transaction — a failed conversion burns no number. vendor_id is
+	// required and must name an active vendor of the tenant (requisitions
+	// carry no vendor). Idempotent per requisition: converting again returns
+	// the existing PO unchanged with created=false (the vendor gate is skipped
+	// and a differing vendor_id ignored on replay). On success the
+	// requisition closes (approved → closed) and exactly one po.created
+	// outbox event commits atomically with the PO. The issue transition,
+	// issued_at, and po.issued belong to the lifecycle API (#36).
+	CreatePurchaseOrder(ctx context.Context, in *CreatePurchaseOrderRequest, opts ...grpc.CallOption) (*CreatePurchaseOrderResponse, error)
+	// IssuePurchaseOrder moves a draft PO of the caller's tenant to issued and
+	// stamps issued_at (FR-06) — the PO leaves the buyer and the
+	// acknowledgement SLA clock starts. Anything but draft is rejected
+	// (po_illegal_transition); exactly one po.issued outbox event commits with
+	// the transition.
+	IssuePurchaseOrder(ctx context.Context, in *IssuePurchaseOrderRequest, opts ...grpc.CallOption) (*PurchaseOrder, error)
+	// AcknowledgePurchaseOrder moves an issued PO to acknowledged — the
+	// vendor's confirmation (po.acknowledged). Anything but issued is
+	// rejected; exactly one po.acknowledged outbox event commits with the
+	// transition.
+	AcknowledgePurchaseOrder(ctx context.Context, in *AcknowledgePurchaseOrderRequest, opts ...grpc.CallOption) (*PurchaseOrder, error)
+	// CancelPurchaseOrder moves a draft, issued, or acknowledged PO to
+	// cancelled — but only while nothing has been received (the total
+	// qty_received over all lines is 0); receipts pin the PO and the only exit
+	// is close (po_has_receipts). Any other source status is
+	// po_illegal_transition; exactly one po.cancelled outbox event commits
+	// with the transition.
+	CancelPurchaseOrder(ctx context.Context, in *CancelPurchaseOrderRequest, opts ...grpc.CallOption) (*PurchaseOrder, error)
+	// ClosePurchaseOrder moves a partially_received (short-close) or received
+	// PO to closed. Any other source status is po_illegal_transition; exactly
+	// one po.closed outbox event commits with the transition.
+	ClosePurchaseOrder(ctx context.Context, in *ClosePurchaseOrderRequest, opts ...grpc.CallOption) (*PurchaseOrder, error)
 }
 
 type procurementClient struct {
@@ -247,13 +287,63 @@ func (c *procurementClient) ReplaceApprovalRules(ctx context.Context, in *Replac
 	return out, nil
 }
 
+func (c *procurementClient) CreatePurchaseOrder(ctx context.Context, in *CreatePurchaseOrderRequest, opts ...grpc.CallOption) (*CreatePurchaseOrderResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreatePurchaseOrderResponse)
+	err := c.cc.Invoke(ctx, Procurement_CreatePurchaseOrder_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *procurementClient) IssuePurchaseOrder(ctx context.Context, in *IssuePurchaseOrderRequest, opts ...grpc.CallOption) (*PurchaseOrder, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PurchaseOrder)
+	err := c.cc.Invoke(ctx, Procurement_IssuePurchaseOrder_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *procurementClient) AcknowledgePurchaseOrder(ctx context.Context, in *AcknowledgePurchaseOrderRequest, opts ...grpc.CallOption) (*PurchaseOrder, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PurchaseOrder)
+	err := c.cc.Invoke(ctx, Procurement_AcknowledgePurchaseOrder_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *procurementClient) CancelPurchaseOrder(ctx context.Context, in *CancelPurchaseOrderRequest, opts ...grpc.CallOption) (*PurchaseOrder, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PurchaseOrder)
+	err := c.cc.Invoke(ctx, Procurement_CancelPurchaseOrder_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *procurementClient) ClosePurchaseOrder(ctx context.Context, in *ClosePurchaseOrderRequest, opts ...grpc.CallOption) (*PurchaseOrder, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PurchaseOrder)
+	err := c.cc.Invoke(ctx, Procurement_ClosePurchaseOrder_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ProcurementServer is the server API for Procurement service.
 // All implementations must embed UnimplementedProcurementServer
 // for forward compatibility.
 //
-// Procurement is the internal domain API (vendors first; requisitions, POs,
-// GRNs, and invoices arrive with later issues). Reachable only inside the
-// backend network; clients go through the gateway.
+// Procurement is the internal domain API (vendors and requisitions first;
+// PO conversion below; GRNs and invoices arrive with later issues). Reachable
+// only inside the backend network; clients go through the gateway.
 type ProcurementServer interface {
 	// CreateVendor validates and inserts a vendor. The caller's tenant and user
 	// come from the auth metadata (x-tenant-id / x-user-id / x-role) injected
@@ -320,6 +410,41 @@ type ProcurementServer interface {
 	// transaction (delete + insert). Rules are a live configuration: replacing
 	// them never changes steps already materialized on submitted requisitions.
 	ReplaceApprovalRules(context.Context, *ReplaceApprovalRulesRequest) (*ApprovalRulesResponse, error)
+	// CreatePurchaseOrder converts one approved requisition of the caller's
+	// tenant into a draft purchase order (FR-05): lines are copied exactly
+	// once, total_cents is recomputed server-side (= the requisition's), and
+	// the PO number (PO-%06d) is allocated per tenant inside the conversion
+	// transaction — a failed conversion burns no number. vendor_id is
+	// required and must name an active vendor of the tenant (requisitions
+	// carry no vendor). Idempotent per requisition: converting again returns
+	// the existing PO unchanged with created=false (the vendor gate is skipped
+	// and a differing vendor_id ignored on replay). On success the
+	// requisition closes (approved → closed) and exactly one po.created
+	// outbox event commits atomically with the PO. The issue transition,
+	// issued_at, and po.issued belong to the lifecycle API (#36).
+	CreatePurchaseOrder(context.Context, *CreatePurchaseOrderRequest) (*CreatePurchaseOrderResponse, error)
+	// IssuePurchaseOrder moves a draft PO of the caller's tenant to issued and
+	// stamps issued_at (FR-06) — the PO leaves the buyer and the
+	// acknowledgement SLA clock starts. Anything but draft is rejected
+	// (po_illegal_transition); exactly one po.issued outbox event commits with
+	// the transition.
+	IssuePurchaseOrder(context.Context, *IssuePurchaseOrderRequest) (*PurchaseOrder, error)
+	// AcknowledgePurchaseOrder moves an issued PO to acknowledged — the
+	// vendor's confirmation (po.acknowledged). Anything but issued is
+	// rejected; exactly one po.acknowledged outbox event commits with the
+	// transition.
+	AcknowledgePurchaseOrder(context.Context, *AcknowledgePurchaseOrderRequest) (*PurchaseOrder, error)
+	// CancelPurchaseOrder moves a draft, issued, or acknowledged PO to
+	// cancelled — but only while nothing has been received (the total
+	// qty_received over all lines is 0); receipts pin the PO and the only exit
+	// is close (po_has_receipts). Any other source status is
+	// po_illegal_transition; exactly one po.cancelled outbox event commits
+	// with the transition.
+	CancelPurchaseOrder(context.Context, *CancelPurchaseOrderRequest) (*PurchaseOrder, error)
+	// ClosePurchaseOrder moves a partially_received (short-close) or received
+	// PO to closed. Any other source status is po_illegal_transition; exactly
+	// one po.closed outbox event commits with the transition.
+	ClosePurchaseOrder(context.Context, *ClosePurchaseOrderRequest) (*PurchaseOrder, error)
 	mustEmbedUnimplementedProcurementServer()
 }
 
@@ -368,6 +493,21 @@ func (UnimplementedProcurementServer) GetApprovalRules(context.Context, *GetAppr
 }
 func (UnimplementedProcurementServer) ReplaceApprovalRules(context.Context, *ReplaceApprovalRulesRequest) (*ApprovalRulesResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ReplaceApprovalRules not implemented")
+}
+func (UnimplementedProcurementServer) CreatePurchaseOrder(context.Context, *CreatePurchaseOrderRequest) (*CreatePurchaseOrderResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CreatePurchaseOrder not implemented")
+}
+func (UnimplementedProcurementServer) IssuePurchaseOrder(context.Context, *IssuePurchaseOrderRequest) (*PurchaseOrder, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method IssuePurchaseOrder not implemented")
+}
+func (UnimplementedProcurementServer) AcknowledgePurchaseOrder(context.Context, *AcknowledgePurchaseOrderRequest) (*PurchaseOrder, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AcknowledgePurchaseOrder not implemented")
+}
+func (UnimplementedProcurementServer) CancelPurchaseOrder(context.Context, *CancelPurchaseOrderRequest) (*PurchaseOrder, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CancelPurchaseOrder not implemented")
+}
+func (UnimplementedProcurementServer) ClosePurchaseOrder(context.Context, *ClosePurchaseOrderRequest) (*PurchaseOrder, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ClosePurchaseOrder not implemented")
 }
 func (UnimplementedProcurementServer) mustEmbedUnimplementedProcurementServer() {}
 func (UnimplementedProcurementServer) testEmbeddedByValue()                     {}
@@ -624,6 +764,96 @@ func _Procurement_ReplaceApprovalRules_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Procurement_CreatePurchaseOrder_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreatePurchaseOrderRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProcurementServer).CreatePurchaseOrder(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Procurement_CreatePurchaseOrder_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProcurementServer).CreatePurchaseOrder(ctx, req.(*CreatePurchaseOrderRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Procurement_IssuePurchaseOrder_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IssuePurchaseOrderRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProcurementServer).IssuePurchaseOrder(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Procurement_IssuePurchaseOrder_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProcurementServer).IssuePurchaseOrder(ctx, req.(*IssuePurchaseOrderRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Procurement_AcknowledgePurchaseOrder_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AcknowledgePurchaseOrderRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProcurementServer).AcknowledgePurchaseOrder(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Procurement_AcknowledgePurchaseOrder_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProcurementServer).AcknowledgePurchaseOrder(ctx, req.(*AcknowledgePurchaseOrderRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Procurement_CancelPurchaseOrder_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CancelPurchaseOrderRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProcurementServer).CancelPurchaseOrder(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Procurement_CancelPurchaseOrder_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProcurementServer).CancelPurchaseOrder(ctx, req.(*CancelPurchaseOrderRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Procurement_ClosePurchaseOrder_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClosePurchaseOrderRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProcurementServer).ClosePurchaseOrder(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Procurement_ClosePurchaseOrder_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProcurementServer).ClosePurchaseOrder(ctx, req.(*ClosePurchaseOrderRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Procurement_ServiceDesc is the grpc.ServiceDesc for Procurement service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -682,6 +912,26 @@ var Procurement_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReplaceApprovalRules",
 			Handler:    _Procurement_ReplaceApprovalRules_Handler,
+		},
+		{
+			MethodName: "CreatePurchaseOrder",
+			Handler:    _Procurement_CreatePurchaseOrder_Handler,
+		},
+		{
+			MethodName: "IssuePurchaseOrder",
+			Handler:    _Procurement_IssuePurchaseOrder_Handler,
+		},
+		{
+			MethodName: "AcknowledgePurchaseOrder",
+			Handler:    _Procurement_AcknowledgePurchaseOrder_Handler,
+		},
+		{
+			MethodName: "CancelPurchaseOrder",
+			Handler:    _Procurement_CancelPurchaseOrder_Handler,
+		},
+		{
+			MethodName: "ClosePurchaseOrder",
+			Handler:    _Procurement_ClosePurchaseOrder_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
