@@ -24,7 +24,15 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 
 	"github.com/luksluki/eprocurement/services/procurement/outbox"
-	"github.com/luksluki/eprocurement/services/worker/topology"
+)
+
+// Broker topology (PRD §14.5). The events exchange is the publisher's
+// contract; the DLX pair is a PROVISIONAL bootstrap declaration — see
+// connect.
+const (
+	EventsExchange = "procurement.events"
+	DLXExchange    = "procurement.dlx"
+	DLQQueue       = "procurement.dlq"
 )
 
 // dialTimeout bounds one AMQP dial attempt.
@@ -32,11 +40,15 @@ const dialTimeout = 10 * time.Second
 
 // Envelope is the PRD §14.5 event envelope, assembled 1:1 from an outbox
 // row — the columns exist precisely so this needs no payload parsing.
+// EntityType/EntityID extend §14.5: the outbox columns already exist and
+// consumers (history validation, #47) require them to route the aggregate.
 type Envelope struct {
 	EventID    string          `json:"event_id"`
 	TenantID   string          `json:"tenant_id"`
 	Type       string          `json:"type"`
 	Version    int32           `json:"version"`
+	EntityType string          `json:"entity_type"`
+	EntityID   string          `json:"entity_id"`
 	OccurredAt time.Time       `json:"occurred_at"`
 	ActorID    string          `json:"actor_id"`
 	TraceID    string          `json:"trace_id"`
@@ -48,6 +60,7 @@ type Envelope struct {
 func EnvelopeFromRow(r outbox.PendingEvent) Envelope {
 	return Envelope{
 		EventID: r.ID, TenantID: r.TenantID, Type: r.EventType, Version: r.Version,
+		EntityType: r.EntityType, EntityID: r.EntityID,
 		OccurredAt: r.OccurredAt, ActorID: r.ActorID, TraceID: r.TraceID,
 		Payload: r.Payload,
 	}
@@ -117,13 +130,31 @@ func (p *AMQPPublisher) connect() error {
 		_ = conn.Close()
 		return fmt.Errorf("publisher: open channel: %w", err)
 	}
-	// The full §14.5 topology — the events exchange, the three consumer
-	// queues with their DLX argument and retry ladders, the DLQ — is
-	// declared once here (services/worker/topology, issue #46), idempotently
-	// on every connect; the #47 consumers reuse the same declaration.
-	if err := topology.Default.Declare(ch); err != nil {
+	if err := ch.ExchangeDeclare(EventsExchange, "topic",
+		true, false, false, false, nil); err != nil {
 		_ = conn.Close()
-		return fmt.Errorf("publisher: declare topology: %w", err)
+		return fmt.Errorf("publisher: declare %s: %w", EventsExchange, err)
+	}
+	// PROVISIONAL: the full §14.5 dead-lettering model is consumer-side —
+	// documents.history / notifications / exports each declare
+	// x-dead-letter-exchange with a TTL-backoff retry queue (5s → 30s → 5m),
+	// arriving with the consumer issues. This one idempotent bootstrap
+	// declaration (durable DLX + a # bound DLQ) exists so a future
+	// dead-letter has a destination and is admin-visible from day one; it is
+	// expected to be reshaped, not final.
+	if err := ch.ExchangeDeclare(DLXExchange, "topic",
+		true, false, false, false, nil); err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("publisher: declare %s: %w", DLXExchange, err)
+	}
+	if _, err := ch.QueueDeclare(DLQQueue,
+		true, false, false, false, nil); err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("publisher: declare %s: %w", DLQQueue, err)
+	}
+	if err := ch.QueueBind(DLQQueue, "#", DLXExchange, false, nil); err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("publisher: bind %s: %w", DLQQueue, err)
 	}
 	if err := ch.Confirm(false); err != nil {
 		_ = conn.Close()
@@ -171,7 +202,7 @@ func (p *AMQPPublisher) Publish(ctx context.Context, env Envelope) error {
 			return err
 		}
 	}
-	dc, err := p.ch.PublishWithDeferredConfirmWithContext(ctx, topology.EventsExchange, env.Type,
+	dc, err := p.ch.PublishWithDeferredConfirmWithContext(ctx, EventsExchange, env.Type,
 		false, false, amqp.Publishing{
 			ContentType:  "application/json",
 			DeliveryMode: amqp.Persistent,
