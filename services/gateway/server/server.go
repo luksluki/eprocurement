@@ -52,8 +52,10 @@ func WithProcurement(client ProcurementClient) Option {
 }
 
 // WithDocuments adds attachment upload/download under
-// /api/v1/vendors/:id/attachments and embeds attachment metadata in vendor
-// detail responses. Requires WithProcurement.
+// /api/v1/vendors/:id/attachments, embeds attachment metadata in vendor
+// detail responses, and serves the event history under /api/v1/events (the
+// events route needs documents only; the vendor routes need
+// WithProcurement).
 func WithDocuments(client DocumentsClient) Option {
 	return func(o *gatewayOptions) { o.documents = client }
 }
@@ -107,6 +109,9 @@ func New(log *slog.Logger, verifier *token.Verifier, opts ...Option) *fiber.App 
 		registerVendorRoutes(app, verifier, o.procurement, o.documents)
 		registerRequisitionRoutes(app, verifier, o.procurement)
 		registerApprovalRoutes(app, verifier, o.procurement)
+	}
+	if o.documents != nil {
+		registerEventRoutes(app, verifier, o.documents)
 	}
 
 	return app
