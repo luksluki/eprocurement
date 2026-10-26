@@ -19,6 +19,7 @@ import (
 	"github.com/luksluki/eprocurement/services/procurement/approval"
 	procurementconfig "github.com/luksluki/eprocurement/services/procurement/config"
 	"github.com/luksluki/eprocurement/services/procurement/migrations"
+	"github.com/luksluki/eprocurement/services/procurement/purchaseorder"
 	"github.com/luksluki/eprocurement/services/procurement/requisition"
 	"github.com/luksluki/eprocurement/services/procurement/server"
 	"github.com/luksluki/eprocurement/services/procurement/vendor"
@@ -69,6 +70,6 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", cfg.Port, err)
 	}
-	srv := server.New(log, db, vendor.NewStore(db), requisition.NewStore(db), approval.NewStore(db))
+	srv := server.New(log, db, vendor.NewStore(db), requisition.NewStore(db), approval.NewStore(db), purchaseorder.NewStore(db))
 	return srv.Serve(ctx, lis)
 }

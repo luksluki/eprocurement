@@ -191,3 +191,57 @@ export async function listRequisitions(accessToken: string, query: string): Prom
     return { ok: false, status: 502 };
   }
 }
+
+// EventEntry is one row of the append-only event history (the PRD §14.5
+// envelope) as served by GET /api/v1/events (issue #43). payload_json is
+// the raw JSON payload string — full fidelity of the procurement outbox
+// JSONB, never restructured (dev-note 042).
+export type EventEntry = {
+  event_id: string;
+  tenant_id: string;
+  type: string;
+  version: number;
+  occurred_at: string;
+  actor_id: string;
+  trace_id: string;
+  entity_type: string;
+  entity_id: string;
+  payload_json: string;
+};
+
+// EventsPage is the GET /api/v1/events envelope. Pagination is keyset, not
+// offset: next_cursor is the opaque continuation token and is empty on the
+// last page — a deliberate deviation from the page/total convention
+// documented in dev-notes 042/043.
+export type EventsPage = {
+  events: EventEntry[];
+  next_cursor: string;
+};
+
+export type EventsResult =
+  | { ok: true; data: EventsPage }
+  | { ok: false; status: number; code?: string };
+
+// listEvents fetches one keyset page of the tenant-scoped event history.
+// `query` is the already-canonicalized filter string (entityType/entityId/
+// limit/cursor — camelCase per PRD §15). 401 is discriminated for the
+// refresh dance; 400 carries the gateway's machine code (events_*).
+export async function listEvents(accessToken: string, query: string): Promise<EventsResult> {
+  try {
+    const target = `${gatewayUrl()}/api/v1/events${query ? `?${query}` : ""}`;
+    const res = await fetch(target, {
+      headers: { authorization: `Bearer ${accessToken}` },
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      if (res.status === 400) {
+        const body = (await res.json().catch(() => ({}))) as { code?: string };
+        return { ok: false, status: 400, code: body.code };
+      }
+      return { ok: false, status: res.status };
+    }
+    return { ok: true, data: (await res.json()) as EventsPage };
+  } catch {
+    return { ok: false, status: 502 };
+  }
+}

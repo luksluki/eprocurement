@@ -22,6 +22,7 @@ type DocumentsClient interface {
 	CompleteUpload(ctx context.Context, in *documentsv1.CompleteUploadRequest, opts ...grpc.CallOption) (*documentsv1.Attachment, error)
 	ListAttachments(ctx context.Context, in *documentsv1.ListAttachmentsRequest, opts ...grpc.CallOption) (*documentsv1.ListAttachmentsResponse, error)
 	GetDownloadUrl(ctx context.Context, in *documentsv1.GetDownloadUrlRequest, opts ...grpc.CallOption) (*documentsv1.GetDownloadUrlResponse, error)
+	ListEvents(ctx context.Context, in *documentsv1.ListEventsRequest, opts ...grpc.CallOption) (*documentsv1.ListEventsResponse, error)
 }
 
 // registerAttachmentRoutes wires /api/v1/vendors/:id/attachments under the

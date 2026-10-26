@@ -4,9 +4,9 @@ package procurement.v1;
 
 option go_package = "github.com/luksluki/eprocurement/gen/go/procurement/v1;procurementv1";
 
-// Procurement is the internal domain API (vendors first; requisitions, POs,
-// GRNs, and invoices arrive with later issues). Reachable only inside the
-// backend network; clients go through the gateway.
+// Procurement is the internal domain API (vendors and requisitions first;
+// PO conversion below; GRNs and invoices arrive with later issues). Reachable
+// only inside the backend network; clients go through the gateway.
 service Procurement {
   // CreateVendor validates and inserts a vendor. The caller's tenant and user
   // come from the auth metadata (x-tenant-id / x-user-id / x-role) injected
@@ -67,6 +67,19 @@ service Procurement {
   // transaction (delete + insert). Rules are a live configuration: replacing
   // them never changes steps already materialized on submitted requisitions.
   rpc ReplaceApprovalRules(ReplaceApprovalRulesRequest) returns (ApprovalRulesResponse);
+  // CreatePurchaseOrder converts one approved requisition of the caller's
+  // tenant into a draft purchase order (FR-05): lines are copied exactly
+  // once, total_cents is recomputed server-side (= the requisition's), and
+  // the PO number (PO-%06d) is allocated per tenant inside the conversion
+  // transaction — a failed conversion burns no number. vendor_id is
+  // required and must name an active vendor of the tenant (requisitions
+  // carry no vendor). Idempotent per requisition: converting again returns
+  // the existing PO unchanged with created=false (the vendor gate is skipped
+  // and a differing vendor_id ignored on replay). On success the
+  // requisition closes (approved → closed) and exactly one po.created
+  // outbox event commits atomically with the PO. The issue transition,
+  // issued_at, and po.issued belong to the lifecycle API (#36).
+  rpc CreatePurchaseOrder(CreatePurchaseOrderRequest) returns (CreatePurchaseOrderResponse);
 }
 
 message Vendor {
@@ -241,4 +254,49 @@ message ReplaceApprovalRulesRequest {
 
 message ApprovalRulesResponse {
   repeated ApprovalRule rules = 1;
+}
+
+// PurchaseOrder is the aggregate as conversion (#35) creates it: a draft
+// linked to its requisition and vendor, lines copied verbatim, total and
+// currency from the requisition, issued_at empty until #36 issues it.
+message PurchaseOrder {
+  string id = 1;
+  string tenant_id = 2;
+  string number = 3;          // server-generated per tenant, e.g. "PO-000042"
+  string requisition_id = 4;  // the converted requisition (one PO per requisition)
+  string vendor_id = 5;       // chosen at conversion; requisitions carry no vendor
+  string status = 6;          // draft | issued | acknowledged | partially_received | received | closed | cancelled
+  string currency = 7;        // IDR | USD — copied from the requisition
+  int64 total_cents = 8;      // server-computed sum of qty_ordered × unit_price_cents
+  repeated PurchaseOrderItem items = 9;
+  string issued_at = 10;      // RFC 3339, empty while draft (#36 sets it)
+  string created_at = 11;     // RFC 3339
+  string created_by = 12;     // user id
+  string updated_at = 13;     // RFC 3339
+  string updated_by = 14;     // user id
+}
+
+// PurchaseOrderItem is one line, copied verbatim from a requisition item.
+message PurchaseOrderItem {
+  string description = 1;
+  int32 qty_ordered = 2;      // > 0
+  int32 qty_received = 3;     // 0 on creation; goods receipts (#37) advance it
+  int64 unit_price_cents = 4; // >= 0, integer cents in the header currency
+}
+
+message CreatePurchaseOrderRequest {
+  // The requisition to convert; must be approved (else 409
+  // po_requisition_not_approved). One PO per requisition — replay returns it.
+  string requisition_id = 1;
+  // Required UUID of the vendor to order from; must be active (else 412
+  // vendor_deactivated). Checked on the creation path only — replays ignore it.
+  string vendor_id = 2;
+}
+
+// CreatePurchaseOrderResponse carries the PO and whether this call created
+// it: created=false means the requisition had already been converted and the
+// existing PO is returned as-is (the REST edge answers 200 instead of 201).
+message CreatePurchaseOrderResponse {
+  PurchaseOrder purchase_order = 1;
+  bool created = 2;
 }
