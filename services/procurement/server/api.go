@@ -15,20 +15,22 @@ import (
 	procurementv1 "github.com/luksluki/eprocurement/gen/go/procurement/v1"
 	"github.com/luksluki/eprocurement/internal/platform/rbac"
 	"github.com/luksluki/eprocurement/services/procurement/approval"
+	"github.com/luksluki/eprocurement/services/procurement/purchaseorder"
 	"github.com/luksluki/eprocurement/services/procurement/requisition"
 	"github.com/luksluki/eprocurement/services/procurement/vendor"
 )
 
-// api adapts the vendor, requisition, and approval domains to the
-// procurement.v1 gRPC contract. Every method reads the caller identity the
-// gateway propagated (tenant scoping, audit ids); the RBAC interceptor has
-// already re-checked the permission.
+// api adapts the vendor, requisition, approval, and purchase-order domains
+// to the procurement.v1 gRPC contract. Every method reads the caller
+// identity the gateway propagated (tenant scoping, audit ids); the RBAC
+// interceptor has already re-checked the permission.
 type api struct {
 	procurementv1.UnimplementedProcurementServer
-	store        *vendor.Store
-	requisitions *requisition.Store
-	approvals    *approval.Store
-	log          *slog.Logger
+	store          *vendor.Store
+	requisitions   *requisition.Store
+	approvals      *approval.Store
+	purchaseOrders *purchaseorder.Store
+	log            *slog.Logger
 }
 
 // authTenant returns the caller's auth context, rejecting calls that reached
@@ -461,6 +463,74 @@ func rulesPB(rules []approval.Rule) *procurementv1.ApprovalRulesResponse {
 		})
 	}
 	return out
+}
+
+// mapPurchaseOrderError maps purchase-order conversion errors to gRPC codes.
+// Same contract as the vendor/requisition mappers: sentinels carry their
+// machine code verbatim in the gRPC message. The requisition and vendor
+// gate sentinels ride along bare (the conversion crosses those domains).
+func mapPurchaseOrderError(err error) error {
+	switch {
+	case errors.Is(err, purchaseorder.ErrVendorIDInvalid),
+		errors.Is(err, purchaseorder.ErrCurrencyInvalid),
+		errors.Is(err, purchaseorder.ErrItemsEmpty),
+		errors.Is(err, purchaseorder.ErrDescriptionInvalid),
+		errors.Is(err, purchaseorder.ErrQtyInvalid),
+		errors.Is(err, purchaseorder.ErrUnitPriceInvalid),
+		errors.Is(err, requisition.ErrIDInvalid):
+		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, purchaseorder.ErrRequisitionNotApproved),
+		errors.Is(err, requisition.ErrIllegalTransition):
+		return status.Error(codes.Aborted, err.Error())
+	case errors.Is(err, requisition.ErrNotFound), errors.Is(err, vendor.ErrNotFound):
+		return status.Error(codes.NotFound, err.Error())
+	case errors.Is(err, vendor.ErrDeactivated):
+		return status.Error(codes.FailedPrecondition, err.Error())
+	default:
+		return status.Error(codes.Internal, "internal error")
+	}
+}
+
+// purchaseOrderPB renders the aggregate for the wire.
+func purchaseOrderPB(po purchaseorder.PurchaseOrder) *procurementv1.PurchaseOrder {
+	items := make([]*procurementv1.PurchaseOrderItem, 0, len(po.Items))
+	for _, it := range po.Items {
+		items = append(items, &procurementv1.PurchaseOrderItem{
+			Description: it.Description, QtyOrdered: it.Qty,
+			QtyReceived: it.QtyReceived, UnitPriceCents: it.UnitPriceCents,
+		})
+	}
+	issuedAt := ""
+	if po.IssuedAt != nil {
+		issuedAt = purchaseorder.RFC3339(*po.IssuedAt)
+	}
+	return &procurementv1.PurchaseOrder{
+		Id: po.ID, TenantId: po.TenantID, Number: po.Number,
+		RequisitionId: po.RequisitionID, VendorId: po.VendorID,
+		Status: po.Status, Currency: po.Currency, TotalCents: po.TotalCents,
+		Items: items, IssuedAt: issuedAt,
+		CreatedAt: purchaseorder.RFC3339(po.CreatedAt), CreatedBy: po.CreatedBy,
+		UpdatedAt: purchaseorder.RFC3339(po.UpdatedAt), UpdatedBy: po.UpdatedBy,
+	}
+}
+
+// CreatePurchaseOrder converts an approved requisition of the caller's
+// tenant into a draft PO (po:write — buyer/admin at both layers). The
+// conversion is idempotent per requisition: replay returns the existing PO
+// with created=false (vendor gate skipped, differing vendor_id ignored) —
+// the REST edge answers 200 instead of 201 on it. The store owns the pinned
+// path order; docs/schema/procurement.md pins the contract.
+func (a *api) CreatePurchaseOrder(ctx context.Context, req *procurementv1.CreatePurchaseOrderRequest) (*procurementv1.CreatePurchaseOrderResponse, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	po, created, err := a.purchaseOrders.CreateFromRequisition(ctx, auth.TenantID,
+		req.GetRequisitionId(), strings.TrimSpace(req.GetVendorId()), auth.UserID)
+	if err != nil {
+		return nil, mapPurchaseOrderError(err)
+	}
+	return &procurementv1.CreatePurchaseOrderResponse{PurchaseOrder: purchaseOrderPB(po), Created: created}, nil
 }
 
 func vendorPB(v vendor.Vendor) *procurementv1.Vendor {

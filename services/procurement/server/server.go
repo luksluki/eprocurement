@@ -10,6 +10,7 @@ import (
 	"github.com/luksluki/eprocurement/internal/platform/grpcserver"
 	"github.com/luksluki/eprocurement/internal/platform/rbac"
 	"github.com/luksluki/eprocurement/services/procurement/approval"
+	"github.com/luksluki/eprocurement/services/procurement/purchaseorder"
 	"github.com/luksluki/eprocurement/services/procurement/requisition"
 	"github.com/luksluki/eprocurement/services/procurement/vendor"
 )
@@ -25,6 +26,8 @@ const ServiceName = "procurement"
 // Deciding an approval step is approver/admin; the step's role_required and
 // the self-approval ban are enforced in the approval domain. Configuring
 // rules is admin-only (approval:configure has no non-admin role).
+// Converting a requisition to a PO is buyer/admin; the active-vendor and
+// approved-requisition gates are domain checks inside the conversion.
 var methodPermissions = rbac.MethodPermissions{
 	"/procurement.v1.Procurement/CreateVendor":         rbac.VendorWrite,
 	"/procurement.v1.Procurement/GetVendor":            rbac.VendorRead,
@@ -38,14 +41,18 @@ var methodPermissions = rbac.MethodPermissions{
 	"/procurement.v1.Procurement/DecideApproval":       rbac.ApprovalDecide,
 	"/procurement.v1.Procurement/GetApprovalRules":     rbac.ApprovalConfigure,
 	"/procurement.v1.Procurement/ReplaceApprovalRules": rbac.ApprovalConfigure,
+	"/procurement.v1.Procurement/CreatePurchaseOrder":  rbac.POWrite,
 }
 
 // New returns a grpcserver.Server with the procurement API registered.
-func New(log *slog.Logger, pinger grpcserver.Pinger, store *vendor.Store, requisitions *requisition.Store, approvals *approval.Store, opts ...grpcserver.Option) *grpcserver.Server {
+func New(log *slog.Logger, pinger grpcserver.Pinger, store *vendor.Store, requisitions *requisition.Store, approvals *approval.Store, purchaseOrders *purchaseorder.Store, opts ...grpcserver.Option) *grpcserver.Server {
 	srv := grpcserver.New(log, pinger, append([]grpcserver.Option{
 		grpcserver.WithServiceName(ServiceName),
 		grpcserver.WithUnary(rbac.UnaryInterceptor(methodPermissions)),
 	}, opts...)...)
-	procurementv1.RegisterProcurementServer(srv.GRPC(), &api{store: store, requisitions: requisitions, approvals: approvals, log: log})
+	procurementv1.RegisterProcurementServer(srv.GRPC(), &api{
+		store: store, requisitions: requisitions, approvals: approvals,
+		purchaseOrders: purchaseOrders, log: log,
+	})
 	return srv
 }

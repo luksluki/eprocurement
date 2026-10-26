@@ -31,15 +31,16 @@ const (
 	Procurement_DecideApproval_FullMethodName       = "/procurement.v1.Procurement/DecideApproval"
 	Procurement_GetApprovalRules_FullMethodName     = "/procurement.v1.Procurement/GetApprovalRules"
 	Procurement_ReplaceApprovalRules_FullMethodName = "/procurement.v1.Procurement/ReplaceApprovalRules"
+	Procurement_CreatePurchaseOrder_FullMethodName  = "/procurement.v1.Procurement/CreatePurchaseOrder"
 )
 
 // ProcurementClient is the client API for Procurement service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// Procurement is the internal domain API (vendors first; requisitions, POs,
-// GRNs, and invoices arrive with later issues). Reachable only inside the
-// backend network; clients go through the gateway.
+// Procurement is the internal domain API (vendors and requisitions first;
+// PO conversion below; GRNs and invoices arrive with later issues). Reachable
+// only inside the backend network; clients go through the gateway.
 type ProcurementClient interface {
 	// CreateVendor validates and inserts a vendor. The caller's tenant and user
 	// come from the auth metadata (x-tenant-id / x-user-id / x-role) injected
@@ -100,6 +101,19 @@ type ProcurementClient interface {
 	// transaction (delete + insert). Rules are a live configuration: replacing
 	// them never changes steps already materialized on submitted requisitions.
 	ReplaceApprovalRules(ctx context.Context, in *ReplaceApprovalRulesRequest, opts ...grpc.CallOption) (*ApprovalRulesResponse, error)
+	// CreatePurchaseOrder converts one approved requisition of the caller's
+	// tenant into a draft purchase order (FR-05): lines are copied exactly
+	// once, total_cents is recomputed server-side (= the requisition's), and
+	// the PO number (PO-%06d) is allocated per tenant inside the conversion
+	// transaction — a failed conversion burns no number. vendor_id is
+	// required and must name an active vendor of the tenant (requisitions
+	// carry no vendor). Idempotent per requisition: converting again returns
+	// the existing PO unchanged with created=false (the vendor gate is skipped
+	// and a differing vendor_id ignored on replay). On success the
+	// requisition closes (approved → closed) and exactly one po.created
+	// outbox event commits atomically with the PO. The issue transition,
+	// issued_at, and po.issued belong to the lifecycle API (#36).
+	CreatePurchaseOrder(ctx context.Context, in *CreatePurchaseOrderRequest, opts ...grpc.CallOption) (*CreatePurchaseOrderResponse, error)
 }
 
 type procurementClient struct {
@@ -230,13 +244,23 @@ func (c *procurementClient) ReplaceApprovalRules(ctx context.Context, in *Replac
 	return out, nil
 }
 
+func (c *procurementClient) CreatePurchaseOrder(ctx context.Context, in *CreatePurchaseOrderRequest, opts ...grpc.CallOption) (*CreatePurchaseOrderResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreatePurchaseOrderResponse)
+	err := c.cc.Invoke(ctx, Procurement_CreatePurchaseOrder_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ProcurementServer is the server API for Procurement service.
 // All implementations must embed UnimplementedProcurementServer
 // for forward compatibility.
 //
-// Procurement is the internal domain API (vendors first; requisitions, POs,
-// GRNs, and invoices arrive with later issues). Reachable only inside the
-// backend network; clients go through the gateway.
+// Procurement is the internal domain API (vendors and requisitions first;
+// PO conversion below; GRNs and invoices arrive with later issues). Reachable
+// only inside the backend network; clients go through the gateway.
 type ProcurementServer interface {
 	// CreateVendor validates and inserts a vendor. The caller's tenant and user
 	// come from the auth metadata (x-tenant-id / x-user-id / x-role) injected
@@ -297,6 +321,19 @@ type ProcurementServer interface {
 	// transaction (delete + insert). Rules are a live configuration: replacing
 	// them never changes steps already materialized on submitted requisitions.
 	ReplaceApprovalRules(context.Context, *ReplaceApprovalRulesRequest) (*ApprovalRulesResponse, error)
+	// CreatePurchaseOrder converts one approved requisition of the caller's
+	// tenant into a draft purchase order (FR-05): lines are copied exactly
+	// once, total_cents is recomputed server-side (= the requisition's), and
+	// the PO number (PO-%06d) is allocated per tenant inside the conversion
+	// transaction — a failed conversion burns no number. vendor_id is
+	// required and must name an active vendor of the tenant (requisitions
+	// carry no vendor). Idempotent per requisition: converting again returns
+	// the existing PO unchanged with created=false (the vendor gate is skipped
+	// and a differing vendor_id ignored on replay). On success the
+	// requisition closes (approved → closed) and exactly one po.created
+	// outbox event commits atomically with the PO. The issue transition,
+	// issued_at, and po.issued belong to the lifecycle API (#36).
+	CreatePurchaseOrder(context.Context, *CreatePurchaseOrderRequest) (*CreatePurchaseOrderResponse, error)
 	mustEmbedUnimplementedProcurementServer()
 }
 
@@ -342,6 +379,9 @@ func (UnimplementedProcurementServer) GetApprovalRules(context.Context, *GetAppr
 }
 func (UnimplementedProcurementServer) ReplaceApprovalRules(context.Context, *ReplaceApprovalRulesRequest) (*ApprovalRulesResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ReplaceApprovalRules not implemented")
+}
+func (UnimplementedProcurementServer) CreatePurchaseOrder(context.Context, *CreatePurchaseOrderRequest) (*CreatePurchaseOrderResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CreatePurchaseOrder not implemented")
 }
 func (UnimplementedProcurementServer) mustEmbedUnimplementedProcurementServer() {}
 func (UnimplementedProcurementServer) testEmbeddedByValue()                     {}
@@ -580,6 +620,24 @@ func _Procurement_ReplaceApprovalRules_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Procurement_CreatePurchaseOrder_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreatePurchaseOrderRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProcurementServer).CreatePurchaseOrder(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Procurement_CreatePurchaseOrder_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProcurementServer).CreatePurchaseOrder(ctx, req.(*CreatePurchaseOrderRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Procurement_ServiceDesc is the grpc.ServiceDesc for Procurement service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -634,6 +692,10 @@ var Procurement_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReplaceApprovalRules",
 			Handler:    _Procurement_ReplaceApprovalRules_Handler,
+		},
+		{
+			MethodName: "CreatePurchaseOrder",
+			Handler:    _Procurement_CreatePurchaseOrder_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -78,6 +78,12 @@ func (f *fakeRequisitionClient) DecideApproval(ctx context.Context, in *procurem
 	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
 }
 
+// The #35 purchase-order method satisfies the widened ProcurementClient
+// interface; the PO tests use their own fake with recording.
+func (f *fakeRequisitionClient) CreatePurchaseOrder(ctx context.Context, in *procurementv1.CreatePurchaseOrderRequest, opts ...grpc.CallOption) (*procurementv1.CreatePurchaseOrderResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
+}
+
 func (f *fakeRequisitionClient) GetApprovalRules(ctx context.Context, in *procurementv1.GetApprovalRulesRequest, opts ...grpc.CallOption) (*procurementv1.ApprovalRulesResponse, error) {
 	return &procurementv1.ApprovalRulesResponse{}, nil
 }
