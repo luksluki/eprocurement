@@ -15,20 +15,22 @@ import (
 	procurementv1 "github.com/luksluki/eprocurement/gen/go/procurement/v1"
 	"github.com/luksluki/eprocurement/internal/platform/rbac"
 	"github.com/luksluki/eprocurement/services/procurement/approval"
+	"github.com/luksluki/eprocurement/services/procurement/purchaseorder"
 	"github.com/luksluki/eprocurement/services/procurement/requisition"
 	"github.com/luksluki/eprocurement/services/procurement/vendor"
 )
 
-// api adapts the vendor, requisition, and approval domains to the
-// procurement.v1 gRPC contract. Every method reads the caller identity the
-// gateway propagated (tenant scoping, audit ids); the RBAC interceptor has
-// already re-checked the permission.
+// api adapts the vendor, requisition, approval, and purchase-order domains
+// to the procurement.v1 gRPC contract. Every method reads the caller
+// identity the gateway propagated (tenant scoping, audit ids); the RBAC
+// interceptor has already re-checked the permission.
 type api struct {
 	procurementv1.UnimplementedProcurementServer
-	store        *vendor.Store
-	requisitions *requisition.Store
-	approvals    *approval.Store
-	log          *slog.Logger
+	store          *vendor.Store
+	requisitions   *requisition.Store
+	approvals      *approval.Store
+	purchaseOrders *purchaseorder.Store
+	log            *slog.Logger
 }
 
 // authTenant returns the caller's auth context, rejecting calls that reached
@@ -368,6 +370,27 @@ func (a *api) ListRequisitions(ctx context.Context, req *procurementv1.ListRequi
 	return out, nil
 }
 
+// GetRequisition serves the detail read (requisition:read, tenant-wide per
+// docs/rbac.md — no ownership check, unlike edit/submit): header plus items
+// and the materialized approval steps, the bodies the list rows never carry.
+// The wizard's draft restore (#33) reads drafts through it; other tenants'
+// requisitions are indistinguishable from missing.
+func (a *api) GetRequisition(ctx context.Context, req *procurementv1.GetRequisitionRequest) (*procurementv1.Requisition, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	r, err := a.requisitions.Get(ctx, auth.TenantID, req.GetId())
+	if err != nil {
+		return nil, mapRequisitionError(err)
+	}
+	steps, err := a.approvals.ListSteps(ctx, auth.TenantID, r.ID)
+	if err != nil {
+		return nil, mapApprovalError(err)
+	}
+	return requisitionPB(r, steps), nil
+}
+
 // DecideApproval applies one approve/reject decision to the current approval
 // step (approval:decide at both layers). Authorization beyond the
 // permission: the decider must not be the requester (self-approval is
@@ -461,6 +484,143 @@ func rulesPB(rules []approval.Rule) *procurementv1.ApprovalRulesResponse {
 		})
 	}
 	return out
+}
+
+// mapPurchaseOrderError maps purchase-order domain and store errors to gRPC
+// codes. Same contract as the vendor/requisition mappers: sentinels carry
+// their machine code verbatim in the gRPC message. The requisition and vendor
+// gate sentinels ride along bare (the conversion crosses those domains); the
+// #36 lifecycle guards (illegal transition, receipts pin the PO) map to
+// Aborted, which the gateway renders as HTTP 409 (FR-06).
+func mapPurchaseOrderError(err error) error {
+	switch {
+	case errors.Is(err, purchaseorder.ErrVendorIDInvalid),
+		errors.Is(err, purchaseorder.ErrCurrencyInvalid),
+		errors.Is(err, purchaseorder.ErrItemsEmpty),
+		errors.Is(err, purchaseorder.ErrDescriptionInvalid),
+		errors.Is(err, purchaseorder.ErrQtyInvalid),
+		errors.Is(err, purchaseorder.ErrUnitPriceInvalid),
+		errors.Is(err, purchaseorder.ErrIDInvalid),
+		errors.Is(err, requisition.ErrIDInvalid):
+		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, purchaseorder.ErrRequisitionNotApproved),
+		errors.Is(err, purchaseorder.ErrIllegalTransition),
+		errors.Is(err, purchaseorder.ErrHasReceipts),
+		errors.Is(err, requisition.ErrIllegalTransition):
+		return status.Error(codes.Aborted, err.Error())
+	case errors.Is(err, purchaseorder.ErrNotFound),
+		errors.Is(err, requisition.ErrNotFound),
+		errors.Is(err, vendor.ErrNotFound):
+		return status.Error(codes.NotFound, err.Error())
+	case errors.Is(err, vendor.ErrDeactivated):
+		return status.Error(codes.FailedPrecondition, err.Error())
+	default:
+		return status.Error(codes.Internal, "internal error")
+	}
+}
+
+// purchaseOrderPB renders the aggregate for the wire.
+func purchaseOrderPB(po purchaseorder.PurchaseOrder) *procurementv1.PurchaseOrder {
+	items := make([]*procurementv1.PurchaseOrderItem, 0, len(po.Items))
+	for _, it := range po.Items {
+		items = append(items, &procurementv1.PurchaseOrderItem{
+			Description: it.Description, QtyOrdered: it.Qty,
+			QtyReceived: it.QtyReceived, UnitPriceCents: it.UnitPriceCents,
+		})
+	}
+	issuedAt := ""
+	if po.IssuedAt != nil {
+		issuedAt = purchaseorder.RFC3339(*po.IssuedAt)
+	}
+	return &procurementv1.PurchaseOrder{
+		Id: po.ID, TenantId: po.TenantID, Number: po.Number,
+		RequisitionId: po.RequisitionID, VendorId: po.VendorID,
+		Status: po.Status, Currency: po.Currency, TotalCents: po.TotalCents,
+		Items: items, IssuedAt: issuedAt,
+		CreatedAt: purchaseorder.RFC3339(po.CreatedAt), CreatedBy: po.CreatedBy,
+		UpdatedAt: purchaseorder.RFC3339(po.UpdatedAt), UpdatedBy: po.UpdatedBy,
+	}
+}
+
+// CreatePurchaseOrder converts an approved requisition of the caller's
+// tenant into a draft PO (po:write — buyer/admin at both layers). The
+// conversion is idempotent per requisition: replay returns the existing PO
+// with created=false (vendor gate skipped, differing vendor_id ignored) —
+// the REST edge answers 200 instead of 201 on it. The store owns the pinned
+// path order; docs/schema/procurement.md pins the contract.
+func (a *api) CreatePurchaseOrder(ctx context.Context, req *procurementv1.CreatePurchaseOrderRequest) (*procurementv1.CreatePurchaseOrderResponse, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	po, created, err := a.purchaseOrders.CreateFromRequisition(ctx, auth.TenantID,
+		req.GetRequisitionId(), strings.TrimSpace(req.GetVendorId()), auth.UserID)
+	if err != nil {
+		return nil, mapPurchaseOrderError(err)
+	}
+	return &procurementv1.CreatePurchaseOrderResponse{PurchaseOrder: purchaseOrderPB(po), Created: created}, nil
+}
+
+// IssuePurchaseOrder moves a draft PO of the caller's tenant to issued and
+// stamps issued_at (po:write — buyer/admin at both layers; FR-06). The
+// store locks the row, re-checks the edge, and commits exactly one po.issued
+// outbox event with the transition.
+func (a *api) IssuePurchaseOrder(ctx context.Context, req *procurementv1.IssuePurchaseOrderRequest) (*procurementv1.PurchaseOrder, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	po, err := a.purchaseOrders.Issue(ctx, auth.TenantID, strings.TrimSpace(req.GetId()), auth.UserID)
+	if err != nil {
+		return nil, mapPurchaseOrderError(err)
+	}
+	return purchaseOrderPB(po), nil
+}
+
+// AcknowledgePurchaseOrder moves an issued PO to acknowledged (po:write) —
+// the vendor confirmation; exactly one po.acknowledged outbox event commits
+// with the transition.
+func (a *api) AcknowledgePurchaseOrder(ctx context.Context, req *procurementv1.AcknowledgePurchaseOrderRequest) (*procurementv1.PurchaseOrder, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	po, err := a.purchaseOrders.Acknowledge(ctx, auth.TenantID, strings.TrimSpace(req.GetId()), auth.UserID)
+	if err != nil {
+		return nil, mapPurchaseOrderError(err)
+	}
+	return purchaseOrderPB(po), nil
+}
+
+// CancelPurchaseOrder moves a draft/issued/acknowledged PO to cancelled
+// (po:write) — only while nothing has been received; receipts pin the PO and
+// the only exit is close. Exactly one po.cancelled outbox event commits with
+// the transition.
+func (a *api) CancelPurchaseOrder(ctx context.Context, req *procurementv1.CancelPurchaseOrderRequest) (*procurementv1.PurchaseOrder, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	po, err := a.purchaseOrders.Cancel(ctx, auth.TenantID, strings.TrimSpace(req.GetId()), auth.UserID)
+	if err != nil {
+		return nil, mapPurchaseOrderError(err)
+	}
+	return purchaseOrderPB(po), nil
+}
+
+// ClosePurchaseOrder moves a partially_received (short-close) or received PO
+// to closed (po:write); exactly one po.closed outbox event commits with the
+// transition.
+func (a *api) ClosePurchaseOrder(ctx context.Context, req *procurementv1.ClosePurchaseOrderRequest) (*procurementv1.PurchaseOrder, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	po, err := a.purchaseOrders.Close(ctx, auth.TenantID, strings.TrimSpace(req.GetId()), auth.UserID)
+	if err != nil {
+		return nil, mapPurchaseOrderError(err)
+	}
+	return purchaseOrderPB(po), nil
 }
 
 func vendorPB(v vendor.Vendor) *procurementv1.Vendor {

@@ -87,6 +87,52 @@ export type Dictionary = {
       summary: (range: { from: number; to: number; total: number; page: number; pageCount: number }) => string;
     };
   };
+  requisitionForm: {
+    title: string;
+    description: string;
+    newLink: string;
+    steps: { details: string; items: string; attachments: string; review: string };
+    details: {
+      heading: string;
+      currencyLabel: string;
+      currencyPlaceholder: string;
+      currencyLockedNote: string;
+      next: string;
+    };
+    items: {
+      heading: string;
+      description: string;
+      qty: string;
+      unitPrice: string;
+      category: string;
+      add: string;
+      remove: string;
+      next: string;
+      back: string;
+    };
+    attachments: {
+      heading: string;
+      hint: string;
+      add: string;
+      empty: string;
+      uploading: string;
+      next: string;
+      back: string;
+    };
+    review: {
+      heading: string;
+      itemsHeading: string;
+      attachmentsHeading: string;
+      total: string;
+      submit: string;
+      submitting: string;
+      back: string;
+      itemsEmpty: string;
+    };
+    autosave: { saving: string; saved: string; failed: string };
+    restore: { loading: string; notFound: string; error: string; notDraft: string };
+    submitted: { heading: string; backToList: string };
+  };
   pages: {
     requisitions: PageCopy;
     approvals: PageCopy;
@@ -168,6 +214,60 @@ const id: Dictionary = {
       summary: ({ from, to, total }) =>
         `Menampilkan ${from.toLocaleString("id-ID")}–${to.toLocaleString("id-ID")} dari ${total.toLocaleString("id-ID")} pemasok`,
     },
+  },
+  requisitionForm: {
+    title: "Permintaan Pembelian baru",
+    description:
+      "Empat langkah: rincian → item → lampiran → tinjau. Draf tersimpan otomatis ke server dan dipulihkan saat halaman dimuat ulang.",
+    newLink: "Buat permintaan baru",
+    steps: { details: "Rincian", items: "Item", attachments: "Lampiran", review: "Tinjau" },
+    details: {
+      heading: "Rincian permintaan",
+      currencyLabel: "Mata uang",
+      currencyPlaceholder: "Pilih mata uang…",
+      currencyLockedNote:
+        "Mata uang terkunci setelah draf dibuat (lampiran terikat pada draf ini). Untuk mengubahnya, mulai draf baru.",
+      next: "Lanjut ke item",
+    },
+    items: {
+      heading: "Item permintaan",
+      description: "Deskripsi",
+      qty: "Jumlah",
+      unitPrice: "Harga satuan (sen)",
+      category: "Kategori",
+      add: "Tambah item",
+      remove: "Hapus item",
+      next: "Lanjut ke lampiran",
+      back: "Kembali",
+    },
+    attachments: {
+      heading: "Lampiran",
+      hint: "Berkas diunggah langsung ke penyimpanan lewat URL presigned (pdf, png, jpeg, webp, docx, xlsx; maks 25 MB).",
+      add: "Pilih berkas",
+      empty: "Belum ada lampiran.",
+      uploading: "Mengunggah…",
+      next: "Lanjut ke tinjau",
+      back: "Kembali",
+    },
+    review: {
+      heading: "Tinjau dan kirim",
+      itemsHeading: "Item",
+      attachmentsHeading: "Lampiran",
+      total: "Total (sen)",
+      submit: "Kirim untuk disetujui",
+      submitting: "Mengirim…",
+      back: "Kembali",
+      itemsEmpty: "Tambahkan minimal satu item sebelum mengirim.",
+    },
+    autosave: { saving: "Menyimpan draf…", saved: "Draf tersimpan.", failed: "Gagal menyimpan draf." },
+    restore: {
+      loading: "Memulihkan draf…",
+      notFound: "Draf tidak ditemukan (atau milik tenant lain).",
+      error: "Gagal memuat draf.",
+      notDraft:
+        "Permintaan ini sudah bukan draf (mungkin sudah dikirim dari tab lain) — formulir bersifat baca-saja dan autosave dihentikan.",
+    },
+    submitted: { heading: "Permintaan terkirim:", backToList: "Kembali ke daftar permintaan" },
   },
   pages: {
     requisitions: {
@@ -280,6 +380,60 @@ const en: Dictionary = {
       summary: ({ from, to, total }) =>
         `Showing ${from.toLocaleString("en-US")}–${to.toLocaleString("en-US")} of ${total.toLocaleString("en-US")} vendors`,
     },
+  },
+  requisitionForm: {
+    title: "New purchase requisition",
+    description:
+      "Four steps: details → items → attachments → review. The draft autosaves to the server and is restored on reload.",
+    newLink: "New requisition",
+    steps: { details: "Details", items: "Items", attachments: "Attachments", review: "Review" },
+    details: {
+      heading: "Requisition details",
+      currencyLabel: "Currency",
+      currencyPlaceholder: "Choose a currency…",
+      currencyLockedNote:
+        "Currency is locked once the draft is created (attachments are bound to this draft). To change it, start a new draft.",
+      next: "Continue to items",
+    },
+    items: {
+      heading: "Requisition items",
+      description: "Description",
+      qty: "Qty",
+      unitPrice: "Unit price (cents)",
+      category: "Category",
+      add: "Add item",
+      remove: "Remove item",
+      next: "Continue to attachments",
+      back: "Back",
+    },
+    attachments: {
+      heading: "Attachments",
+      hint: "Files upload directly to storage via a presigned URL (pdf, png, jpeg, webp, docx, xlsx; max 25 MB).",
+      add: "Choose a file",
+      empty: "No attachments yet.",
+      uploading: "Uploading…",
+      next: "Continue to review",
+      back: "Back",
+    },
+    review: {
+      heading: "Review and submit",
+      itemsHeading: "Items",
+      attachmentsHeading: "Attachments",
+      total: "Total (cents)",
+      submit: "Submit for approval",
+      submitting: "Submitting…",
+      back: "Back",
+      itemsEmpty: "Add at least one item before submitting.",
+    },
+    autosave: { saving: "Saving draft…", saved: "Draft saved.", failed: "Failed to save the draft." },
+    restore: {
+      loading: "Restoring draft…",
+      notFound: "Draft not found (or it belongs to another tenant).",
+      error: "Failed to load the draft.",
+      notDraft:
+        "This requisition is no longer a draft (it may have been submitted from another tab) — the form is read-only and autosave stopped.",
+    },
+    submitted: { heading: "Requisition submitted:", backToList: "Back to the requisition list" },
   },
   pages: {
     requisitions: {

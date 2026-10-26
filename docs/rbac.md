@@ -27,10 +27,12 @@ Fixed catalog (seeded in `identity.roles`): **admin, requester, approver, buyer,
 | `audit:read` | | | | | ✓ |
 | `users:manage` | | | | | |
 
-Read permissions are broad by design (everyone in the tenant sees the flow they participate in); writes are narrow. Ownership rules are domain checks on top of RBAC, enforced inside the owning service. Landed so far:
+Read permissions are broad by design (everyone in the tenant sees the flow they participate in); writes are narrow. Ownership rules are domain checks on top of RBAC, enforced inside the owning service. Reads are tenant-wide: `requisition:read` (#32 list, #33 detail) has no ownership check — another same-tenant user's draft is readable, while its edits/submit are not. Landed so far:
 
 - **requisition edit/submit (#29, maintainer decision 2026-10-23)** — the caller must be the requisition's `requester_id`; admins may act on any requisition of the tenant; violations return `403` with machine code `requisition_forbidden`.
 - **approval decisions (#30)** — beyond `approval:decide`, the decider must not be the requisition's `requester_id` (self-approval is forbidden for everyone, admins included — `403 approval_self_forbidden`) and must hold the step's materialized `role_required` (`403 approval_role_forbidden`; admins excepted, mirroring `rbac.Check`). Because `approval:decide` is approver-only above, **a rule with role R is decided by a holder of R who also holds `approval:decide` (R + approver), or by an admin**. `approval:configure` (the rules API) is admin-only by design — PRD §5 puts approval-rule management on the tenant admin.
+- **PO conversion (#35)** — `POST /api/v1/purchase-orders/from-requisition/{id}` is `po:write` (buyer/admin; no ownership rule — any buyer of the tenant converts). Beyond the permission, procurement enforces two domain gates inside the conversion transaction: the named `vendor_id` must be an **active** vendor of the tenant (`412 vendor_deactivated` / `404 vendor_not_found`), and the requisition must be `approved` (`409 po_requisition_not_approved`). Replaying a conversion returns the existing PO — the gates run on the creation path only.
+- **PO lifecycle (#36)** — `POST /api/v1/purchase-orders/{id}/{issue|acknowledge|cancel|close}` and their gRPC twins are `po:write` (buyer/admin at both layers; no ownership rule — POs belong to the tenant, not a user). Beyond the permission, the domain enforces the FR-06 state machine: only `draft` issues (`409 po_illegal_transition` otherwise), only `issued` acknowledges, cancel works from draft/issued/acknowledged **only while nothing was received** (`409 po_has_receipts` once any `qty_received` > 0), and only `partially_received`/`received` close.
 
 ## Enforcement layers (defense in depth)
 
@@ -43,6 +45,8 @@ Read permissions are broad by design (everyone in the tenant sees the flow they 
 2. **Service-layer gRPC interceptor** (`internal/platform/rbac.UnaryInterceptor`): each service maps its user-facing methods to required permissions (`MethodPermissions`); the interceptor re-checks the roles the gateway propagated in gRPC metadata (`x-role`, with `x-user-id` / `x-tenant-id` alongside). Methods absent from the map are internal or pre-auth. Failures:
    - protected method called without caller metadata → `Unauthenticated` (`auth context missing`)
    - roles insufficient → `PermissionDenied` (`permission_denied: requires <permission>`)
+
+   One documented exception (#33): the documents attachment methods are absent from that service's map **by design** — their permission depends on the attachment's entity type (`vendor:read`/`write` vs `requisition:read`/`write`), which the interceptor cannot see. Each handler re-checks the per-entity permission itself (`services/documents/server/api.go`, `entityPermissions` table) as soon as the entity type is known; the gateway routes enforce the same permission at the edge, so both layers still check.
 
 3. **PostgreSQL RLS** — tenant tables run under `FORCE ROW LEVEL SECURITY`; policies key on the transaction-local `app.tenant_id` set by `internal/platform/tenant.WithTenant` (#23). The gateway injects the token's `tid` into gRPC metadata (`rbac.OutgoingContext`), services read it back (`rbac.FromMetadata`), and every tenant-scoped query runs through `WithTenant` as the non-superuser `eproc_app` role.
 

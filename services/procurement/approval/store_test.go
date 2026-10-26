@@ -544,6 +544,8 @@ type outboxRow struct {
 
 // outboxRows reads the decide events of one requisition straight from the
 // table (bypassing RLS on purpose — the count is the exactly-once evidence).
+// Filtered to the decide event types: since #45 the same requisition also
+// carries its pr.submitted row, which the requisition store suite owns.
 func outboxRows(t *testing.T, db *pgxpool.Pool, requisitionID string) []outboxRow {
 	t.Helper()
 	rows := []outboxRow{}
@@ -551,8 +553,11 @@ func outboxRows(t *testing.T, db *pgxpool.Pool, requisitionID string) []outboxRo
 		rs, err := tx.Query(context.Background(), `
 			SELECT id::text, event_type, version, payload, actor_id::text,
 			       trace_id, entity_type, entity_id::text, published_at
-			FROM procurement.outbox WHERE entity_id = $1
-			ORDER BY occurred_at, event_type`, requisitionID)
+			FROM procurement.outbox
+			WHERE entity_id = $1
+			  AND event_type IN ($2, $3, $4, $5)
+			ORDER BY occurred_at, event_type`,
+			requisitionID, OutboxStepApproved, OutboxStepRejected, OutboxApproved, OutboxRejected)
 		if err != nil {
 			return err
 		}

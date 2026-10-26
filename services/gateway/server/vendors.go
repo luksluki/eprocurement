@@ -104,7 +104,7 @@ func getVendor(client VendorClient, documents DocumentsClient) fiber.Handler {
 		}
 		out := vendorJSON(v)
 		if documents != nil {
-			attachments, err := listVendorAttachments(forwardContext(c, claims), v.GetId(), documents)
+			attachments, err := listEntityAttachments(forwardContext(c, claims), entityVendor, v.GetId(), documents)
 			if err != nil {
 				return attachmentError(c, err)
 			}

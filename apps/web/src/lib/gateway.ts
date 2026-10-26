@@ -191,3 +191,225 @@ export async function listRequisitions(accessToken: string, query: string): Prom
     return { ok: false, status: 502 };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Requisition form (#33). Unlike listRequisitions above (a thin proxy that
+// only discriminates 401), these calls return the gateway's parsed error
+// body so the BFF routes can forward 4xx machine codes verbatim — the wizard
+// maps them to per-field/per-step messages and stops autosave on 403/409.
+
+// GatewayFailure is a non-OK gateway answer with its machine-readable body
+// parsed (`{error, code}` per services/gateway). Network failures surface as
+// the synthetic 502/gateway_unavailable pair.
+export type GatewayFailure = {
+  ok: false;
+  status: number;
+  error: string;
+  code: string;
+};
+
+export type GatewayResult<T> = { ok: true; data: T } | GatewayFailure;
+
+async function callGateway<T>(
+  accessToken: string,
+  path: string,
+  init?: { method?: string; body?: unknown; idempotencyKey?: string },
+): Promise<GatewayResult<T>> {
+  try {
+    const headers: Record<string, string> = { authorization: `Bearer ${accessToken}` };
+    let body: string | undefined;
+    if (init?.body !== undefined) {
+      headers["content-type"] = "application/json";
+      body = JSON.stringify(init.body);
+    }
+    if (init?.idempotencyKey) {
+      headers["idempotency-key"] = init.idempotencyKey;
+    }
+    const res = await fetch(`${gatewayUrl()}${path}`, {
+      method: init?.method ?? "GET",
+      headers,
+      body,
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      const parsed = (await res.json().catch(() => null)) as { error?: string; code?: string } | null;
+      return {
+        ok: false,
+        status: res.status,
+        error: parsed?.error ?? `request failed (${res.status})`,
+        code: parsed?.code ?? "gateway_error",
+      };
+    }
+    return { ok: true, data: (await res.json()) as T };
+  } catch {
+    return { ok: false, status: 502, error: "gateway unreachable", code: "gateway_unavailable" };
+  }
+}
+
+export type RequisitionItemWire = {
+  description: string;
+  qty: number;
+  unit_price_cents: number;
+  category: string;
+};
+
+// Attachment metadata as the gateway embeds it (object_key never appears in
+// REST responses; clients use the presigned URLs).
+export type AttachmentMeta = {
+  id: string;
+  entity_type: string;
+  entity_id: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  checksum_sha256: string;
+  status: string;
+  created_by: string;
+  created_at: string;
+  uploaded_at: string;
+};
+
+// RequisitionDetail is the GET /api/v1/requisitions/:id shape: the full
+// aggregate (typed items, unlike the list rows' unknown[]) plus the embedded
+// attachment metadata.
+export type RequisitionDetail = Omit<RequisitionHeader, "items"> & {
+  items: RequisitionItemWire[];
+  attachments?: AttachmentMeta[];
+};
+
+export type DeclaredUpload = AttachmentMeta & {
+  upload: { url: string; method: string; expires_at: string; headers: Record<string, string> };
+};
+
+// createRequisitionDraft creates the server-side draft the wizard autosaves
+// into. Currency is required (IDR/USD); the basket starts empty and is
+// maintained through replaceRequisitionItems.
+export function createRequisitionDraft(
+  accessToken: string,
+  currency: string,
+): Promise<GatewayResult<RequisitionDetail>> {
+  return callGateway(accessToken, "/api/v1/requisitions", {
+    method: "POST",
+    body: { currency, items: [] },
+  });
+}
+
+// replaceRequisitionItems PUTs the whole basket (the update contract carries
+// only items — currency is fixed at draft creation).
+export function replaceRequisitionItems(
+  accessToken: string,
+  id: string,
+  items: RequisitionItemWire[],
+): Promise<GatewayResult<RequisitionDetail>> {
+  return callGateway(accessToken, `/api/v1/requisitions/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: { currency: "", items },
+  });
+}
+
+// getRequisition restores a draft from the server: header, items, and the
+// embedded attachment metadata (one round trip).
+export function getRequisition(accessToken: string, id: string): Promise<GatewayResult<RequisitionDetail>> {
+  return callGateway(accessToken, `/api/v1/requisitions/${encodeURIComponent(id)}`);
+}
+
+// submitRequisition moves the draft to submitted. The optional idempotency
+// key names the submit; a replay returns the current state.
+export function submitRequisition(
+  accessToken: string,
+  id: string,
+  idempotencyKey?: string,
+): Promise<GatewayResult<RequisitionDetail>> {
+  return callGateway(accessToken, `/api/v1/requisitions/${encodeURIComponent(id)}/submit`, {
+    method: "POST",
+    idempotencyKey,
+  });
+}
+
+export type AttachmentDeclaration = {
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  checksum_sha256: string;
+};
+
+// declareAttachment asks the gateway for a presigned PUT URL bound to the
+// requisition draft (entity existence + ownership checked gateway-side).
+export function declareAttachment(
+  accessToken: string,
+  requisitionId: string,
+  declaration: AttachmentDeclaration,
+): Promise<GatewayResult<DeclaredUpload>> {
+  return callGateway(accessToken, `/api/v1/requisitions/${encodeURIComponent(requisitionId)}/attachments`, {
+    method: "POST",
+    body: declaration,
+  });
+}
+
+// completeAttachment tells the gateway to verify the uploaded object
+// (size/mime/checksum) and flip the attachment to ready.
+export function completeAttachment(
+  accessToken: string,
+  requisitionId: string,
+  attachmentId: string,
+): Promise<GatewayResult<AttachmentMeta>> {
+  return callGateway(
+    accessToken,
+    `/api/v1/requisitions/${encodeURIComponent(requisitionId)}/attachments/${encodeURIComponent(attachmentId)}/complete`,
+    { method: "POST" },
+  );
+}
+
+// EventEntry is one row of the append-only event history (the PRD §14.5
+// envelope) as served by GET /api/v1/events (issue #43). payload_json is
+// the raw JSON payload string — full fidelity of the procurement outbox
+// JSONB, never restructured (dev-note 042).
+export type EventEntry = {
+  event_id: string;
+  tenant_id: string;
+  type: string;
+  version: number;
+  occurred_at: string;
+  actor_id: string;
+  trace_id: string;
+  entity_type: string;
+  entity_id: string;
+  payload_json: string;
+};
+
+// EventsPage is the GET /api/v1/events envelope. Pagination is keyset, not
+// offset: next_cursor is the opaque continuation token and is empty on the
+// last page — a deliberate deviation from the page/total convention
+// documented in dev-notes 042/043.
+export type EventsPage = {
+  events: EventEntry[];
+  next_cursor: string;
+};
+
+export type EventsResult =
+  | { ok: true; data: EventsPage }
+  | { ok: false; status: number; code?: string };
+
+// listEvents fetches one keyset page of the tenant-scoped event history.
+// `query` is the already-canonicalized filter string (entityType/entityId/
+// limit/cursor — camelCase per PRD §15). 401 is discriminated for the
+// refresh dance; 400 carries the gateway's machine code (events_*).
+export async function listEvents(accessToken: string, query: string): Promise<EventsResult> {
+  try {
+    const target = `${gatewayUrl()}/api/v1/events${query ? `?${query}` : ""}`;
+    const res = await fetch(target, {
+      headers: { authorization: `Bearer ${accessToken}` },
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      if (res.status === 400) {
+        const body = (await res.json().catch(() => ({}))) as { code?: string };
+        return { ok: false, status: 400, code: body.code };
+      }
+      return { ok: false, status: res.status };
+    }
+    return { ok: true, data: (await res.json()) as EventsPage };
+  } catch {
+    return { ok: false, status: 502 };
+  }
+}

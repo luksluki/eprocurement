@@ -23,15 +23,16 @@ const ServiceName = "documents"
 // entities today are requisitions, and requisition:read is held by every
 // tenant role (rbac matrix), so the whole tenant can read its timeline
 // while a method missing from this map would pass through unprotected
-// (see rbac.UnaryInterceptor). Attachment methods stay on the vendor
-// permissions; per-entity permissions arrive with requisition and invoice
-// attachments.
+// (see rbac.UnaryInterceptor).
+//
+// The attachment methods are deliberately NOT in this map: their permission
+// depends on the attachment's entity type (vendor:read/write vs
+// requisition:read/write), which the interceptor cannot see. Each handler
+// re-checks the per-entity permission itself (entityPermissions in api.go)
+// right after the entity type is known — the same defense-in-depth depth,
+// one level deeper.
 var methodPermissions = rbac.MethodPermissions{
-	"/documents.v1.Documents/CreateUpload":    rbac.VendorWrite,
-	"/documents.v1.Documents/CompleteUpload":  rbac.VendorWrite,
-	"/documents.v1.Documents/ListAttachments": rbac.VendorRead,
-	"/documents.v1.Documents/GetDownloadUrl":  rbac.VendorRead,
-	"/documents.v1.Documents/ListEvents":      rbac.RequisitionRead,
+	"/documents.v1.Documents/ListEvents": rbac.RequisitionRead,
 }
 
 // New returns a grpcserver.Server with the documents API registered.
