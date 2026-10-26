@@ -26,22 +26,27 @@ const ServiceName = "procurement"
 // Deciding an approval step is approver/admin; the step's role_required and
 // the self-approval ban are enforced in the approval domain. Configuring
 // rules is admin-only (approval:configure has no non-admin role).
-// Converting a requisition to a PO is buyer/admin; the active-vendor and
-// approved-requisition gates are domain checks inside the conversion.
+// Converting a requisition to a PO and every PO lifecycle action
+// (issue/acknowledge/cancel/close) are buyer/admin; the source-status and
+// receipt guards are domain checks inside the transitions.
 var methodPermissions = rbac.MethodPermissions{
-	"/procurement.v1.Procurement/CreateVendor":         rbac.VendorWrite,
-	"/procurement.v1.Procurement/GetVendor":            rbac.VendorRead,
-	"/procurement.v1.Procurement/UpdateVendor":         rbac.VendorWrite,
-	"/procurement.v1.Procurement/DeactivateVendor":     rbac.VendorWrite,
-	"/procurement.v1.Procurement/ListVendors":          rbac.VendorRead,
-	"/procurement.v1.Procurement/CreateRequisition":    rbac.RequisitionWrite,
-	"/procurement.v1.Procurement/UpdateRequisition":    rbac.RequisitionWrite,
-	"/procurement.v1.Procurement/SubmitRequisition":    rbac.RequisitionWrite,
-	"/procurement.v1.Procurement/ListRequisitions":     rbac.RequisitionRead,
-	"/procurement.v1.Procurement/DecideApproval":       rbac.ApprovalDecide,
-	"/procurement.v1.Procurement/GetApprovalRules":     rbac.ApprovalConfigure,
-	"/procurement.v1.Procurement/ReplaceApprovalRules": rbac.ApprovalConfigure,
-	"/procurement.v1.Procurement/CreatePurchaseOrder":  rbac.POWrite,
+	"/procurement.v1.Procurement/CreateVendor":             rbac.VendorWrite,
+	"/procurement.v1.Procurement/GetVendor":                rbac.VendorRead,
+	"/procurement.v1.Procurement/UpdateVendor":             rbac.VendorWrite,
+	"/procurement.v1.Procurement/DeactivateVendor":         rbac.VendorWrite,
+	"/procurement.v1.Procurement/ListVendors":              rbac.VendorRead,
+	"/procurement.v1.Procurement/CreateRequisition":        rbac.RequisitionWrite,
+	"/procurement.v1.Procurement/UpdateRequisition":        rbac.RequisitionWrite,
+	"/procurement.v1.Procurement/SubmitRequisition":        rbac.RequisitionWrite,
+	"/procurement.v1.Procurement/ListRequisitions":         rbac.RequisitionRead,
+	"/procurement.v1.Procurement/DecideApproval":           rbac.ApprovalDecide,
+	"/procurement.v1.Procurement/GetApprovalRules":         rbac.ApprovalConfigure,
+	"/procurement.v1.Procurement/ReplaceApprovalRules":     rbac.ApprovalConfigure,
+	"/procurement.v1.Procurement/CreatePurchaseOrder":      rbac.POWrite,
+	"/procurement.v1.Procurement/IssuePurchaseOrder":       rbac.POWrite,
+	"/procurement.v1.Procurement/AcknowledgePurchaseOrder": rbac.POWrite,
+	"/procurement.v1.Procurement/CancelPurchaseOrder":      rbac.POWrite,
+	"/procurement.v1.Procurement/ClosePurchaseOrder":       rbac.POWrite,
 }
 
 // New returns a grpcserver.Server with the procurement API registered.

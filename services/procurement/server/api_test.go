@@ -1332,9 +1332,248 @@ func TestPurchaseOrderGRPCConversion(t *testing.T) {
 	}
 }
 
-// The #35 error mapping as a pure unit test (no database): machine codes
-// verbatim in the gRPC message, Aborted for the status gate (gateway renders
-// 409), FailedPrecondition for the vendor gate (412).
+// grpcForcePO flips a PO to a post-acknowledgement status and optionally
+// bumps one line's qty_received — the #37 stand-in for the receipt-driven
+// states the lifecycle tests need (goods receipts own those transitions).
+func grpcForcePO(t *testing.T, db *pgxpool.Pool, id, status string, receipts bool) {
+	t.Helper()
+	if err := tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		ctx := context.Background()
+		if _, err := tx.Exec(ctx,
+			`UPDATE procurement.purchase_orders SET status = $2 WHERE id = $1`, id, status); err != nil {
+			return err
+		}
+		if receipts {
+			_, err := tx.Exec(ctx, `
+				UPDATE procurement.po_items SET qty_received = 1
+				WHERE po_id = $1 AND id = (
+					SELECT id FROM procurement.po_items WHERE po_id = $1
+					ORDER BY created_at, id LIMIT 1)`, id)
+			return err
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("force po %s: %v", status, err)
+	}
+}
+
+// grpcPOEventCount counts one lifecycle event type's outbox rows for a PO.
+func grpcPOEventCount(t *testing.T, db *pgxpool.Pool, poID, eventType string) int {
+	t.Helper()
+	var n int
+	if err := tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		return tx.QueryRow(context.Background(), `
+			SELECT count(*) FROM procurement.outbox WHERE entity_id = $1 AND event_type = $2`,
+			poID, eventType).Scan(&n)
+	}); err != nil {
+		t.Fatalf("count %s rows: %v", eventType, err)
+	}
+	return n
+}
+
+// newApprovedID drives the requester flow to one more approved requisition
+// (each PO conversion consumes one).
+func newApprovedID(t *testing.T, client procurementv1.ProcurementClient) string {
+	t.Helper()
+	return grpcApprovedRequisition(t, client).GetId()
+}
+
+// The #36 lifecycle through the full gRPC wiring: RBAC (po:write is
+// buyer-only on every action), the issue → acknowledged → closed happy path
+// with issued_at stamped and one outbox row per transition carrying actor +
+// trace, cancel (draft and after a receipt), the machine codes of every
+// guard, cross-tenant invisibility, and the anonymous rejection.
+func TestPurchaseOrderGRPCLifecycle(t *testing.T) {
+	client, db, cleanup := startProcurement(t)
+	defer cleanup()
+	grpcCleanupRequisition(t, db)
+	grpcCleanupPOVendor(t, db)
+	t.Cleanup(func() {
+		grpcCleanupRequisition(t, db)
+		grpcCleanupPOVendor(t, db)
+	})
+
+	if _, err := client.ReplaceApprovalRules(callerCtx(gTenantA, rbac.RoleAdmin),
+		&procurementv1.ReplaceApprovalRulesRequest{Rules: testRules()[:1]}); err != nil {
+		t.Fatalf("configure rules: %v", err)
+	}
+	approved := grpcApprovedRequisition(t, client)
+	vendorA, err := client.CreateVendor(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.CreateVendorRequest{Code: "G-PO35-A", Name: "PT Satu"})
+	if err != nil {
+		t.Fatalf("create vendor: %v", err)
+	}
+	wrapped, err := client.CreatePurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.CreatePurchaseOrderRequest{RequisitionId: approved.GetId(), VendorId: vendorA.GetId()})
+	if err != nil || !wrapped.GetCreated() {
+		t.Fatalf("convert = (%v, %v)", wrapped.GetCreated(), err)
+	}
+	po := wrapped.GetPurchaseOrder()
+
+	// po:write is buyer-only on the lifecycle actions too: requester and
+	// viewer are denied at the service-layer re-check.
+	for _, role := range []string{rbac.RoleRequester, rbac.RoleViewer} {
+		_, err := client.IssuePurchaseOrder(callerCtx(gTenantA, role),
+			&procurementv1.IssuePurchaseOrderRequest{Id: po.GetId()})
+		if status.Code(err) != codes.PermissionDenied {
+			t.Fatalf("issue as %s: code = %v, want PermissionDenied", role, status.Code(err))
+		}
+	}
+
+	// Machine codes: bad id, unknown PO, and an illegal edge (acknowledging
+	// a draft) — all before any state moves.
+	_, err = client.IssuePurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.IssuePurchaseOrderRequest{Id: "nope"})
+	if status.Code(err) != codes.InvalidArgument || status.Convert(err).Message() != "po_id_invalid" {
+		t.Fatalf("bad id: got (%v, %q), want InvalidArgument po_id_invalid", status.Code(err), status.Convert(err).Message())
+	}
+	_, err = client.IssuePurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.IssuePurchaseOrderRequest{Id: "dddddddd-0000-0000-0000-0000000000ff"})
+	if status.Code(err) != codes.NotFound || status.Convert(err).Message() != "po_not_found" {
+		t.Fatalf("unknown po: got (%v, %q), want NotFound po_not_found", status.Code(err), status.Convert(err).Message())
+	}
+	_, err = client.AcknowledgePurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.AcknowledgePurchaseOrderRequest{Id: po.GetId()})
+	if status.Code(err) != codes.Aborted || status.Convert(err).Message() != "po_illegal_transition" {
+		t.Fatalf("acknowledge draft: got (%v, %q), want Aborted po_illegal_transition", status.Code(err), status.Convert(err).Message())
+	}
+	if got := grpcPOEventCount(t, db, po.GetId(), "po.acknowledged"); got != 0 {
+		t.Fatalf("po.acknowledged rows after illegal call = %d, want 0", got)
+	}
+
+	// Happy path with a trace: issue stamps issued_at and writes po.issued.
+	buyer := metadata.AppendToOutgoingContext(callerCtx(gTenantA, rbac.RoleBuyer), "x-trace-id", "trace-grpc-36")
+	issued, err := client.IssuePurchaseOrder(buyer, &procurementv1.IssuePurchaseOrderRequest{Id: po.GetId()})
+	if err != nil || issued.GetStatus() != "issued" {
+		t.Fatalf("issue = (%s, %v), want issued", issued.GetStatus(), err)
+	}
+	if issued.GetIssuedAt() == "" {
+		t.Fatalf("issued_at = %q, want stamped", issued.GetIssuedAt())
+	}
+	var eventType, actorID, traceID string
+	var payload []byte
+	if err := tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		return tx.QueryRow(context.Background(), `
+			SELECT event_type, actor_id::text, trace_id, payload
+			FROM procurement.outbox WHERE entity_id = $1 AND event_type = 'po.issued'`,
+			po.GetId()).Scan(&eventType, &actorID, &traceID, &payload)
+	}); err != nil {
+		t.Fatalf("load po.issued row: %v", err)
+	}
+	if eventType != "po.issued" || actorID != gUser || traceID != "trace-grpc-36" {
+		t.Fatalf("po.issued row = (%s, %s, %s)", eventType, actorID, traceID)
+	}
+	var issuedPayload struct {
+		Status      string `json:"status"`
+		PerformedBy string `json:"performed_by"`
+		Number      string `json:"number"`
+	}
+	if err := json.Unmarshal(payload, &issuedPayload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if issuedPayload.Status != "issued" || issuedPayload.PerformedBy != gUser || issuedPayload.Number != po.GetNumber() {
+		t.Fatalf("po.issued payload = %+v", issuedPayload)
+	}
+
+	// A second issue loses the edge: 409, no second event.
+	if _, err := client.IssuePurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.IssuePurchaseOrderRequest{Id: po.GetId()}); status.Code(err) != codes.Aborted {
+		t.Fatalf("double issue: code = %v, want Aborted", status.Code(err))
+	}
+	if got := grpcPOEventCount(t, db, po.GetId(), "po.issued"); got != 1 {
+		t.Fatalf("po.issued rows after double issue = %d, want 1", got)
+	}
+
+	// Acknowledge, then the receipt-driven close (short-close arm).
+	acknowledged, err := client.AcknowledgePurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.AcknowledgePurchaseOrderRequest{Id: po.GetId()})
+	if err != nil || acknowledged.GetStatus() != "acknowledged" {
+		t.Fatalf("acknowledge = (%s, %v)", acknowledged.GetStatus(), err)
+	}
+	if got := grpcPOEventCount(t, db, po.GetId(), "po.acknowledged"); got != 1 {
+		t.Fatalf("po.acknowledged rows = %d, want 1", got)
+	}
+	grpcForcePO(t, db, po.GetId(), "partially_received", true)
+	closed, err := client.ClosePurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.ClosePurchaseOrderRequest{Id: po.GetId()})
+	if err != nil || closed.GetStatus() != "closed" {
+		t.Fatalf("close = (%s, %v), want closed", closed.GetStatus(), err)
+	}
+	if got := grpcPOEventCount(t, db, po.GetId(), "po.closed"); got != 1 {
+		t.Fatalf("po.closed rows = %d, want 1", got)
+	}
+	// Terminal: nothing leaves closed.
+	if _, err := client.CancelPurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.CancelPurchaseOrderRequest{Id: po.GetId()}); status.Code(err) != codes.Aborted {
+		t.Fatalf("cancel closed: code = %v, want Aborted", status.Code(err))
+	}
+
+	// Cancel rules respect receipts: a PO with a receipt cannot cancel —
+	// po_has_receipts, no state move, no event.
+	pinnedWrap, err := client.CreatePurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.CreatePurchaseOrderRequest{RequisitionId: newApprovedID(t, client), VendorId: vendorA.GetId()})
+	if err != nil {
+		t.Fatalf("convert pinned: %v", err)
+	}
+	pinned := pinnedWrap.GetPurchaseOrder()
+	if _, err := client.IssuePurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.IssuePurchaseOrderRequest{Id: pinned.GetId()}); err != nil {
+		t.Fatalf("issue pinned: %v", err)
+	}
+	if _, err := client.AcknowledgePurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.AcknowledgePurchaseOrderRequest{Id: pinned.GetId()}); err != nil {
+		t.Fatalf("acknowledge pinned: %v", err)
+	}
+	grpcForcePO(t, db, pinned.GetId(), "acknowledged", true)
+	_, err = client.CancelPurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.CancelPurchaseOrderRequest{Id: pinned.GetId()})
+	if status.Code(err) != codes.Aborted || status.Convert(err).Message() != "po_has_receipts" {
+		t.Fatalf("cancel with receipts: got (%v, %q), want Aborted po_has_receipts", status.Code(err), status.Convert(err).Message())
+	}
+	var pinnedStatus string
+	if err := tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		return tx.QueryRow(context.Background(),
+			`SELECT status FROM procurement.purchase_orders WHERE id = $1`, pinned.GetId()).Scan(&pinnedStatus)
+	}); err != nil {
+		t.Fatalf("read pinned status: %v", err)
+	}
+	if pinnedStatus != "acknowledged" {
+		t.Fatalf("pinned status = %s, want acknowledged (no move)", pinnedStatus)
+	}
+	if got := grpcPOEventCount(t, db, pinned.GetId(), "po.cancelled"); got != 0 {
+		t.Fatalf("po.cancelled rows after pinned cancel = %d, want 0", got)
+	}
+
+	// Plain cancel from draft: po.cancelled commits.
+	cancelWrap, err := client.CreatePurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.CreatePurchaseOrderRequest{RequisitionId: newApprovedID(t, client), VendorId: vendorA.GetId()})
+	if err != nil {
+		t.Fatalf("convert cancel: %v", err)
+	}
+	cancelled, err := client.CancelPurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.CancelPurchaseOrderRequest{Id: cancelWrap.GetPurchaseOrder().GetId()})
+	if err != nil || cancelled.GetStatus() != "cancelled" {
+		t.Fatalf("cancel = (%s, %v), want cancelled", cancelled.GetStatus(), err)
+	}
+	if got := grpcPOEventCount(t, db, cancelWrap.GetPurchaseOrder().GetId(), "po.cancelled"); got != 1 {
+		t.Fatalf("po.cancelled rows = %d, want 1", got)
+	}
+
+	// Cross-tenant: tenant B's buyer cannot see tenant A's PO (RLS).
+	if _, err := client.IssuePurchaseOrder(callerCtx(gTenantB, rbac.RoleBuyer),
+		&procurementv1.IssuePurchaseOrderRequest{Id: pinned.GetId()}); status.Code(err) != codes.NotFound {
+		t.Fatalf("cross-tenant issue: code = %v, want NotFound", status.Code(err))
+	}
+	// No propagated auth metadata: Unauthenticated before any store hit.
+	if _, err := client.IssuePurchaseOrder(context.Background(),
+		&procurementv1.IssuePurchaseOrderRequest{Id: pinned.GetId()}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("anonymous: code = %v, want Unauthenticated", status.Code(err))
+	}
+}
+
+// The #35 + #36 error mapping as a pure unit test (no database): machine
+// codes verbatim in the gRPC message, Aborted for the lifecycle guards
+// (gateway renders 409), FailedPrecondition for the vendor gate (412).
 func TestMapPurchaseOrderError(t *testing.T) {
 	for name, tc := range map[string]struct {
 		err  error
@@ -1343,6 +1582,10 @@ func TestMapPurchaseOrderError(t *testing.T) {
 	}{
 		"vendor id invalid":      {purchaseorder.ErrVendorIDInvalid, codes.InvalidArgument, "po_vendor_id_invalid"},
 		"not approved":           {purchaseorder.ErrRequisitionNotApproved, codes.Aborted, "po_requisition_not_approved"},
+		"po id invalid":          {purchaseorder.ErrIDInvalid, codes.InvalidArgument, "po_id_invalid"},
+		"po not found":           {purchaseorder.ErrNotFound, codes.NotFound, "po_not_found"},
+		"illegal transition":     {purchaseorder.ErrIllegalTransition, codes.Aborted, "po_illegal_transition"},
+		"has receipts":           {purchaseorder.ErrHasReceipts, codes.Aborted, "po_has_receipts"},
 		"requisition not found":  {requisition.ErrNotFound, codes.NotFound, "requisition_not_found"},
 		"requisition id invalid": {requisition.ErrIDInvalid, codes.InvalidArgument, "requisition_id_invalid"},
 		"vendor not found":       {vendor.ErrNotFound, codes.NotFound, "vendor_not_found"},

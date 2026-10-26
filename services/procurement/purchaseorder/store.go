@@ -31,6 +31,14 @@ type Store struct {
 // NewStore returns a Store on top of the pool.
 func NewStore(db *pgxpool.Pool) *Store { return &Store{db: db} }
 
+// IO failure codes; the gRPC API and the gateway carry them through to
+// clients unchanged (same contract as the domain's validation sentinels —
+// the requisition store's split).
+var (
+	ErrIDInvalid = errors.New("po_id_invalid")
+	ErrNotFound  = errors.New("po_not_found")
+)
+
 const poColumns = `id, tenant_id, number, requisition_id, vendor_id, status, currency,
 	       total_cents, issued_at, created_at, created_by, updated_at, updated_by`
 
@@ -192,6 +200,160 @@ func (s *Store) CreateFromRequisition(ctx context.Context, tenantID, requisition
 	return out, created, nil
 }
 
+// Lifecycle outbox event types (#36). po.issued and po.acknowledged are PRD
+// §14.6 catalog entries; po.cancelled and po.closed extend the catalog the
+// same way #35's po.created and #31's pr.step_approved did — two segments so
+// the §14.5 po.* topic bindings (wildcard = exactly one word) deliver them.
+// Pinned with their payloads in docs/schema/procurement.md.
+const (
+	OutboxIssued       = "po.issued"
+	OutboxAcknowledged = "po.acknowledged"
+	OutboxCancelled    = "po.cancelled"
+	OutboxClosed       = "po.closed"
+)
+
+// TransitionPayload is the JSONB payload shared by the four lifecycle outbox
+// events: the identifying fields a notification consumer (#45) or timeline
+// projection (#43) needs, plus the new status and who performed the action
+// (the envelope's actor_id column carries the same user; performed_by keeps
+// the payload self-contained, the DecisionPayload decided_by precedent).
+type TransitionPayload struct {
+	Number        string `json:"number"`
+	RequisitionID string `json:"requisition_id"`
+	VendorID      string `json:"vendor_id"`
+	Status        string `json:"status"`
+	TotalCents    int64  `json:"total_cents"`
+	Currency      string `json:"currency"`
+	PerformedBy   string `json:"performed_by"`
+}
+
+// transition applies one lifecycle action (issue/acknowledge/cancel/close)
+// in a single tenant transaction whose step order is pinned:
+//
+//  1. load the PO header + items under the row lock (FOR UPDATE) — the
+//     serialization point every lifecycle transition shares, so concurrent
+//     transitions on one PO (and #37's receipts, which will take the same
+//     lock) serialize here: exactly one lands, the rest fail cleanly;
+//  2. run the domain method — edge guard, cancel receipt guard, one
+//     aggregate event;
+//  3. guarded UPDATE re-checking the from-status the lock already protects
+//     (belt and braces — losing that race is ErrIllegalTransition);
+//  4. append exactly one outbox row (eventType), committed with the UPDATE:
+//     an illegal transition writes no row because the transaction rolls
+//     back before step 4 (ADR-0001 — no dual writes).
+//
+// issued_at is written as the post-transition aggregate value: now on issue,
+// the previously stamped time on acknowledge/cancel/close, nil only for a
+// draft cancel. Cross-tenant ids are indistinguishable from missing ones
+// (ErrNotFound); non-UUID ids fail fast before the transaction opens.
+func (s *Store) transition(ctx context.Context, tenantID, id, actor, what, eventType string,
+	apply func(*PurchaseOrder, time.Time, string) error) (PurchaseOrder, error) {
+	if _, err := uuid.Parse(id); err != nil {
+		return PurchaseOrder{}, ErrIDInvalid
+	}
+	var out PurchaseOrder
+	err := tenant.WithTenant(ctx, s.db, tenantID, func(tx pgx.Tx) error {
+		// Step 1: lock the PO — the shared serialization point.
+		po, err := loadForUpdate(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		// Step 2: the domain owns the guards and the aggregate event.
+		from := po.Status
+		now := time.Now().UTC()
+		if err := apply(&po, now, actor); err != nil {
+			return err
+		}
+		// Step 3: the guarded write re-checks the from-status.
+		var updated PurchaseOrder
+		if err := scanPO(tx.QueryRow(ctx, `
+			UPDATE procurement.purchase_orders
+			SET status = $2, issued_at = $3, updated_at = now(), updated_by = NULLIF($4, '')::uuid
+			WHERE id = $1 AND status = $5
+			RETURNING `+poColumns,
+			id, po.Status, po.IssuedAt, actor, from), &updated); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrIllegalTransition // lost the race despite the lock
+			}
+			return err
+		}
+		// Step 4: exactly one outbox row, committed with the transition.
+		if err := outbox.AppendTx(ctx, tx, outbox.Event{
+			ID: uuid.NewString(), TenantID: tenantID, EventType: eventType,
+			Version: 1,
+			Payload: TransitionPayload{
+				Number: updated.Number, RequisitionID: updated.RequisitionID,
+				VendorID: updated.VendorID, Status: updated.Status,
+				TotalCents: updated.TotalCents, Currency: updated.Currency,
+				PerformedBy: actor,
+			},
+			ActorID:    actor,
+			TraceID:    logger.TraceID(ctx),
+			EntityType: "purchase_order",
+			EntityID:   updated.ID,
+			OccurredAt: now,
+		}); err != nil {
+			return err
+		}
+		updated.Items = po.Items
+		out = updated
+		return nil
+	})
+	if err != nil {
+		return PurchaseOrder{}, wrap(what, err)
+	}
+	return out, nil
+}
+
+// Issue moves a draft PO to issued and stamps issued_at, committing exactly
+// one po.issued row (the §14.6 catalog event) with the transition. Anything
+// but draft → ErrIllegalTransition (HTTP 409).
+func (s *Store) Issue(ctx context.Context, tenantID, id, actor string) (PurchaseOrder, error) {
+	return s.transition(ctx, tenantID, id, actor, "issue", OutboxIssued, (*PurchaseOrder).Issue)
+}
+
+// Acknowledge moves an issued PO to acknowledged — the vendor's confirmation
+// (PRD SLA §16) — committing exactly one po.acknowledged row. Anything but
+// issued → ErrIllegalTransition.
+func (s *Store) Acknowledge(ctx context.Context, tenantID, id, actor string) (PurchaseOrder, error) {
+	return s.transition(ctx, tenantID, id, actor, "acknowledge", OutboxAcknowledged, (*PurchaseOrder).Acknowledge)
+}
+
+// Cancel moves a draft/issued/acknowledged PO to cancelled — but only while
+// the total qty_received over all lines is 0; receipts pin the PO and the
+// only exit is Close (ErrHasReceipts → HTTP 409 po_has_receipts). Commits
+// exactly one po.cancelled row on success.
+func (s *Store) Cancel(ctx context.Context, tenantID, id, actor string) (PurchaseOrder, error) {
+	return s.transition(ctx, tenantID, id, actor, "cancel", OutboxCancelled, (*PurchaseOrder).Cancel)
+}
+
+// Close moves a partially_received (short-close) or received PO to closed,
+// committing exactly one po.closed row. Anything else → ErrIllegalTransition.
+func (s *Store) Close(ctx context.Context, tenantID, id, actor string) (PurchaseOrder, error) {
+	return s.transition(ctx, tenantID, id, actor, "close", OutboxClosed, (*PurchaseOrder).Close)
+}
+
+// loadForUpdate loads one PO (header plus items) inside tx under the row
+// lock — the lifecycle serialization point. RLS makes other tenants' rows
+// invisible, so they surface as ErrNotFound.
+func loadForUpdate(ctx context.Context, tx pgx.Tx, id string) (PurchaseOrder, error) {
+	var po PurchaseOrder
+	if err := scanPO(tx.QueryRow(ctx, `
+		SELECT `+poColumns+` FROM procurement.purchase_orders
+		WHERE id = $1 FOR UPDATE`, id), &po); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return PurchaseOrder{}, ErrNotFound
+		}
+		return PurchaseOrder{}, err
+	}
+	items, err := loadItems(ctx, tx, po.ID)
+	if err != nil {
+		return PurchaseOrder{}, err
+	}
+	po.Items = items
+	return po, nil
+}
+
 // nextNumber allocates the next PO-%06d number for tenantID inside tx, the
 // same counter pattern as requisition numbers (0004): the row is initialized
 // lazily from the tenant's highest existing number (INSERT … ON CONFLICT DO
@@ -314,13 +476,15 @@ func itemsOf(reqItems []requisition.Item) []Item {
 }
 
 // wrap adds context to unexpected failures but passes the machine-code
-// sentinels (domain validation, IO, and the requisition/vendor gates this
-// flow crosses) through bare, so err.Error() carries the code verbatim
-// through gRPC — same contract as the requisition/vendor stores.
+// sentinels (domain validation, the lifecycle guards, IO, and the
+// requisition/vendor gates this package crosses) through bare, so
+// err.Error() carries the code verbatim through gRPC — same contract as the
+// requisition/vendor stores.
 func wrap(what string, err error) error {
 	for _, sentinel := range []error{
 		ErrVendorIDInvalid, ErrRequisitionNotApproved, ErrItemsEmpty,
 		ErrDescriptionInvalid, ErrQtyInvalid, ErrUnitPriceInvalid, ErrCurrencyInvalid,
+		ErrIllegalTransition, ErrHasReceipts, ErrNotFound, ErrIDInvalid,
 		requisition.ErrNotFound, requisition.ErrIDInvalid, requisition.ErrIllegalTransition,
 		vendor.ErrNotFound, vendor.ErrDeactivated,
 	} {

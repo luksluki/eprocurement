@@ -78,9 +78,26 @@ func (f *fakeRequisitionClient) DecideApproval(ctx context.Context, in *procurem
 	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
 }
 
-// The #35 purchase-order method satisfies the widened ProcurementClient
-// interface; the PO tests use their own fake with recording.
+// The #35 purchase-order method and the #36 lifecycle methods satisfy the
+// widened ProcurementClient interface; the PO tests use their own fake with
+// recording.
 func (f *fakeRequisitionClient) CreatePurchaseOrder(ctx context.Context, in *procurementv1.CreatePurchaseOrderRequest, opts ...grpc.CallOption) (*procurementv1.CreatePurchaseOrderResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
+}
+
+func (f *fakeRequisitionClient) IssuePurchaseOrder(ctx context.Context, in *procurementv1.IssuePurchaseOrderRequest, opts ...grpc.CallOption) (*procurementv1.PurchaseOrder, error) {
+	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
+}
+
+func (f *fakeRequisitionClient) AcknowledgePurchaseOrder(ctx context.Context, in *procurementv1.AcknowledgePurchaseOrderRequest, opts ...grpc.CallOption) (*procurementv1.PurchaseOrder, error) {
+	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
+}
+
+func (f *fakeRequisitionClient) CancelPurchaseOrder(ctx context.Context, in *procurementv1.CancelPurchaseOrderRequest, opts ...grpc.CallOption) (*procurementv1.PurchaseOrder, error) {
+	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
+}
+
+func (f *fakeRequisitionClient) ClosePurchaseOrder(ctx context.Context, in *procurementv1.ClosePurchaseOrderRequest, opts ...grpc.CallOption) (*procurementv1.PurchaseOrder, error) {
 	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
 }
 
