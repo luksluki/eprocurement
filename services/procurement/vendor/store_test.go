@@ -205,3 +205,46 @@ func TestNotFound(t *testing.T) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 }
+
+// ForUseTx (#35) is the tx-scoped active-vendor gate: it runs on the caller's
+// transaction (inside tenant.WithTenant) with the same answers as the
+// pool-based GetForUse — active passes; deactivated, missing, and another
+// tenant's vendors fail. PO conversion calls it inside its transaction so a
+// deactivate cannot slip between the check and the insert.
+func TestForUseTx(t *testing.T) {
+	s := testStore(t)
+	t.Cleanup(func() { cleanupVendor(t, s.db, tenantA, "TXU-01") })
+	t.Cleanup(func() { cleanupVendor(t, s.db, tenantA, "TXU-02") })
+
+	active := createFor(t, s, tenantA, "TXU-01")
+	dead := createFor(t, s, tenantA, "TXU-02")
+	if _, err := s.Deactivate(t.Context(), tenantA, dead.ID, userA); err != nil {
+		t.Fatalf("deactivate: %v", err)
+	}
+
+	ctx := context.Background()
+	// Inside tenant A's transaction the gate answers on that transaction.
+	if err := tenant.WithTenant(ctx, s.db, tenantA, func(tx pgx.Tx) error {
+		v, err := ForUseTx(ctx, tx, active.ID)
+		if err != nil || v.Status != "active" {
+			t.Errorf("active vendor: (%+v, %v), want pass", v, err)
+		}
+		if _, err := ForUseTx(ctx, tx, dead.ID); !errors.Is(err, ErrDeactivated) {
+			t.Errorf("deactivated vendor: err = %v, want ErrDeactivated", err)
+		}
+		if _, err := ForUseTx(ctx, tx, "bbbbbbbb-0000-0000-0000-0000000000ff"); !errors.Is(err, ErrNotFound) {
+			t.Errorf("missing vendor: err = %v, want ErrNotFound", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("with tenant: %v", err)
+	}
+
+	// The same vendor is invisible from tenant B's transaction (RLS).
+	if err := tenant.WithTenant(ctx, s.db, tenantB, func(tx pgx.Tx) error {
+		_, err := ForUseTx(ctx, tx, active.ID)
+		return err
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-tenant ForUseTx: err = %v, want ErrNotFound", err)
+	}
+}
