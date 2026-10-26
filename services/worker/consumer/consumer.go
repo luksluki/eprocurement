@@ -3,7 +3,10 @@
 // into the Mongo event store (#42) and notifications writes the
 // notifications projection (#47) — both idempotently, deduped by the unique
 // event_id index, so at-least-once delivery has exactly one durable effect
-// per event.
+// per event. The broker topology (exchanges, queues, bindings, retry ladder)
+// is the shared services/worker/topology package (#46); the wire envelope is
+// the shared services/worker/publisher Envelope (#45) — this package is only
+// the consume/settle loop.
 //
 // Delivery outcomes (each logged with event_id/tenant_id/type/queue/
 // trace_id):
@@ -28,6 +31,8 @@ package consumer
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -38,6 +43,8 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 
 	"github.com/luksluki/eprocurement/services/documents/history"
+	"github.com/luksluki/eprocurement/services/worker/publisher"
+	"github.com/luksluki/eprocurement/services/worker/topology"
 )
 
 // dialTimeout bounds one AMQP dial attempt.
@@ -49,6 +56,50 @@ const (
 	maxBackoff     = 10 * time.Second
 )
 
+// ErrEnvelopeInvalid is the typed error for deliveries that can never
+// succeed: a body that does not decode, or an envelope that fails
+// validation. The runner dead-letters those straight to the DLQ without
+// retry (they would fail forever — PRD §14.5 "after max attempts → DLQ"
+// shortened to zero attempts for permanent failures).
+var ErrEnvelopeInvalid = errors.New("consumer_envelope_invalid")
+
+// Decode parses one delivery body into the shared publisher.Envelope (the
+// §14.5 wire format both halves of the worker speak). Any decode failure is
+// ErrEnvelopeInvalid — the message is permanently broken, not transient.
+func Decode(body []byte) (publisher.Envelope, error) {
+	var env publisher.Envelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		return publisher.Envelope{}, fmt.Errorf("%w: decode body: %v", ErrEnvelopeInvalid, err)
+	}
+	return env, nil
+}
+
+// Event validates the envelope and maps it onto the history projection's
+// Event (the shape both stores' Apply take). history.NewEvent normalizes
+// (trims, defaults the version) and validates in one step, so the same
+// checks the stores re-apply defensively decide the delivery's fate here.
+// It was a method of the pre-merge inline Envelope type; with the shared
+// publisher.Envelope it is a plain helper (methods cannot attach across
+// packages).
+func Event(env publisher.Envelope) (history.Event, error) {
+	ev, err := history.NewEvent(env.EventID, env.TenantID, env.Type, env.OccurredAt,
+		env.ActorID, env.TraceID, env.EntityType, env.EntityID, string(env.Payload))
+	if err != nil {
+		return history.Event{}, fmt.Errorf("%w: %v", ErrEnvelopeInvalid, err)
+	}
+	return ev, nil
+}
+
+// isPermanent reports whether a handler error can never succeed on retry —
+// the history validation sentinels (both stores validate through them).
+// Everything else (Mongo down, network blip) is transient and takes the
+// retry ladder.
+func isPermanent(err error) bool {
+	return errors.Is(err, history.ErrEventIDInvalid) ||
+		errors.Is(err, history.ErrEventIncomplete) ||
+		errors.Is(err, history.ErrPayloadInvalid)
+}
+
 // Handler projects one event. Both history.Store and notifications.Store
 // satisfy it (Apply is the idempotency boundary, PRD §14.5).
 type Handler interface {
@@ -59,7 +110,7 @@ type Handler interface {
 // New fills the defaults for the rest and validates the whole set.
 type Config struct {
 	URL      string
-	Topology Topology           // zero value → Default
+	Topology topology.Topology  // zero value → topology.Default
 	Handlers map[string]Handler // queue name → projection
 	Logger   *slog.Logger
 
@@ -73,7 +124,7 @@ type Config struct {
 // Runner consumes the configured queues until ctx is cancelled.
 type Runner struct {
 	url             string
-	topo            Topology
+	topo            topology.Topology
 	handlers        map[string]Handler
 	log             *slog.Logger
 	prefetch        int
@@ -82,7 +133,9 @@ type Runner struct {
 
 // New validates the configuration and returns the runner. Every handler
 // key must name a queue of the topology — a handler without its queue (or
-// vice versa) is a wiring bug that would silently consume nothing.
+// vice versa) is a wiring bug that would silently consume nothing. Queues
+// without a handler (e.g. exports until its own issue) are declared but not
+// consumed.
 func New(cfg Config) (*Runner, error) {
 	if cfg.URL == "" {
 		return nil, fmt.Errorf("consumer: url is required")
@@ -92,7 +145,7 @@ func New(cfg Config) (*Runner, error) {
 	}
 	topo := cfg.Topology
 	if topo.EventsExchange == "" && topo.DLXExchange == "" && topo.DLQQueue == "" && len(topo.Queues) == 0 {
-		topo = Default
+		topo = topology.Default
 	}
 	if len(topo.Queues) == 0 {
 		return nil, fmt.Errorf("consumer: topology declares no queues")
@@ -245,7 +298,7 @@ func (r *Runner) handle(ctx context.Context, ch *amqp.Channel, td taggedDelivery
 	log = log.With("event_id", env.EventID, "tenant_id", env.TenantID,
 		"type", env.Type, "trace_id", env.TraceID)
 
-	ev, err := env.Event()
+	ev, err := Event(env)
 	if err != nil {
 		_ = d.Nack(false, false) // permanent (e.g. missing entity_type)
 		log.Warn("delivery dead-lettered", "status", "dlq", "reason", "invalid_envelope", "error", err)
@@ -272,8 +325,8 @@ func (r *Runner) handle(ctx context.Context, ch *amqp.Channel, td taggedDelivery
 
 	// Transient failure: climb the TTL retry ladder; when it is exhausted,
 	// nack without requeue so the broker dead-letters to the DLQ.
-	retryCount := RetryCount(d.Headers)
-	target, ok := NextRetry(queue, retryCount)
+	retryCount := topology.RetryCount(d.Headers)
+	target, ok := topology.NextRetry(queue, retryCount)
 	if !ok {
 		_ = d.Nack(false, false)
 		log.Warn("delivery dead-lettered", "status", "dlq",
@@ -300,7 +353,7 @@ func publishRetry(ctx context.Context, ch *amqp.Channel, target string, d amqp.D
 	for k, v := range d.Headers {
 		headers[k] = v
 	}
-	headers[RetryCountHeader] = count
+	headers[topology.RetryCountHeader] = count
 	pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	return ch.PublishWithContext(pctx, "", target, false, false, amqp.Publishing{

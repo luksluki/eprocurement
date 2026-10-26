@@ -123,24 +123,38 @@
   same finding as dev-note 045); the per-delivery structured log with
   `status=dlq` is the interim visibility, and `procurement.dlq` is
   admin-visible through RabbitMQ's management surface.
-- **Post-merge composition (flagged for the maintainer)**:
-  1. `services/worker/cmd/worker/main.go` and `services/worker/config` are
-     now rewritten by two PRs (#94 publisher runner, #47 consumer runner).
-     Whichever merges last composes them: one `worker` binary running the
-     publisher `Loop` **and** these consumers under one signal context —
-     the two halves share the RabbitMQ URL/backoff conventions and nothing
-     else (the publisher needs `DATABASE_URL`, the consumers
-     `MONGO_URI`/`MONGO_DB`).
-  2. The `worker` service that arrives via #94's compose change was
-     verified (on `origin/feature/45-transactional-outbox-publisher`,
-     compose.yaml ~191–211) to set only `APP_ENV`/`LOG_LEVEL`/
-     `DATABASE_URL`/`RABBITMQ_URL` with `depends_on` postgres + rabbitmq —
-     no `MONGO_URI`, no `depends_on: mongo`. The last-merging PR must add
-     `MONGO_URI: mongodb://…@mongo:27017/…?authSource=admin` and
-     `depends_on: mongo (service_healthy)`, or the composed consumers will
-     target `localhost`.
-  3. `internal/platform/config` removal: identical in spirit to #45's
-     commit 48d65a6; if both PRs merge, the second one is a no-op there.
+- **Post-merge composition — DONE in this branch's merge of develop**
+  (PRs #94/#95 both landed; resolved 2026-10-23):
+  1. ~~one binary, two runners~~ — `cmd/worker` now boots the publisher
+     half (pgxpool + `connectWithRetry` → `publisher.Loop`) and the
+     consumer half (`connectMongo` + `EnsureIndexes` → `consumer.Runner`)
+     and runs both under one signal context via `runBoth`: SIGINT/SIGTERM
+     cancels a derived context, both `Run` methods settle their in-flight
+     work and return nil; a non-nil error from either half is logged,
+     cancels the sibling, and fails the process (`publisher: …` /
+     `consumers: …` wrapping). Shutdown during boot returns nil, not 1.
+     `services/worker/config` is the union Config (DATABASE_URL + poll
+     knobs + MONGO_URI/MONGO_DB; RABBITMQ_URL shared).
+  2. ~~compose `MONGO_URI` follow-up~~ — already satisfied: develop's
+     `worker` service (via #97's compose) ships `MONGO_URI`/`MONGO_DB` and
+     `depends_on: mongo (service_healthy)`; nothing to add.
+  3. ~~`internal/platform/config` removal~~ — no-op as predicted (both
+     sides had deleted it).
+  In the same merge the inline copies were dropped as planned:
+  `consumer/topology.go` + `consumer/retry.go` deleted in favor of
+  `services/worker/topology` (`topology.Default.Declare`,
+  `topology.NextRetry`/`RetryCount`/`RetryQueueName`/`RetryCountHeader`,
+  `topology.DocumentsHistoryQueue`/`NotificationsQueue`) — the shared
+  `Default` additionally declares the `exports` queue, which the runner
+  declares but does not consume until its own issue; and
+  `consumer/envelope.go` deleted in favor of `publisher.Envelope` — the
+  package keeps only `Decode`, the free `Event(env)` helper (the old
+  method could not attach across packages), `ErrEnvelopeInvalid`, and
+  `isPermanent`, now living in `consumer.go`. The consumer unit tests that
+  duplicated the topology package's own tables (NextRetry/RetryCount/
+  TTLs/queue-args/Default/Suffixed/Declare-guard) were deleted; the
+  envelope-decode, envelope-validation, wiring, and shutdown tests remain,
+  now typed against `publisher.Envelope`.
 - **Test-side finding worth keeping**: readiness polling must wait for the
   whole declared queue set, not just the exchange or the main queues — the
   runner declares an exchange, then each queue, then that queue's bindings,
@@ -204,13 +218,16 @@ compose on :5672, MongoDB on :27017):
 
 ## Follow-ups
 
-- **After #95 (#46) merges**: delete `retry.go`/`topology.go`, switch the
-  consumer to `topology.Default.Declare` + the topology retry helpers, and
-  re-run the integration suite against the shared production topology.
-- **After #94 (#45) merges**: fold `envelope.go` into
-  `publisher.Envelope`; compose the publisher Loop and these consumers in
-  one `cmd/worker` under one signal context; add `MONGO_URI` +
-  `depends_on: mongo` to the compose `worker` service (see Decisions).
+- ~~**After #95 (#46) merges**~~: done in this branch's develop merge —
+  `retry.go`/`topology.go` deleted, consumer switched to
+  `topology.Default.Declare` + the topology retry helpers, integration
+  suite re-run green against the shared production topology (which now
+  also declares `exports`).
+- ~~**After #94 (#45) merges**~~: done in the same merge — envelope folded
+  into `publisher.Envelope`; publisher Loop and consumers composed in one
+  `cmd/worker` under one signal context; compose `MONGO_URI` +
+  `depends_on: mongo` verified already present on develop (no change
+  needed).
 - **#54**: DLQ metric (PRD §14.5 "DLQ + metric"), OTel spans for the
   consume path, and trace-context propagation into AMQP headers — deferred
   with the observability stack, same as #45.

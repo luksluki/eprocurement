@@ -25,6 +25,8 @@ import (
 
 	"github.com/luksluki/eprocurement/services/documents/history"
 	"github.com/luksluki/eprocurement/services/documents/notifications"
+	"github.com/luksluki/eprocurement/services/worker/publisher"
+	"github.com/luksluki/eprocurement/services/worker/topology"
 )
 
 const (
@@ -35,7 +37,7 @@ const (
 type itEnv struct {
 	amqpURL  string
 	mongoDB  *mongo.Database
-	topo     Topology
+	topo     topology.Topology
 	testConn *amqp.Connection
 	hist     string // suffixed main queue names
 	notif    string
@@ -73,7 +75,7 @@ func newItEnv(t *testing.T) *itEnv {
 		t.Fatalf("ensure notifications indexes: %v", err)
 	}
 
-	topo := Default.Suffixed(fmt.Sprintf("-it-%d", time.Now().UnixNano()))
+	topo := topology.Default.Suffixed(fmt.Sprintf("-it-%d", time.Now().UnixNano()))
 	topo.RetryTTLs = []time.Duration{150 * time.Millisecond, 150 * time.Millisecond, 150 * time.Millisecond}
 	testConn, err := amqp.Dial(amqpURL)
 	if err != nil {
@@ -175,7 +177,7 @@ func (e *itEnv) publish(t *testing.T, routingKey string, body []byte, headers am
 	}
 }
 
-func (e *itEnv) publishEnvelope(t *testing.T, env Envelope) {
+func (e *itEnv) publishEnvelope(t *testing.T, env publisher.Envelope) {
 	t.Helper()
 	body, err := json.Marshal(env)
 	if err != nil {
@@ -220,8 +222,8 @@ func waitUntil(t *testing.T, desc string, cond func() bool) {
 	t.Fatalf("condition not met before deadline: %s", desc)
 }
 
-func itEnvelope(id, eventType string) Envelope {
-	return Envelope{
+func itEnvelope(id, eventType string) publisher.Envelope {
+	return publisher.Envelope{
 		EventID: id, TenantID: "t-47-it", Type: eventType, Version: 1,
 		EntityType: "requisition", EntityID: "req-" + id,
 		OccurredAt: time.Date(2026, 10, 25, 9, 0, 0, 0, time.UTC),
@@ -393,8 +395,8 @@ func TestRetryExhaustionDeadLetters(t *testing.T) {
 	waitUntil(t, "message reached the DLQ", func() bool {
 		return env.queueDepth(t, env.topo.DLQQueue) == 1
 	})
-	if got := always.attemptsSoFar(); got != MaxRetries+1 {
-		t.Fatalf("attempts = %d, want %d (1 initial + 3 retries)", got, MaxRetries+1)
+	if got := always.attemptsSoFar(); got != topology.MaxRetries+1 {
+		t.Fatalf("attempts = %d, want %d (1 initial + 3 retries)", got, topology.MaxRetries+1)
 	}
 	for _, q := range env.topo.QueueNames() {
 		if q == env.topo.DLQQueue {
@@ -418,7 +420,7 @@ func TestRetryExhaustionDeadLetters(t *testing.T) {
 		t.Fatalf("get from dlq: %v", err)
 	}
 	_ = ch.Close()
-	var got Envelope
+	var got publisher.Envelope
 	if err := json.Unmarshal(msg.Body, &got); err != nil || got.EventID != sent.EventID {
 		t.Fatalf("dlq body = %s (event_id %q), want the original %s", msg.Body, got.EventID, sent.EventID)
 	}
