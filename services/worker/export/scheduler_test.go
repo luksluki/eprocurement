@@ -1,10 +1,12 @@
 package export
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -80,9 +82,12 @@ type fakeRuns struct {
 
 func newFakeRuns() *fakeRuns { return &fakeRuns{hasSucc: map[string]bool{}} }
 
-func (f *fakeRuns) UpsertRun(_ context.Context, run export.Run) error {
+func (f *fakeRuns) UpsertRun(ctx context.Context, run export.Run) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err // a cancelled context must fail the write; the real store honors ctx
+	}
 	if f.upsertErr != nil {
 		return f.upsertErr
 	}
@@ -331,6 +336,46 @@ func TestRunTenantBudgetExceeded(t *testing.T) {
 	}
 }
 
+// cancelOnExportExporter cancels the parent context the moment its export
+// starts, then reports the cancellation — a deterministic SIGTERM
+// mid-export (no sleeps).
+type cancelOnExportExporter struct {
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (c *cancelOnExportExporter) Export(ctx context.Context, _ string, _ time.Time) (int, string, error) {
+	c.once.Do(c.cancel)
+	<-ctx.Done()
+	return 0, "", ctx.Err()
+}
+
+// TestRunTenantShutdownStillRecords: SIGTERM cancels the scheduler context
+// mid-export; the failed run record must still be written — the record
+// context is detached from the cancelled parent (WithoutCancel), the same
+// guarantee the budget-exceeded path already has.
+func TestRunTenantShutdownStillRecords(t *testing.T) {
+	kv := newFakeKV()
+	runs := newFakeRuns()
+	runs.latest = &export.Run{TenantID: "t-1", Status: export.StatusSuccess}
+	runs.hasSucc["t-1"] = true
+	ctx, cancel := context.WithCancel(t.Context())
+	exp := &cancelOnExportExporter{cancel: cancel}
+	s := newTestScheduler(t, kv, runs, &fakeTenants{tenants: []string{"t-1"}}, exp)
+	fire := time.Date(2026, 10, 28, 1, 0, 0, 0, time.UTC)
+
+	s.runTenant(ctx, "t-1", fire)
+	cancel()
+
+	if len(runs.upserts) != 1 {
+		t.Fatalf("shutdown mid-export must still write the run record: upserts=%d", len(runs.upserts))
+	}
+	run := runs.upserts[0]
+	if run.Status != export.StatusFailed || run.ErrorMessage != "context canceled" {
+		t.Fatalf("shutdown run record = %+v, want failed with the cancellation error", run)
+	}
+}
+
 // --- missed-run detection ----------------------------------------------------
 
 // TestDetectColdStartAndHeartbeat covers the detection table: cold start
@@ -358,6 +403,15 @@ func TestDetectColdStartAndHeartbeat(t *testing.T) {
 		t.Fatalf("healthy tenant missed=%v reason=%q", missed, reason)
 	}
 
+	// Fresh heartbeat with an empty previous slot: the slot's run may still
+	// be in flight on another instance (a boot mid-fire sees today's slot
+	// without a record yet) — the fresh heartbeat wins, no miss.
+	runs.hasSucc["t-1"] = false
+	if missed, reason := tracker.Detect(ctx, "t-1", now); missed || reason != "" {
+		t.Fatalf("fresh heartbeat + empty slot missed=%v reason=%q, want healthy", missed, reason)
+	}
+	runs.hasSucc["t-1"] = true
+
 	// Heartbeat exactly at the grace boundary is still healthy…
 	kv.Set(ctx, HeartbeatKey("t-1"), FormatHeartbeat(now.Add(-MissedGrace)))
 	if missed, _ := tracker.Detect(ctx, "t-1", now); missed {
@@ -384,7 +438,9 @@ func TestDetectColdStartAndHeartbeat(t *testing.T) {
 
 // TestDetectPreviousSlotRange pins the slot arithmetic the detection asks
 // about: at a fire instant the previous slot is fire−24h; between fires it
-// is the most recent slot before now.
+// is the most recent slot before now. No heartbeat is seeded — the slot
+// check is the fallback that runs when the heartbeat is absent (a fresh
+// heartbeat short-circuits to healthy).
 func TestDetectPreviousSlotRange(t *testing.T) {
 	kv := newFakeKV()
 	runs := newFakeRuns()
@@ -398,7 +454,6 @@ func TestDetectPreviousSlotRange(t *testing.T) {
 
 	base.latest = &export.Run{TenantID: "t-1", Status: export.StatusSuccess}
 	rangeRecorder.hasSucc["t-1"] = true
-	kv.Set(t.Context(), HeartbeatKey("t-1"), FormatHeartbeat(time.Now()))
 
 	fire := time.Date(2026, 10, 28, 1, 0, 0, 0, time.UTC)
 	_, _ = tracker.Detect(t.Context(), "t-1", fire)
@@ -447,6 +502,34 @@ func TestBootDetectFlagsWithoutWaiting(t *testing.T) {
 	}
 	if len(runs.upserts) != 0 {
 		t.Fatalf("boot pass must not write run records: %v", runs.upserts)
+	}
+}
+
+// TestBootDetectDuringInflightFire: a worker booting while another
+// instance's export for today's slot is still running (yesterday's success
+// heartbeat ~24 h old — fresh; today's record not yet written because the
+// run is inside its budget) must NOT flag a miss: the empty slot is the
+// in-flight run, not a missed one — no missed_previous mark, no warning.
+func TestBootDetectDuringInflightFire(t *testing.T) {
+	kv := newFakeKV()
+	runs := newFakeRuns()
+	boot := time.Date(2026, 10, 28, 1, 5, 0, 0, time.UTC) // 5 min into the 10 min budget
+	runs.latest = &export.Run{TenantID: "t-1", Status: export.StatusSuccess}
+	runs.hasSucc["t-1"] = false // today's slot has no success record yet (in flight)
+	kv.Set(t.Context(), HeartbeatKey("t-1"), FormatHeartbeat(boot.Add(-24*time.Hour)))
+
+	var logs bytes.Buffer
+	s := newTestScheduler(t, kv, runs, &fakeTenants{tenants: []string{"t-1"}}, &fakeExporter{})
+	s.tracker = NewTracker(kv, runs, s.schedule, slog.New(slog.NewTextHandler(&logs, nil)))
+	s.now = func() time.Time { return boot }
+
+	s.bootDetect(t.Context())
+
+	if len(runs.marked) != 0 {
+		t.Fatalf("in-flight slot must not be flagged missed: marked=%v", runs.marked)
+	}
+	if strings.Contains(logs.String(), "export missed run detected") {
+		t.Fatalf("no missed-run warning expected during an in-flight fire: %s", logs.String())
 	}
 }
 

@@ -205,7 +205,11 @@ func (s *Scheduler) runOwned(ctx context.Context, tenantID string, fireTime time
 		FinishedAt:     finished,
 	}
 
-	recordCtx, recordCancel := context.WithTimeout(ctx, recordWriteBudget)
+	// WithoutCancel: SIGTERM cancels ctx mid-run (the export aborts with
+	// ctx.Err) yet the failed record must still be written — symmetric with
+	// the budget-exceeded case, where the budget, not the parent, expired
+	// the run and the record lands anyway.
+	recordCtx, recordCancel := context.WithTimeout(context.WithoutCancel(ctx), recordWriteBudget)
 	defer recordCancel()
 
 	if exportErr != nil {

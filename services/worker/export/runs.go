@@ -44,11 +44,15 @@ func NewTracker(kv KV, runs RunStore, schedule *Daily, log *slog.Logger) *Tracke
 
 // Detect answers whether a slot was missed for the tenant as of now. The
 // first-ever run is the cold-start exception (no run records → not
-// missed). A miss is declared when the heartbeat is older than
-// MissedGrace (26 h) OR the previous slot holds no successful run — the
-// half-open slot range tolerates late-waking fires. Detection failures
-// (Redis/Mongo down) degrade to "not missed": the export itself still
-// runs, and its own outcome is recorded either way.
+// missed). The heartbeat is the primary signal: present and fresher than
+// MissedGrace (26 h) → healthy; older → missed. Only when the heartbeat
+// is absent or unreadable does the previous slot's history decide (the
+// flushed-Redis fallback) — the half-open slot range tolerates
+// late-waking fires. A fresh heartbeat outranks an empty slot because a
+// worker booting while another instance's export is still in flight
+// would otherwise see today's slot without a record yet. Detection
+// failures (Redis/Mongo down) degrade to "not missed": the export itself
+// still runs, and its own outcome is recorded either way.
 func (t *Tracker) Detect(ctx context.Context, tenantID string, now time.Time) (missed bool, reason string) {
 	latest, err := t.runs.Latest(ctx, tenantID)
 	if err != nil {
@@ -68,6 +72,13 @@ func (t *Tracker) Detect(ctx context.Context, tenantID string, now time.Time) (m
 				"tenant_id", tenantID)
 		} else if age := heartbeatAge(now, last); age > MissedGrace {
 			return true, reasonHeartbeatStale
+		} else {
+			// Fresh heartbeat: a success finished inside the grace window,
+			// so the slot check below could only flag a run that is still
+			// in flight on another instance (boot during its fire) — not a
+			// miss. A genuinely empty slot still surfaces at the next
+			// fire's detection.
+			return false, ""
 		}
 	}
 	prev := t.schedule.Previous(now)

@@ -2,6 +2,7 @@ package export
 
 import (
 	"bytes"
+	"encoding/csv"
 	"strings"
 	"testing"
 	"time"
@@ -48,6 +49,48 @@ func TestWriteCSV(t *testing.T) {
 	}
 	if empty.String() != wantHeader {
 		t.Fatalf("empty register = %q, want header only", empty.String())
+	}
+}
+
+// TestWriteCSVNeutralizesFormulaPrefixes: vendor-controlled fields
+// (vendor_code, vendor_name) that begin with a formula character are
+// written with a leading apostrophe so spreadsheet applications read them
+// as text (CSV-formula-injection mitigation); plain values pass through
+// untouched.
+func TestWriteCSVNeutralizesFormulaPrefixes(t *testing.T) {
+	issued := time.Date(2026, 10, 26, 4, 30, 0, 0, time.UTC)
+	cases := []struct{ in, want string }{
+		{"=SUM(A1:E1)", "'=SUM(A1:E1)"},
+		{"+HYPERLINK(\"http://evil.example\",\"x\")", "'+HYPERLINK(\"http://evil.example\",\"x\")"},
+		{"-2+3+cmd|' /C calc'!A0", "'-2+3+cmd|' /C calc'!A0"},
+		{"@SUM(A1:A9)", "'@SUM(A1:A9)"},
+		{"PT Contoh", "PT Contoh"},
+	}
+	for _, tc := range cases {
+		var buf bytes.Buffer
+		row := PurchaseOrderRow{
+			PONumber:   "PO-000001",
+			VendorCode: tc.in,
+			VendorName: tc.in,
+			Currency:   "IDR",
+			TotalCents: 1,
+			Status:     "issued",
+			IssuedAt:   issued,
+		}
+		if err := WriteCSV(&buf, []PurchaseOrderRow{row}); err != nil {
+			t.Fatalf("WriteCSV(%q): %v", tc.in, err)
+		}
+		records, err := csv.NewReader(&buf).ReadAll()
+		if err != nil {
+			t.Fatalf("read back %q: %v", tc.in, err)
+		}
+		if len(records) != 2 {
+			t.Fatalf("records for %q = %d, want header + 1 row", tc.in, len(records))
+		}
+		if records[1][1] != tc.want || records[1][2] != tc.want {
+			t.Fatalf("vendor fields for %q = [%s, %s], want [%s, %s]",
+				tc.in, records[1][1], records[1][2], tc.want, tc.want)
+		}
 	}
 }
 

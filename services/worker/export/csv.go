@@ -37,8 +37,10 @@ type PurchaseOrderRow struct {
 
 // WriteCSV writes the header plus one line per row, RFC 4180 (encoding/csv
 // with UseCRLF: CRLF terminators, minimal quoting of separators/quotes/
-// newlines) in UTF-8. issued_at is RFC 3339 UTC. An empty register yields a
-// header-only file — a valid export of "no POs today", not an error.
+// newlines) in UTF-8. issued_at is RFC 3339 UTC. Vendor-controlled fields
+// are neutralized against CSV formula injection (neutralizeFormula). An
+// empty register yields a header-only file — a valid export of "no POs
+// today", not an error.
 func WriteCSV(w io.Writer, rows []PurchaseOrderRow) error {
 	cw := csv.NewWriter(w)
 	cw.UseCRLF = true // RFC 4180 record separators
@@ -48,8 +50,8 @@ func WriteCSV(w io.Writer, rows []PurchaseOrderRow) error {
 	for _, r := range rows {
 		if err := cw.Write([]string{
 			r.PONumber,
-			r.VendorCode,
-			r.VendorName,
+			neutralizeFormula(r.VendorCode),
+			neutralizeFormula(r.VendorName),
 			r.Currency,
 			strconv.FormatInt(r.TotalCents, 10),
 			r.Status,
@@ -60,4 +62,20 @@ func WriteCSV(w io.Writer, rows []PurchaseOrderRow) error {
 	}
 	cw.Flush()
 	return cw.Error()
+}
+
+// neutralizeFormula defuses CSV formula injection in vendor-controlled
+// fields: a value beginning with a formula character (=, +, -, @) is
+// prefixed with an apostrophe so spreadsheet applications read the cell as
+// text (the standard mitigation). RFC 4180 is unaffected — the apostrophe
+// is ordinary field content and encoding/csv still quotes as needed.
+func neutralizeFormula(value string) string {
+	if value == "" {
+		return value
+	}
+	switch value[0] {
+	case '=', '+', '-', '@':
+		return "'" + value
+	}
+	return value
 }
