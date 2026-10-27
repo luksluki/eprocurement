@@ -13,6 +13,7 @@ import {
   useReactTable,
   type ColumnDef,
 } from "@tanstack/react-table";
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { RequisitionListPage } from "@/lib/gateway";
@@ -71,7 +72,21 @@ const statusStyles: Record<string, string> = {
 type Row = RequisitionListPage["requisitions"][number];
 
 const columns: ColumnDef<Row>[] = [
-  { accessorKey: "number", header: "Number" },
+  {
+    accessorKey: "number",
+    header: "Number",
+    // Issue #34: the number opens the requisition detail (header, items,
+    // approval steps, attachments, timeline, actions).
+    cell: ({ row }) => (
+      <Link
+        href={`/app/requisitions/${row.original.id}`}
+        className="font-medium text-slate-900 underline-offset-2 hover:underline"
+        data-testid="requisition-link"
+      >
+        {row.original.number}
+      </Link>
+    ),
+  },
   {
     accessorKey: "status",
     header: "Status",
