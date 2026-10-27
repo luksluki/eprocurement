@@ -15,21 +15,23 @@ import (
 	procurementv1 "github.com/luksluki/eprocurement/gen/go/procurement/v1"
 	"github.com/luksluki/eprocurement/internal/platform/rbac"
 	"github.com/luksluki/eprocurement/services/procurement/approval"
+	"github.com/luksluki/eprocurement/services/procurement/goodsreceipt"
 	"github.com/luksluki/eprocurement/services/procurement/purchaseorder"
 	"github.com/luksluki/eprocurement/services/procurement/requisition"
 	"github.com/luksluki/eprocurement/services/procurement/vendor"
 )
 
-// api adapts the vendor, requisition, approval, and purchase-order domains
-// to the procurement.v1 gRPC contract. Every method reads the caller
-// identity the gateway propagated (tenant scoping, audit ids); the RBAC
-// interceptor has already re-checked the permission.
+// api adapts the vendor, requisition, approval, purchase-order, and
+// goods-receipt domains to the procurement.v1 gRPC contract. Every method
+// reads the caller identity the gateway propagated (tenant scoping, audit
+// ids); the RBAC interceptor has already re-checked the permission.
 type api struct {
 	procurementv1.UnimplementedProcurementServer
 	store          *vendor.Store
 	requisitions   *requisition.Store
 	approvals      *approval.Store
 	purchaseOrders *purchaseorder.Store
+	goodsReceipts  *goodsreceipt.Store
 	log            *slog.Logger
 }
 
@@ -524,7 +526,7 @@ func purchaseOrderPB(po purchaseorder.PurchaseOrder) *procurementv1.PurchaseOrde
 	items := make([]*procurementv1.PurchaseOrderItem, 0, len(po.Items))
 	for _, it := range po.Items {
 		items = append(items, &procurementv1.PurchaseOrderItem{
-			Description: it.Description, QtyOrdered: it.Qty,
+			Id: it.ID, Description: it.Description, QtyOrdered: it.Qty,
 			QtyReceived: it.QtyReceived, UnitPriceCents: it.UnitPriceCents,
 		})
 	}
@@ -621,6 +623,85 @@ func (a *api) ClosePurchaseOrder(ctx context.Context, req *procurementv1.ClosePu
 		return nil, mapPurchaseOrderError(err)
 	}
 	return purchaseOrderPB(po), nil
+}
+
+// mapGoodsReceiptError maps goods-receipt domain and store errors to gRPC
+// codes. Same contract as the other mappers — sentinels carry their machine
+// code verbatim in the gRPC message — except the over-receipt answer: the
+// typed *purchaseorder.OverReceiptError carries the pinned detail line
+// ("grn_over_receipt: po_item=… received=… requested=… ordered=") as the
+// message, which the gateway's dedicated renderer splits on the first
+// colon. Illegal status → Aborted (409), not-found → 404 (also the
+// cross-tenant answer, via RLS), shape codes → InvalidArgument.
+func mapGoodsReceiptError(err error) error {
+	var over *purchaseorder.OverReceiptError
+	switch {
+	case errors.As(err, &over):
+		return status.Error(codes.Aborted, over.Error())
+	case errors.Is(err, purchaseorder.ErrOverReceipt):
+		return status.Error(codes.Aborted, err.Error())
+	case errors.Is(err, goodsreceipt.ErrItemsEmpty),
+		errors.Is(err, goodsreceipt.ErrQtyInvalid),
+		errors.Is(err, goodsreceipt.ErrPOItemDuplicate),
+		errors.Is(err, goodsreceipt.ErrNotesInvalid),
+		errors.Is(err, purchaseorder.ErrReceiptItemUnknown),
+		errors.Is(err, purchaseorder.ErrReceiptItemDuplicate),
+		errors.Is(err, purchaseorder.ErrIDInvalid):
+		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, purchaseorder.ErrIllegalTransition):
+		return status.Error(codes.Aborted, err.Error())
+	case errors.Is(err, purchaseorder.ErrNotFound):
+		return status.Error(codes.NotFound, err.Error())
+	default:
+		return status.Error(codes.Internal, "internal error")
+	}
+}
+
+// goodsReceiptPB renders the GRN aggregate for the wire.
+func goodsReceiptPB(grn goodsreceipt.GoodsReceipt) *procurementv1.GoodsReceipt {
+	items := make([]*procurementv1.GoodsReceiptItem, 0, len(grn.Items))
+	for _, it := range grn.Items {
+		items = append(items, &procurementv1.GoodsReceiptItem{
+			PoItemId: it.POItemID, QtyReceived: it.QtyReceived,
+		})
+	}
+	return &procurementv1.GoodsReceipt{
+		Id: grn.ID, TenantId: grn.TenantID, PoId: grn.POID,
+		Number: grn.Number, ReceivedBy: grn.ReceivedBy,
+		ReceivedAt: goodsreceipt.RFC3339(grn.ReceivedAt), Notes: grn.Notes,
+		Items: items, CreatedAt: goodsreceipt.RFC3339(grn.CreatedAt),
+	}
+}
+
+// PostGoodsReceipt records one goods receipt against an acknowledged or
+// partially_received PO of the caller's tenant (grn:post — buyer/admin at
+// both layers; FR-07). The response carries the stored GRN and the PO after
+// the receipt; every guard failure rolls the whole posting transaction back.
+func (a *api) PostGoodsReceipt(ctx context.Context, req *procurementv1.PostGoodsReceiptRequest) (*procurementv1.PostGoodsReceiptResponse, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(req.GetNotes()) > goodsreceipt.MaxNotesLen {
+		return nil, mapGoodsReceiptError(goodsreceipt.ErrNotesInvalid)
+	}
+	items := make([]goodsreceipt.Item, 0, len(req.GetItems()))
+	for _, it := range req.GetItems() {
+		items = append(items, goodsreceipt.Item{
+			POItemID: strings.TrimSpace(it.GetPoItemId()), QtyReceived: it.GetQtyReceived(),
+		})
+	}
+	grn, po, err := a.goodsReceipts.Post(ctx, auth.TenantID, goodsreceipt.PostInput{
+		POID: strings.TrimSpace(req.GetPoId()), Items: items,
+		Notes: strings.TrimSpace(req.GetNotes()), Actor: auth.UserID,
+	})
+	if err != nil {
+		return nil, mapGoodsReceiptError(err)
+	}
+	return &procurementv1.PostGoodsReceiptResponse{
+		GoodsReceipt:  goodsReceiptPB(grn),
+		PurchaseOrder: purchaseOrderPB(po),
+	}, nil
 }
 
 func vendorPB(v vendor.Vendor) *procurementv1.Vendor {

@@ -25,8 +25,9 @@ type Option func(*gatewayOptions)
 
 // ProcurementClient is the full procurement surface the gateway proxies: the
 // vendor API, the requisition create/edit/submit/read API, the approval
-// decide/rules API, the PO conversion API, and the PO lifecycle actions. The
-// generated gRPC client satisfies it; tests substitute a fake.
+// decide/rules API, the PO conversion API, the PO lifecycle actions, and the
+// goods-receipt posting API. The generated gRPC client satisfies it; tests
+// substitute a fake.
 type ProcurementClient interface {
 	VendorClient
 	CreateRequisition(ctx context.Context, in *procurementv1.CreateRequisitionRequest, opts ...grpc.CallOption) (*procurementv1.Requisition, error)
@@ -42,6 +43,7 @@ type ProcurementClient interface {
 	AcknowledgePurchaseOrder(ctx context.Context, in *procurementv1.AcknowledgePurchaseOrderRequest, opts ...grpc.CallOption) (*procurementv1.PurchaseOrder, error)
 	CancelPurchaseOrder(ctx context.Context, in *procurementv1.CancelPurchaseOrderRequest, opts ...grpc.CallOption) (*procurementv1.PurchaseOrder, error)
 	ClosePurchaseOrder(ctx context.Context, in *procurementv1.ClosePurchaseOrderRequest, opts ...grpc.CallOption) (*procurementv1.PurchaseOrder, error)
+	PostGoodsReceipt(ctx context.Context, in *procurementv1.PostGoodsReceiptRequest, opts ...grpc.CallOption) (*procurementv1.PostGoodsReceiptResponse, error)
 }
 
 type gatewayOptions struct {

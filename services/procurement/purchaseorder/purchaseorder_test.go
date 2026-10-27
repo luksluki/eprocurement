@@ -308,3 +308,192 @@ func TestEventLogSemantics(t *testing.T) {
 		t.Fatalf("events after re-use = %+v", got)
 	}
 }
+
+// receiptFixture builds the two-line PO (2× Laptop, 3× Mouse) with stable
+// line ids and preset received quantities, parked at status via legal edges
+// only — #37's ApplyReceipt reads the quantities cumulatively. (atStatus
+// cannot preset quantities, so the edge walk is repeated here.)
+func receiptFixture(t *testing.T, status string, laptopReceived, mouseReceived int32) *PurchaseOrder {
+	t.Helper()
+	in := validInput()
+	in.Items = []Item{
+		{ID: "po-item-laptop", Description: "Laptop", Qty: 2, QtyReceived: laptopReceived, UnitPriceCents: 7500000},
+		{ID: "po-item-mouse", Description: "Mouse", Qty: 3, QtyReceived: mouseReceived, UnitPriceCents: 150000},
+	}
+	po, err := New(in)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	steps := map[string][]string{
+		StatusIssued:            {StatusIssued},
+		StatusAcknowledged:      {StatusIssued, StatusAcknowledged},
+		StatusPartiallyReceived: {StatusIssued, StatusAcknowledged, StatusPartiallyReceived},
+		StatusReceived:          {StatusIssued, StatusAcknowledged, StatusReceived},
+		StatusClosed:            {StatusIssued, StatusAcknowledged, StatusReceived, StatusClosed},
+		StatusCancelled:         {StatusCancelled},
+	}
+	for _, step := range steps[status] {
+		if err := poActions[step].run(po); err != nil {
+			t.Fatalf("build %s via %s: %v", status, step, err)
+		}
+	}
+	return po
+}
+
+// AC (#37): ApplyReceipt picks the target status from the post-receipt
+// quantities through the three pinned branches — first partial from
+// acknowledged → partially_received (one event), full → received (one event,
+// direct or completion), and a further partial on a partially_received PO
+// stays same-status with NO transition, NO event, and NO audit-column move
+// (the store writes no purchase_orders UPDATE on that branch).
+func TestApplyReceiptBranches(t *testing.T) {
+	cases := []struct {
+		name       string
+		from       string
+		laptopGot  int32
+		mouseGot   int32
+		lines      []ReceiptLine
+		wantStatus string
+		wantEvent  string // "" = no event appended (same-status branch)
+		wantLaptop int32
+		wantMouse  int32
+	}{
+		{
+			name: "first partial from acknowledged", from: StatusAcknowledged,
+			lines:      []ReceiptLine{{POItemID: "po-item-laptop", Qty: 1}},
+			wantStatus: StatusPartiallyReceived, wantEvent: EventPartiallyReceived,
+			wantLaptop: 1, wantMouse: 0,
+		},
+		{
+			name: "second partial stays partially_received", from: StatusPartiallyReceived,
+			laptopGot:  1,
+			lines:      []ReceiptLine{{POItemID: "po-item-mouse", Qty: 2}},
+			wantStatus: StatusPartiallyReceived, wantEvent: "",
+			wantLaptop: 1, wantMouse: 2,
+		},
+		{
+			name: "full direct from acknowledged", from: StatusAcknowledged,
+			lines: []ReceiptLine{
+				{POItemID: "po-item-laptop", Qty: 2},
+				{POItemID: "po-item-mouse", Qty: 3},
+			},
+			wantStatus: StatusReceived, wantEvent: EventReceived,
+			wantLaptop: 2, wantMouse: 3,
+		},
+		{
+			name: "completion from partially_received", from: StatusPartiallyReceived,
+			laptopGot: 2, mouseGot: 1,
+			lines:      []ReceiptLine{{POItemID: "po-item-mouse", Qty: 2}},
+			wantStatus: StatusReceived, wantEvent: EventReceived,
+			wantLaptop: 2, wantMouse: 3,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			po := receiptFixture(t, tc.from, tc.laptopGot, tc.mouseGot)
+			before := po.Events()
+			updatedAt, updatedBy := po.UpdatedAt, po.UpdatedBy
+			if err := po.ApplyReceipt(poTestNow, poTestActor, tc.lines); err != nil {
+				t.Fatalf("apply receipt: %v", err)
+			}
+			if po.Status != tc.wantStatus {
+				t.Fatalf("status = %q, want %q", po.Status, tc.wantStatus)
+			}
+			if po.Items[0].QtyReceived != tc.wantLaptop || po.Items[1].QtyReceived != tc.wantMouse {
+				t.Fatalf("qty_received = (%d, %d), want (%d, %d)",
+					po.Items[0].QtyReceived, po.Items[1].QtyReceived, tc.wantLaptop, tc.wantMouse)
+			}
+			events := po.Events()
+			if tc.wantEvent == "" {
+				// Same-status branch: no event, and the purchase_orders audit
+				// columns must not move (the store skips the UPDATE
+				// entirely — the domain mirrors that by not stamping).
+				if len(events) != len(before) {
+					t.Fatalf("events = %d, want %d (same-status branch appends none)", len(events), len(before))
+				}
+				if po.UpdatedAt != updatedAt || po.UpdatedBy != updatedBy {
+					t.Fatalf("audit moved on same-status branch: (%v, %s) -> (%v, %s)",
+						updatedAt, updatedBy, po.UpdatedAt, po.UpdatedBy)
+				}
+				return
+			}
+			if len(events) != len(before)+1 {
+				t.Fatalf("events = %d, want %d (exactly one append)", len(events), len(before)+1)
+			}
+			if last := events[len(events)-1]; last.Type != tc.wantEvent || last.Actor != poTestActor {
+				t.Fatalf("last event = %+v, want type %s actor %s", last, tc.wantEvent, poTestActor)
+			}
+		})
+	}
+}
+
+// AC (#37 failure paths): the receipt-line guards — cumulative over-receipt
+// with the pinned detail line (first violating line in request order),
+// unknown line, duplicate line — and the status edge each return their
+// sentinel without mutating the aggregate. The cumulative guard runs before
+// the edge guard: a receipt against a received PO answers over-receipt
+// (every line is full), not illegal transition.
+func TestApplyReceiptGuards(t *testing.T) {
+	t.Run("over receipt detail format", func(t *testing.T) {
+		po := receiptFixture(t, StatusAcknowledged, 1, 0)
+		err := po.ApplyReceipt(poTestNow, poTestActor, []ReceiptLine{{POItemID: "po-item-laptop", Qty: 2}})
+		want := "grn_over_receipt: po_item=po-item-laptop received=1 requested=2 ordered=2"
+		if err == nil || err.Error() != want {
+			t.Fatalf("err = %v, want %q", err, want)
+		}
+		if !errors.Is(err, ErrOverReceipt) {
+			t.Fatalf("errors.Is(err, ErrOverReceipt) = false for %v", err)
+		}
+		if po.Items[0].QtyReceived != 1 || po.Status != StatusAcknowledged || len(po.Events()) != 2 {
+			t.Fatalf("aggregate mutated by a rejected receipt: %+v", po)
+		}
+	})
+	t.Run("first violating line wins", func(t *testing.T) {
+		po := receiptFixture(t, StatusAcknowledged, 1, 3)
+		err := po.ApplyReceipt(poTestNow, poTestActor, []ReceiptLine{
+			{POItemID: "po-item-laptop", Qty: 5},
+			{POItemID: "po-item-mouse", Qty: 5},
+		})
+		want := "grn_over_receipt: po_item=po-item-laptop received=1 requested=5 ordered=2"
+		if err == nil || err.Error() != want {
+			t.Fatalf("err = %v, want %q", err, want)
+		}
+	})
+	t.Run("unknown line", func(t *testing.T) {
+		po := receiptFixture(t, StatusAcknowledged, 0, 0)
+		err := po.ApplyReceipt(poTestNow, poTestActor, []ReceiptLine{{POItemID: "po-item-ghost", Qty: 1}})
+		if !errors.Is(err, ErrReceiptItemUnknown) || err != ErrReceiptItemUnknown {
+			t.Fatalf("err = %v, want ErrReceiptItemUnknown", err)
+		}
+	})
+	t.Run("duplicate line", func(t *testing.T) {
+		po := receiptFixture(t, StatusAcknowledged, 0, 0)
+		err := po.ApplyReceipt(poTestNow, poTestActor, []ReceiptLine{
+			{POItemID: "po-item-laptop", Qty: 1},
+			{POItemID: "po-item-laptop", Qty: 1},
+		})
+		if !errors.Is(err, ErrReceiptItemDuplicate) || err != ErrReceiptItemDuplicate {
+			t.Fatalf("err = %v, want ErrReceiptItemDuplicate", err)
+		}
+	})
+	t.Run("illegal status", func(t *testing.T) {
+		for _, from := range []string{StatusDraft, StatusIssued, StatusClosed, StatusCancelled} {
+			po := receiptFixture(t, from, 0, 0)
+			err := po.ApplyReceipt(poTestNow, poTestActor, []ReceiptLine{{POItemID: "po-item-laptop", Qty: 1}})
+			if !errors.Is(err, ErrIllegalTransition) || err != ErrIllegalTransition {
+				t.Fatalf("%s: err = %v, want ErrIllegalTransition", from, err)
+			}
+			if po.Status != from || po.Items[0].QtyReceived != 0 {
+				t.Fatalf("%s: aggregate mutated by a rejected receipt", from)
+			}
+		}
+	})
+	t.Run("cumulative guard before edge guard on a received PO", func(t *testing.T) {
+		po := receiptFixture(t, StatusReceived, 2, 3)
+		err := po.ApplyReceipt(poTestNow, poTestActor, []ReceiptLine{{POItemID: "po-item-laptop", Qty: 1}})
+		var over *OverReceiptError
+		if !errors.As(err, &over) {
+			t.Fatalf("err = %v, want the over-receipt answer, not the illegal-transition one", err)
+		}
+	})
+}

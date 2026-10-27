@@ -37,6 +37,7 @@ const (
 	Procurement_AcknowledgePurchaseOrder_FullMethodName = "/procurement.v1.Procurement/AcknowledgePurchaseOrder"
 	Procurement_CancelPurchaseOrder_FullMethodName      = "/procurement.v1.Procurement/CancelPurchaseOrder"
 	Procurement_ClosePurchaseOrder_FullMethodName       = "/procurement.v1.Procurement/ClosePurchaseOrder"
+	Procurement_PostGoodsReceipt_FullMethodName         = "/procurement.v1.Procurement/PostGoodsReceipt"
 )
 
 // ProcurementClient is the client API for Procurement service.
@@ -147,6 +148,17 @@ type ProcurementClient interface {
 	// PO to closed. Any other source status is po_illegal_transition; exactly
 	// one po.closed outbox event commits with the transition.
 	ClosePurchaseOrder(ctx context.Context, in *ClosePurchaseOrderRequest, opts ...grpc.CallOption) (*PurchaseOrder, error)
+	// PostGoodsReceipt records one goods receipt against an acknowledged or
+	// partially_received PO (FR-07): each line advances the PO line's
+	// cumulative qty_received, over-receipts are rejected with the
+	// grn_over_receipt detail line, and the PO status follows the
+	// post-receipt quantities — partially_received while lines are short,
+	// received once every line reaches qty_ordered (a further partial receipt
+	// on a partially_received PO is legal and leaves the status untouched).
+	// The GRN number (GRN-%06d) is allocated per tenant inside the posting
+	// transaction — a rejected receipt burns no number. Exactly one grn.posted
+	// outbox event commits with every successful receipt.
+	PostGoodsReceipt(ctx context.Context, in *PostGoodsReceiptRequest, opts ...grpc.CallOption) (*PostGoodsReceiptResponse, error)
 }
 
 type procurementClient struct {
@@ -337,6 +349,16 @@ func (c *procurementClient) ClosePurchaseOrder(ctx context.Context, in *ClosePur
 	return out, nil
 }
 
+func (c *procurementClient) PostGoodsReceipt(ctx context.Context, in *PostGoodsReceiptRequest, opts ...grpc.CallOption) (*PostGoodsReceiptResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PostGoodsReceiptResponse)
+	err := c.cc.Invoke(ctx, Procurement_PostGoodsReceipt_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ProcurementServer is the server API for Procurement service.
 // All implementations must embed UnimplementedProcurementServer
 // for forward compatibility.
@@ -445,6 +467,17 @@ type ProcurementServer interface {
 	// PO to closed. Any other source status is po_illegal_transition; exactly
 	// one po.closed outbox event commits with the transition.
 	ClosePurchaseOrder(context.Context, *ClosePurchaseOrderRequest) (*PurchaseOrder, error)
+	// PostGoodsReceipt records one goods receipt against an acknowledged or
+	// partially_received PO (FR-07): each line advances the PO line's
+	// cumulative qty_received, over-receipts are rejected with the
+	// grn_over_receipt detail line, and the PO status follows the
+	// post-receipt quantities — partially_received while lines are short,
+	// received once every line reaches qty_ordered (a further partial receipt
+	// on a partially_received PO is legal and leaves the status untouched).
+	// The GRN number (GRN-%06d) is allocated per tenant inside the posting
+	// transaction — a rejected receipt burns no number. Exactly one grn.posted
+	// outbox event commits with every successful receipt.
+	PostGoodsReceipt(context.Context, *PostGoodsReceiptRequest) (*PostGoodsReceiptResponse, error)
 	mustEmbedUnimplementedProcurementServer()
 }
 
@@ -508,6 +541,9 @@ func (UnimplementedProcurementServer) CancelPurchaseOrder(context.Context, *Canc
 }
 func (UnimplementedProcurementServer) ClosePurchaseOrder(context.Context, *ClosePurchaseOrderRequest) (*PurchaseOrder, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ClosePurchaseOrder not implemented")
+}
+func (UnimplementedProcurementServer) PostGoodsReceipt(context.Context, *PostGoodsReceiptRequest) (*PostGoodsReceiptResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method PostGoodsReceipt not implemented")
 }
 func (UnimplementedProcurementServer) mustEmbedUnimplementedProcurementServer() {}
 func (UnimplementedProcurementServer) testEmbeddedByValue()                     {}
@@ -854,6 +890,24 @@ func _Procurement_ClosePurchaseOrder_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Procurement_PostGoodsReceipt_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PostGoodsReceiptRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProcurementServer).PostGoodsReceipt(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Procurement_PostGoodsReceipt_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProcurementServer).PostGoodsReceipt(ctx, req.(*PostGoodsReceiptRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Procurement_ServiceDesc is the grpc.ServiceDesc for Procurement service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -932,6 +986,10 @@ var Procurement_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ClosePurchaseOrder",
 			Handler:    _Procurement_ClosePurchaseOrder_Handler,
+		},
+		{
+			MethodName: "PostGoodsReceipt",
+			Handler:    _Procurement_PostGoodsReceipt_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

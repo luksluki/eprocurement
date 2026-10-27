@@ -525,7 +525,9 @@ so the §14.5 `po.*` bindings deliver them — the same documented extension as
 all four: `{number, requisition_id, vendor_id, status, total_cents,
 currency, performed_by}` (`status` = the new status; `performed_by` = the
 actor, self-contained the way `DecisionPayload.decided_by` is). The receipt
-transitions write no outbox rows until #37 defines their event shape. The
+transitions write no `po.*` outbox rows — since #37 their persisted record
+is the `grn.posted` row each goods receipt commits (see the
+[Goods receipts](#goods-receipts-37) section). The
 aggregate also keeps an in-memory event log (`Events()`/`PullEvents()`, the
 requisition pattern) with aggregate-local names (`po_issued`, …) — creation
 still records none in memory (dev-note 035: `po.created` is the outbox row).
@@ -539,6 +541,127 @@ names the PO, the response is **200 + the updated PO**. Error codes:
 via RLS) · `po_illegal_transition`, `po_has_receipts` → 409 (FR-06's
 "invalid transitions rejected with 409", through `Aborted` in the shared
 gRPC→HTTP mapping).
+
+## Goods receipts (#37)
+
+The storage mirror of the `goodsreceipt` domain package plus the receipt
+half of the PO lifecycle (FR-07): one GRN records a partial or full delivery
+against one PO's lines. `procurement.goods_receipts`:
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | `gen_random_uuid()` |
+| `tenant_id` | uuid NOT NULL | RLS scoping key |
+| `po_id` | uuid NOT NULL | FK → `purchase_orders` (no cascade — a PO with receipts must not be deletable) |
+| `number` | text NOT NULL | `GRN-%06d`, allocated per tenant; `UNIQUE (tenant_id, number)` |
+| `received_by` | uuid NOT NULL | the user who posted the receipt |
+| `received_at` | timestamptz NOT NULL | the receipt's own timestamp |
+| `notes` | text NOT NULL DEFAULT '' | free-form, ≤ 1000 chars (the approval-reason convention) |
+| `created_at` | timestamptz NOT NULL | audit timestamp (**delta vs §13**) |
+
+`procurement.goods_receipt_items` (no `tenant_id` — PRD §13; tenancy derives
+from the parent GRN, transitively from the PO):
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | `gen_random_uuid()` |
+| `grn_id` | uuid NOT NULL | FK → `goods_receipts` `ON DELETE CASCADE` |
+| `po_item_id` | uuid NOT NULL | FK → `po_items`; must be a line of the same PO (domain guard) |
+| `qty_received` | integer NOT NULL | CHECK `> 0`; this receipt's quantity for the line |
+| `created_at` | timestamptz NOT NULL | |
+
+`UNIQUE (grn_id, po_item_id)` — one GRN records each PO line at most once;
+further deliveries are further GRNs. `procurement.grn_counters` — the exact
+0004/0007 counter pattern (one row per tenant, `last_number`, increment
+rolls back with a rejected post, numbers gap-free). **RLS**: the 0001/0003
+tenant pattern on all three tables (items derive tenancy from the parent GRN
+via `EXISTS`, so isolation stays transitive).
+
+**Store contract** (`goodsreceipt.Store.Post`, one tenant transaction with a
+pinned step order): validate the request shape before the transaction opens
+(non-empty lines, qty > 0, unique line ids, notes bound — 400s) → lock the
+PO row `FOR UPDATE` (`purchaseorder.LoadForUpdate` — the serialization point
+shared with every #36 lifecycle transition, so a concurrent
+issue/close/receipt pair yields exactly one winner) →
+`purchaseorder.ApplyReceipt` (line membership, the cumulative over-receipt
+guard, the status edge, the `qty_received` advances, and the target status)
+→ allocate `GRN-%06d` **after** the guards (a rejected receipt burns no
+number) → insert the GRN + items → advance `po_items.qty_received` with a
+`WHERE qty_received + $2 <= qty_ordered` backstop under the lock → move
+`purchase_orders.status` only when it changed → append exactly one
+`grn.posted` outbox row. Any failure rolls the whole transaction back: no
+GRN rows, no qty move, no status move, no outbox row.
+
+`purchaseorder.ApplyReceipt` picks the target status from the
+**post-receipt** quantities through three branches:
+
+1. from `acknowledged` with lines still short → `MarkPartiallyReceived`
+   (the first partial receipt);
+2. from `acknowledged` or `partially_received` with every line reaching
+   `qty_ordered` → `MarkReceived` (a full receipt, direct or the
+   completion);
+3. from `partially_received` and **still** short → the explicit
+   **same-status branch**: no transition method, no aggregate event, and no
+   UPDATE on `purchase_orders` at all (status/`updated_at`/`updated_by`
+   untouched) — the receipt's effect lives in `po_items.qty_received`, the
+   GRN rows, and the outbox row.
+
+Branch 3 is a deliberate **non-extension** of the ten-edge #36 contract:
+the map pins self-loops as `po_illegal_transition`
+([PO lifecycle](#po-lifecycle-state-machine-36), dev-notes 035/036), so
+`partially_received → partially_received` is not an edge — yet FR-07's core
+is that further partial receipts are legal. Without branch 3 every second
+partial receipt would answer 409 from `MarkPartiallyReceived`.
+
+**Over-receipt (pinned error format).** The cumulative guard — stored
+`qty_received` + this receipt's qty > `qty_ordered` on any line — answers
+409 with the gRPC message **exactly**:
+
+```
+grn_over_receipt: po_item=<uuid> received=<r> requested=<q> ordered=<o>
+```
+
+The machine code is the strict prefix before the first colon; `<r>` is the
+line's stored `qty_received` before this receipt, `<q>` this receipt's
+quantity, `<o>` the line's `qty_ordered`. One violating line is reported —
+the **first in request-line order** (deterministic). The REST
+goods-receipt route renders it through a **dedicated** renderer (not the
+shared messages map): body `code` = the token before the colon (exactly
+`grn_over_receipt`, stable for clients matching on equality), body `error`
+= the full detailed message, status 409 via the shared `Aborted` mapping;
+every other code on the route flows through the shared `grpcHTTPError`
+unchanged. The cumulative guard runs **before** the status-edge guard: a
+receipt against a `received` PO answers `grn_over_receipt` (every line is
+full), not `po_illegal_transition`.
+
+**Events.** Exactly one `grn.posted` outbox row commits with **every**
+successful receipt — including the same-status branch. It is a §14.6
+catalog entry (two segments, so the §14.5 `grn.*` bindings deliver it;
+routing key = event type, `documents.history` is bound `#`). **Entity
+typing**: `entity_type = purchase_order` / `entity_id` = the PO id (the
+`pr.step_approved` precedent, #31) so the PO timeline (#43, FR-11) shows
+every receipt. Pinned payload (version 1):
+`{grn_id, number, po_number, po_status, items: [{po_item_id, qty_received}],
+received_by}` — `po_status` is the post-receipt status. Envelope carries
+actor + trace as ever. `grn.posted` is **not** in the worker's
+`NotificationsRoutingKeys` (the actor-facing subset, dev-note 046), so no
+in-app notification is emitted for receipts — a conscious gap, documented in
+dev-note 037.
+
+**API** (all `grn:post` — buyer/admin at gateway and interceptor, per the
+rbac matrix): gRPC `PostGoodsReceipt`; REST
+`POST /api/v1/purchase-orders/{id}/goods-receipts` (PRD §15) with body
+`{"items": [{"po_item_id": "<uuid>", "qty_received": n}], "notes": "…"}` —
+the path id names the PO, `po_item_id` names its lines (PO responses expose
+the item ids since #37). Success: **201 + the GRN with the updated PO
+embedded**. Error codes: `grn_items_empty`, `grn_qty_invalid`,
+`grn_po_item_duplicate`, `grn_notes_invalid`, `grn_po_item_unknown` (a
+po_item_id that is no line of this PO), `po_id_invalid` → 400 ·
+`grn_over_receipt`, `po_illegal_transition` → 409 · `po_not_found` → 404
+(also the cross-tenant answer, via RLS). There is **no Idempotency-Key**
+mechanism on this route — a conscious deviation from the submit/decide
+precedent, documented in dev-note 037 (a retried partial receipt that still
+fits records twice; a decide-key-style follow-up is the candidate fix).
 
 ## Requisition state machine (#28)
 
@@ -657,6 +780,7 @@ missing (404 `requisition_not_found`).
 - #46: RabbitMQ topology with DLX and TTL retry queues (done — durable `procurement.events`/`procurement.dlx` exchanges, `documents.history`/`notifications`/`exports` queues with DLX arguments, per-queue retry ladders 5 s → 30 s → 5 min returning to their own queue, `procurement.dlq` bound `#`; consumers arrive with #47). (M2–M3)
 - #35: PO creation from an approved requisition (done — 0007 tables, draft PO with copied lines, per-tenant gap-free `PO-%06d` numbering, conversion replay contract, tx-scoped active-vendor gate `ForUseTx`, guarded `approved → closed`, one `po.created` outbox event). Goods receipts (#37) and the missing `pr.converted` requisition-side event are follow-ups.
 - #36: PO lifecycle state machine (done — ten legal edges over the seven statuses, receipt-guarded cancel, `issued_at` on issue, guarded tenant-scoped transitions serialized on the PO row lock, one outbox event per transition, gRPC + REST issue/acknowledge/cancel/close at `po:write`). Goods receipts (#37) drive the receipt edges.
+- #37: goods receipts with partial receipt rules (done — 0008 tables, `GRN-%06d` gap-free per tenant, `purchaseorder.ApplyReceipt` three-branch status selection with the same-status branch, cumulative over-receipt guard with the pinned `grn_over_receipt: …` detail line and the dedicated REST renderer, one `grn.posted` outbox row per receipt typed to the PO, gRPC + REST at `grn:post`). See the [Goods receipts](#goods-receipts-37) section.
 - Approvals read endpoints/queue #32-34 (M2–M3).
 - The timeline/event read path (#42/#43/#47, `GET /api/v1/events`) consumes the outbox's `entity_type`/`entity_id` columns; a tenant+entity index arrives with whichever issue first queries them.
 

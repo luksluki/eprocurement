@@ -10,6 +10,7 @@ package purchaseorder
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -106,11 +107,55 @@ var (
 	ErrCurrencyInvalid        = errors.New("po_currency_invalid")
 	ErrIllegalTransition      = errors.New("po_illegal_transition")
 	ErrHasReceipts            = errors.New("po_has_receipts")
+	// ErrOverReceipt is the FR-07 cumulative guard's sentinel (#37): the
+	// store returns the typed *OverReceiptError (which unwraps to this) so
+	// the gRPC message can carry the pinned detail line while errors.Is
+	// keeps matching the bare sentinel.
+	ErrOverReceipt = errors.New("grn_over_receipt")
+	// ErrReceiptItemUnknown / ErrReceiptItemDuplicate are the receipt-line
+	// guards of ApplyReceipt: a line that names no po_items row of this PO,
+	// or the same line twice in one receipt (the goodsreceipt domain's
+	// shape validation owns the pre-transaction twins).
+	ErrReceiptItemUnknown   = errors.New("grn_po_item_unknown")
+	ErrReceiptItemDuplicate = errors.New("grn_po_item_duplicate")
 )
+
+// OverReceiptError names the first line whose cumulative received quantity
+// would exceed its ordered quantity. Error() is the wire format pinned in
+// docs/schema/procurement.md — the machine code as the strict prefix before
+// the first colon, then the violating line's detail — so the API boundary
+// and the gateway's dedicated renderer can split code from detail without
+// parsing anything but the colon.
+type OverReceiptError struct {
+	POItemID  string
+	Received  int32 // the line's stored qty_received before this receipt
+	Requested int32 // this receipt's quantity for the line
+	Ordered   int32 // the line's qty_ordered
+}
+
+func (e *OverReceiptError) Error() string {
+	return fmt.Sprintf("grn_over_receipt: po_item=%s received=%d requested=%d ordered=%d",
+		e.POItemID, e.Received, e.Requested, e.Ordered)
+}
+
+// Unwrap makes errors.Is(err, ErrOverReceipt) match the typed error.
+func (e *OverReceiptError) Unwrap() error { return ErrOverReceipt }
+
+// ReceiptLine is one line of a goods receipt (#37): the PO line it receives
+// against and the quantity received now. The goodsreceipt domain validates
+// the request shape before the transaction opens (non-empty, qty > 0, unique
+// line ids); ApplyReceipt owns the aggregate-relative guards.
+type ReceiptLine struct {
+	POItemID string
+	Qty      int32
+}
 
 // Item is one purchase-order line, copied verbatim from a requisition line
 // on conversion. QtyReceived starts at 0; goods receipts (#37) advance it.
+// ID is the po_items row id — empty until the store loads/inserts the line;
+// #37 exposes it because receipt lines reference po_item ids.
 type Item struct {
+	ID             string
 	Description    string
 	Qty            int32
 	QtyReceived    int32
@@ -269,6 +314,92 @@ func (p *PurchaseOrder) MarkPartiallyReceived(now time.Time, actor string) error
 // line fully received (#37 drives it).
 func (p *PurchaseOrder) MarkReceived(now time.Time, actor string) error {
 	return p.transition(StatusReceived, now, actor)
+}
+
+// ApplyReceipt applies one goods receipt (#37, FR-07): the receipt's lines
+// advance po_items.qty_received cumulatively and the method picks the target
+// status from the post-receipt quantities. Three branches:
+//
+//   - from acknowledged with lines still short → MarkPartiallyReceived (the
+//     first partial receipt; one aggregate event);
+//   - from acknowledged or partially_received with every line reaching
+//     qty_ordered → MarkReceived (a full receipt, direct or the completion;
+//     one aggregate event);
+//   - from partially_received and still short → the explicit same-status
+//     branch: NO transition method, no aggregate event, and — in the store —
+//     no UPDATE on purchase_orders at all (status/updated_at/updated_by
+//     untouched). The receipt's effect lives in po_items.qty_received, the
+//     goods-receipt rows, and the grn.posted outbox row.
+//
+// The self-loop partially_received → partially_received is deliberately NOT
+// added to transitionEvents: docs/schema/procurement.md pins self-loops as
+// po_illegal_transition, and dev-note 036 pinned the ten-edge contract.
+// Without this branch every second partial receipt would answer 409 from
+// MarkPartiallyReceived — breaking FR-07's partial receipts.
+//
+// Guards run in a pinned order, all before any mutation: line membership
+// and duplicates (request order), then the cumulative over-receipt guard
+// (request order; the FIRST violating line is reported, deterministically),
+// then the status edge. Cumulative-before-edge is pinned: a receipt against
+// a received PO answers grn_over_receipt (every line is full), not
+// po_illegal_transition. The caller (the goodsreceipt store) validates the
+// request shape — lines must be non-empty with qty > 0 and unique line ids.
+func (p *PurchaseOrder) ApplyReceipt(now time.Time, actor string, lines []ReceiptLine) error {
+	// Membership and duplicates, then the cumulative guard — one pass in
+	// request-line order, collecting the target quantities.
+	byID := make(map[string]int32, len(p.Items))
+	index := make(map[string]int, len(p.Items))
+	for i, it := range p.Items {
+		byID[it.ID] = it.QtyReceived
+		index[it.ID] = i
+	}
+	seen := make(map[string]bool, len(lines))
+	targets := make(map[string]int32, len(lines))
+	for _, line := range lines {
+		current, ok := byID[line.POItemID]
+		if !ok {
+			return ErrReceiptItemUnknown
+		}
+		if seen[line.POItemID] {
+			return ErrReceiptItemDuplicate
+		}
+		seen[line.POItemID] = true
+		if current+line.Qty > p.Items[index[line.POItemID]].Qty {
+			return &OverReceiptError{
+				POItemID:  line.POItemID,
+				Received:  current,
+				Requested: line.Qty,
+				Ordered:   p.Items[index[line.POItemID]].Qty,
+			}
+		}
+		targets[line.POItemID] = current + line.Qty
+	}
+	// The status edge, after the cumulative guard (pinned order).
+	if p.Status != StatusAcknowledged && p.Status != StatusPartiallyReceived {
+		return ErrIllegalTransition
+	}
+	// Mutate: advance the received quantities, then branch on the target
+	// status derived from the post-receipt quantities.
+	for id, qty := range targets {
+		p.Items[index[id]].QtyReceived = qty
+	}
+	allFull := true
+	for _, it := range p.Items {
+		if it.QtyReceived < it.Qty {
+			allFull = false
+			break
+		}
+	}
+	switch {
+	case allFull:
+		return p.MarkReceived(now, actor)
+	case p.Status == StatusAcknowledged:
+		return p.MarkPartiallyReceived(now, actor)
+	default:
+		// Same-status branch: partially_received stays partially_received —
+		// no transition, no event, nothing for the store to UPDATE.
+		return nil
+	}
 }
 
 // Events returns a copy of the recorded events, oldest first.
