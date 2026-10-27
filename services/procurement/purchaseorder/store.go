@@ -254,7 +254,7 @@ func (s *Store) transition(ctx context.Context, tenantID, id, actor, what, event
 	var out PurchaseOrder
 	err := tenant.WithTenant(ctx, s.db, tenantID, func(tx pgx.Tx) error {
 		// Step 1: lock the PO — the shared serialization point.
-		po, err := loadForUpdate(ctx, tx, id)
+		po, err := LoadForUpdate(ctx, tx, id)
 		if err != nil {
 			return err
 		}
@@ -333,10 +333,12 @@ func (s *Store) Close(ctx context.Context, tenantID, id, actor string) (Purchase
 	return s.transition(ctx, tenantID, id, actor, "close", OutboxClosed, (*PurchaseOrder).Close)
 }
 
-// loadForUpdate loads one PO (header plus items) inside tx under the row
-// lock — the lifecycle serialization point. RLS makes other tenants' rows
+// LoadForUpdate loads one PO (header plus items) inside tx under the row
+// lock — the lifecycle serialization point, exported for the goods-receipt
+// store (#37) whose posts share it with every lifecycle transition (the
+// requisition.LoadForUpdate precedent, #30). RLS makes other tenants' rows
 // invisible, so they surface as ErrNotFound.
-func loadForUpdate(ctx context.Context, tx pgx.Tx, id string) (PurchaseOrder, error) {
+func LoadForUpdate(ctx context.Context, tx pgx.Tx, id string) (PurchaseOrder, error) {
 	var po PurchaseOrder
 	if err := scanPO(tx.QueryRow(ctx, `
 		SELECT `+poColumns+` FROM procurement.purchase_orders
@@ -425,7 +427,7 @@ func insertPO(ctx context.Context, tx pgx.Tx, agg *PurchaseOrder) (PurchaseOrder
 
 func loadItems(ctx context.Context, tx pgx.Tx, poID string) ([]Item, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT description, qty_ordered, qty_received, unit_price_cents
+		SELECT id, description, qty_ordered, qty_received, unit_price_cents
 		FROM procurement.po_items
 		WHERE po_id = $1
 		ORDER BY created_at, id`, poID)
@@ -436,7 +438,7 @@ func loadItems(ctx context.Context, tx pgx.Tx, poID string) ([]Item, error) {
 	items := []Item{}
 	for rows.Next() {
 		var it Item
-		if err := rows.Scan(&it.Description, &it.Qty, &it.QtyReceived, &it.UnitPriceCents); err != nil {
+		if err := rows.Scan(&it.ID, &it.Description, &it.Qty, &it.QtyReceived, &it.UnitPriceCents); err != nil {
 			return nil, err
 		}
 		items = append(items, it)

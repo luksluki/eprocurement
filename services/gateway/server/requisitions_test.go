@@ -115,6 +115,12 @@ func (f *fakeRequisitionClient) ClosePurchaseOrder(ctx context.Context, in *proc
 	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
 }
 
+// The #37 goods-receipt method satisfies the widened ProcurementClient
+// interface; the goods-receipt tests use their own fake with recording.
+func (f *fakeRequisitionClient) PostGoodsReceipt(ctx context.Context, in *procurementv1.PostGoodsReceiptRequest, opts ...grpc.CallOption) (*procurementv1.PostGoodsReceiptResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
+}
+
 func (f *fakeRequisitionClient) GetApprovalRules(ctx context.Context, in *procurementv1.GetApprovalRulesRequest, opts ...grpc.CallOption) (*procurementv1.ApprovalRulesResponse, error) {
 	return &procurementv1.ApprovalRulesResponse{}, nil
 }
@@ -434,6 +440,7 @@ func TestRequisitionDetailRouteEmbedsAttachments(t *testing.T) {
 		t.Fatalf("propagated metadata = %v", md)
 	}
 }
+
 // Degradation parity with the vendor routes: without a documents client the
 // detail still serves the requisition, just without attachments (the
 // registerRequisitionRoutes nil guard — an embed without the guard would

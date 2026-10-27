@@ -12,10 +12,10 @@ import (
 )
 
 // registerPurchaseOrderRoutes wires /api/v1/purchase-orders: Bearer auth,
-// RBAC (po:write — buyer/admin at both layers; docs/rbac.md), and the
-// verified claims propagated to procurement as gRPC metadata. #35 landed the
-// conversion endpoint; #36 adds the lifecycle actions (PRD §15 issue route
-// plus acknowledge/cancel/close). Goods receipts (#37) follow.
+// RBAC, and the verified claims propagated to procurement as gRPC metadata.
+// #35 landed the conversion endpoint; #36 the lifecycle actions (PRD §15
+// issue route plus acknowledge/cancel/close); #37 the goods-receipt posting
+// route (PRD §15, grn:post — buyer/admin; see goodsreceipt.go).
 func registerPurchaseOrderRoutes(app *fiber.App, verifier *token.Verifier, client ProcurementClient) {
 	pos := app.Group("/api/v1/purchase-orders", bearerAuth(verifier))
 
@@ -24,6 +24,7 @@ func registerPurchaseOrderRoutes(app *fiber.App, verifier *token.Verifier, clien
 	pos.Post("/:id/acknowledge", RequirePermission(rbac.POWrite), acknowledgePurchaseOrder(client))
 	pos.Post("/:id/cancel", RequirePermission(rbac.POWrite), cancelPurchaseOrder(client))
 	pos.Post("/:id/close", RequirePermission(rbac.POWrite), closePurchaseOrder(client))
+	pos.Post("/:id/goods-receipts", RequirePermission(rbac.GRNPost), postGoodsReceiptRoute(client))
 }
 
 // poBody is the conversion payload. vendor_id is required — the requisition
@@ -142,6 +143,7 @@ func purchaseOrderJSON(po *procurementv1.PurchaseOrder) fiber.Map {
 	items := make([]fiber.Map, 0, len(po.GetItems()))
 	for _, it := range po.GetItems() {
 		items = append(items, fiber.Map{
+			"id":               it.GetId(),
 			"description":      it.GetDescription(),
 			"qty_ordered":      it.GetQtyOrdered(),
 			"qty_received":     it.GetQtyReceived(),

@@ -1665,6 +1665,7 @@ type PurchaseOrderItem struct {
 	QtyOrdered     int32                  `protobuf:"varint,2,opt,name=qty_ordered,json=qtyOrdered,proto3" json:"qty_ordered,omitempty"`               // > 0
 	QtyReceived    int32                  `protobuf:"varint,3,opt,name=qty_received,json=qtyReceived,proto3" json:"qty_received,omitempty"`            // 0 on creation; goods receipts (#37) advance it
 	UnitPriceCents int64                  `protobuf:"varint,4,opt,name=unit_price_cents,json=unitPriceCents,proto3" json:"unit_price_cents,omitempty"` // >= 0, integer cents in the header currency
+	Id             string                 `protobuf:"bytes,5,opt,name=id,proto3" json:"id,omitempty"`                                                  // po_items row id; receipt lines reference it (#37)
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -1725,6 +1726,13 @@ func (x *PurchaseOrderItem) GetUnitPriceCents() int64 {
 		return x.UnitPriceCents
 	}
 	return 0
+}
+
+func (x *PurchaseOrderItem) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
 }
 
 type CreatePurchaseOrderRequest struct {
@@ -2020,6 +2028,286 @@ func (x *ClosePurchaseOrderRequest) GetId() string {
 	return ""
 }
 
+// GoodsReceipt is one goods-receipt note (#37): who received what, when,
+// against which PO. The number is server-generated per tenant.
+type GoodsReceipt struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	TenantId      string                 `protobuf:"bytes,2,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
+	PoId          string                 `protobuf:"bytes,3,opt,name=po_id,json=poId,proto3" json:"po_id,omitempty"`                   // the received-against purchase order
+	Number        string                 `protobuf:"bytes,4,opt,name=number,proto3" json:"number,omitempty"`                           // server-generated per tenant, e.g. "GRN-000042"
+	ReceivedBy    string                 `protobuf:"bytes,5,opt,name=received_by,json=receivedBy,proto3" json:"received_by,omitempty"` // user id
+	ReceivedAt    string                 `protobuf:"bytes,6,opt,name=received_at,json=receivedAt,proto3" json:"received_at,omitempty"` // RFC 3339
+	Notes         string                 `protobuf:"bytes,7,opt,name=notes,proto3" json:"notes,omitempty"`                             // free-form, <= 1000 chars, may be empty
+	Items         []*GoodsReceiptItem    `protobuf:"bytes,8,rep,name=items,proto3" json:"items,omitempty"`
+	CreatedAt     string                 `protobuf:"bytes,9,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"` // RFC 3339
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GoodsReceipt) Reset() {
+	*x = GoodsReceipt{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GoodsReceipt) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GoodsReceipt) ProtoMessage() {}
+
+func (x *GoodsReceipt) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GoodsReceipt.ProtoReflect.Descriptor instead.
+func (*GoodsReceipt) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *GoodsReceipt) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *GoodsReceipt) GetTenantId() string {
+	if x != nil {
+		return x.TenantId
+	}
+	return ""
+}
+
+func (x *GoodsReceipt) GetPoId() string {
+	if x != nil {
+		return x.PoId
+	}
+	return ""
+}
+
+func (x *GoodsReceipt) GetNumber() string {
+	if x != nil {
+		return x.Number
+	}
+	return ""
+}
+
+func (x *GoodsReceipt) GetReceivedBy() string {
+	if x != nil {
+		return x.ReceivedBy
+	}
+	return ""
+}
+
+func (x *GoodsReceipt) GetReceivedAt() string {
+	if x != nil {
+		return x.ReceivedAt
+	}
+	return ""
+}
+
+func (x *GoodsReceipt) GetNotes() string {
+	if x != nil {
+		return x.Notes
+	}
+	return ""
+}
+
+func (x *GoodsReceipt) GetItems() []*GoodsReceiptItem {
+	if x != nil {
+		return x.Items
+	}
+	return nil
+}
+
+func (x *GoodsReceipt) GetCreatedAt() string {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return ""
+}
+
+// GoodsReceiptItem is one receipt line: the PO line it advances and the
+// quantity received now (> 0; partial receipts accumulate across GRNs).
+type GoodsReceiptItem struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	PoItemId      string                 `protobuf:"bytes,1,opt,name=po_item_id,json=poItemId,proto3" json:"po_item_id,omitempty"`         // must be a line of the named PO
+	QtyReceived   int32                  `protobuf:"varint,2,opt,name=qty_received,json=qtyReceived,proto3" json:"qty_received,omitempty"` // > 0
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GoodsReceiptItem) Reset() {
+	*x = GoodsReceiptItem{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GoodsReceiptItem) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GoodsReceiptItem) ProtoMessage() {}
+
+func (x *GoodsReceiptItem) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GoodsReceiptItem.ProtoReflect.Descriptor instead.
+func (*GoodsReceiptItem) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *GoodsReceiptItem) GetPoItemId() string {
+	if x != nil {
+		return x.PoItemId
+	}
+	return ""
+}
+
+func (x *GoodsReceiptItem) GetQtyReceived() int32 {
+	if x != nil {
+		return x.QtyReceived
+	}
+	return 0
+}
+
+// PostGoodsReceiptRequest carries one receipt: the PO (must be acknowledged
+// or partially_received), the lines, and optional notes.
+type PostGoodsReceiptRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	PoId          string                 `protobuf:"bytes,1,opt,name=po_id,json=poId,proto3" json:"po_id,omitempty"`
+	Items         []*GoodsReceiptItem    `protobuf:"bytes,2,rep,name=items,proto3" json:"items,omitempty"`
+	Notes         string                 `protobuf:"bytes,3,opt,name=notes,proto3" json:"notes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PostGoodsReceiptRequest) Reset() {
+	*x = PostGoodsReceiptRequest{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PostGoodsReceiptRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PostGoodsReceiptRequest) ProtoMessage() {}
+
+func (x *PostGoodsReceiptRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PostGoodsReceiptRequest.ProtoReflect.Descriptor instead.
+func (*PostGoodsReceiptRequest) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{32}
+}
+
+func (x *PostGoodsReceiptRequest) GetPoId() string {
+	if x != nil {
+		return x.PoId
+	}
+	return ""
+}
+
+func (x *PostGoodsReceiptRequest) GetItems() []*GoodsReceiptItem {
+	if x != nil {
+		return x.Items
+	}
+	return nil
+}
+
+func (x *PostGoodsReceiptRequest) GetNotes() string {
+	if x != nil {
+		return x.Notes
+	}
+	return ""
+}
+
+// PostGoodsReceiptResponse carries the stored GRN and the PO after the
+// receipt (qty_received advanced; status partially_received or received).
+type PostGoodsReceiptResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	GoodsReceipt  *GoodsReceipt          `protobuf:"bytes,1,opt,name=goods_receipt,json=goodsReceipt,proto3" json:"goods_receipt,omitempty"`
+	PurchaseOrder *PurchaseOrder         `protobuf:"bytes,2,opt,name=purchase_order,json=purchaseOrder,proto3" json:"purchase_order,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PostGoodsReceiptResponse) Reset() {
+	*x = PostGoodsReceiptResponse{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PostGoodsReceiptResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PostGoodsReceiptResponse) ProtoMessage() {}
+
+func (x *PostGoodsReceiptResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PostGoodsReceiptResponse.ProtoReflect.Descriptor instead.
+func (*PostGoodsReceiptResponse) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *PostGoodsReceiptResponse) GetGoodsReceipt() *GoodsReceipt {
+	if x != nil {
+		return x.GoodsReceipt
+	}
+	return nil
+}
+
+func (x *PostGoodsReceiptResponse) GetPurchaseOrder() *PurchaseOrder {
+	if x != nil {
+		return x.PurchaseOrder
+	}
+	return nil
+}
+
 var File_procurement_v1_procurement_proto protoreflect.FileDescriptor
 
 const file_procurement_v1_procurement_proto_rawDesc = "" +
@@ -2163,13 +2451,14 @@ const file_procurement_v1_procurement_proto_rawDesc = "" +
 	"\n" +
 	"updated_at\x18\r \x01(\tR\tupdatedAt\x12\x1d\n" +
 	"\n" +
-	"updated_by\x18\x0e \x01(\tR\tupdatedBy\"\xa3\x01\n" +
+	"updated_by\x18\x0e \x01(\tR\tupdatedBy\"\xb3\x01\n" +
 	"\x11PurchaseOrderItem\x12 \n" +
 	"\vdescription\x18\x01 \x01(\tR\vdescription\x12\x1f\n" +
 	"\vqty_ordered\x18\x02 \x01(\x05R\n" +
 	"qtyOrdered\x12!\n" +
 	"\fqty_received\x18\x03 \x01(\x05R\vqtyReceived\x12(\n" +
-	"\x10unit_price_cents\x18\x04 \x01(\x03R\x0eunitPriceCents\"`\n" +
+	"\x10unit_price_cents\x18\x04 \x01(\x03R\x0eunitPriceCents\x12\x0e\n" +
+	"\x02id\x18\x05 \x01(\tR\x02id\"`\n" +
 	"\x1aCreatePurchaseOrderRequest\x12%\n" +
 	"\x0erequisition_id\x18\x01 \x01(\tR\rrequisitionId\x12\x1b\n" +
 	"\tvendor_id\x18\x02 \x01(\tR\bvendorId\"}\n" +
@@ -2183,7 +2472,31 @@ const file_procurement_v1_procurement_proto_rawDesc = "" +
 	"\x1aCancelPurchaseOrderRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\"+\n" +
 	"\x19ClosePurchaseOrderRequest\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id2\x9b\r\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"\x97\x02\n" +
+	"\fGoodsReceipt\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
+	"\ttenant_id\x18\x02 \x01(\tR\btenantId\x12\x13\n" +
+	"\x05po_id\x18\x03 \x01(\tR\x04poId\x12\x16\n" +
+	"\x06number\x18\x04 \x01(\tR\x06number\x12\x1f\n" +
+	"\vreceived_by\x18\x05 \x01(\tR\n" +
+	"receivedBy\x12\x1f\n" +
+	"\vreceived_at\x18\x06 \x01(\tR\n" +
+	"receivedAt\x12\x14\n" +
+	"\x05notes\x18\a \x01(\tR\x05notes\x126\n" +
+	"\x05items\x18\b \x03(\v2 .procurement.v1.GoodsReceiptItemR\x05items\x12\x1d\n" +
+	"\n" +
+	"created_at\x18\t \x01(\tR\tcreatedAt\"S\n" +
+	"\x10GoodsReceiptItem\x12\x1c\n" +
+	"\n" +
+	"po_item_id\x18\x01 \x01(\tR\bpoItemId\x12!\n" +
+	"\fqty_received\x18\x02 \x01(\x05R\vqtyReceived\"|\n" +
+	"\x17PostGoodsReceiptRequest\x12\x13\n" +
+	"\x05po_id\x18\x01 \x01(\tR\x04poId\x126\n" +
+	"\x05items\x18\x02 \x03(\v2 .procurement.v1.GoodsReceiptItemR\x05items\x12\x14\n" +
+	"\x05notes\x18\x03 \x01(\tR\x05notes\"\xa3\x01\n" +
+	"\x18PostGoodsReceiptResponse\x12A\n" +
+	"\rgoods_receipt\x18\x01 \x01(\v2\x1c.procurement.v1.GoodsReceiptR\fgoodsReceipt\x12D\n" +
+	"\x0epurchase_order\x18\x02 \x01(\v2\x1d.procurement.v1.PurchaseOrderR\rpurchaseOrder2\x82\x0e\n" +
 	"\vProcurement\x12K\n" +
 	"\fCreateVendor\x12#.procurement.v1.CreateVendorRequest\x1a\x16.procurement.v1.Vendor\x12E\n" +
 	"\tGetVendor\x12 .procurement.v1.GetVendorRequest\x1a\x16.procurement.v1.Vendor\x12K\n" +
@@ -2202,7 +2515,8 @@ const file_procurement_v1_procurement_proto_rawDesc = "" +
 	"\x12IssuePurchaseOrder\x12).procurement.v1.IssuePurchaseOrderRequest\x1a\x1d.procurement.v1.PurchaseOrder\x12j\n" +
 	"\x18AcknowledgePurchaseOrder\x12/.procurement.v1.AcknowledgePurchaseOrderRequest\x1a\x1d.procurement.v1.PurchaseOrder\x12`\n" +
 	"\x13CancelPurchaseOrder\x12*.procurement.v1.CancelPurchaseOrderRequest\x1a\x1d.procurement.v1.PurchaseOrder\x12^\n" +
-	"\x12ClosePurchaseOrder\x12).procurement.v1.ClosePurchaseOrderRequest\x1a\x1d.procurement.v1.PurchaseOrderBFZDgithub.com/luksluki/eprocurement/gen/go/procurement/v1;procurementv1b\x06proto3"
+	"\x12ClosePurchaseOrder\x12).procurement.v1.ClosePurchaseOrderRequest\x1a\x1d.procurement.v1.PurchaseOrder\x12e\n" +
+	"\x10PostGoodsReceipt\x12'.procurement.v1.PostGoodsReceiptRequest\x1a(.procurement.v1.PostGoodsReceiptResponseBFZDgithub.com/luksluki/eprocurement/gen/go/procurement/v1;procurementv1b\x06proto3"
 
 var (
 	file_procurement_v1_procurement_proto_rawDescOnce sync.Once
@@ -2216,7 +2530,7 @@ func file_procurement_v1_procurement_proto_rawDescGZIP() []byte {
 	return file_procurement_v1_procurement_proto_rawDescData
 }
 
-var file_procurement_v1_procurement_proto_msgTypes = make([]protoimpl.MessageInfo, 30)
+var file_procurement_v1_procurement_proto_msgTypes = make([]protoimpl.MessageInfo, 34)
 var file_procurement_v1_procurement_proto_goTypes = []any{
 	(*Vendor)(nil),                          // 0: procurement.v1.Vendor
 	(*CreateVendorRequest)(nil),             // 1: procurement.v1.CreateVendorRequest
@@ -2248,6 +2562,10 @@ var file_procurement_v1_procurement_proto_goTypes = []any{
 	(*AcknowledgePurchaseOrderRequest)(nil), // 27: procurement.v1.AcknowledgePurchaseOrderRequest
 	(*CancelPurchaseOrderRequest)(nil),      // 28: procurement.v1.CancelPurchaseOrderRequest
 	(*ClosePurchaseOrderRequest)(nil),       // 29: procurement.v1.ClosePurchaseOrderRequest
+	(*GoodsReceipt)(nil),                    // 30: procurement.v1.GoodsReceipt
+	(*GoodsReceiptItem)(nil),                // 31: procurement.v1.GoodsReceiptItem
+	(*PostGoodsReceiptRequest)(nil),         // 32: procurement.v1.PostGoodsReceiptRequest
+	(*PostGoodsReceiptResponse)(nil),        // 33: procurement.v1.PostGoodsReceiptResponse
 }
 var file_procurement_v1_procurement_proto_depIdxs = []int32{
 	0,  // 0: procurement.v1.ListVendorsResponse.vendors:type_name -> procurement.v1.Vendor
@@ -2261,47 +2579,53 @@ var file_procurement_v1_procurement_proto_depIdxs = []int32{
 	18, // 8: procurement.v1.ApprovalRulesResponse.rules:type_name -> procurement.v1.ApprovalRule
 	23, // 9: procurement.v1.PurchaseOrder.items:type_name -> procurement.v1.PurchaseOrderItem
 	22, // 10: procurement.v1.CreatePurchaseOrderResponse.purchase_order:type_name -> procurement.v1.PurchaseOrder
-	1,  // 11: procurement.v1.Procurement.CreateVendor:input_type -> procurement.v1.CreateVendorRequest
-	2,  // 12: procurement.v1.Procurement.GetVendor:input_type -> procurement.v1.GetVendorRequest
-	3,  // 13: procurement.v1.Procurement.UpdateVendor:input_type -> procurement.v1.UpdateVendorRequest
-	4,  // 14: procurement.v1.Procurement.DeactivateVendor:input_type -> procurement.v1.DeactivateVendorRequest
-	5,  // 15: procurement.v1.Procurement.ListVendors:input_type -> procurement.v1.ListVendorsRequest
-	10, // 16: procurement.v1.Procurement.CreateRequisition:input_type -> procurement.v1.CreateRequisitionRequest
-	11, // 17: procurement.v1.Procurement.UpdateRequisition:input_type -> procurement.v1.UpdateRequisitionRequest
-	12, // 18: procurement.v1.Procurement.SubmitRequisition:input_type -> procurement.v1.SubmitRequisitionRequest
-	13, // 19: procurement.v1.Procurement.ListRequisitions:input_type -> procurement.v1.ListRequisitionsRequest
-	15, // 20: procurement.v1.Procurement.GetRequisition:input_type -> procurement.v1.GetRequisitionRequest
-	16, // 21: procurement.v1.Procurement.DecideApproval:input_type -> procurement.v1.DecideApprovalRequest
-	19, // 22: procurement.v1.Procurement.GetApprovalRules:input_type -> procurement.v1.GetApprovalRulesRequest
-	20, // 23: procurement.v1.Procurement.ReplaceApprovalRules:input_type -> procurement.v1.ReplaceApprovalRulesRequest
-	24, // 24: procurement.v1.Procurement.CreatePurchaseOrder:input_type -> procurement.v1.CreatePurchaseOrderRequest
-	26, // 25: procurement.v1.Procurement.IssuePurchaseOrder:input_type -> procurement.v1.IssuePurchaseOrderRequest
-	27, // 26: procurement.v1.Procurement.AcknowledgePurchaseOrder:input_type -> procurement.v1.AcknowledgePurchaseOrderRequest
-	28, // 27: procurement.v1.Procurement.CancelPurchaseOrder:input_type -> procurement.v1.CancelPurchaseOrderRequest
-	29, // 28: procurement.v1.Procurement.ClosePurchaseOrder:input_type -> procurement.v1.ClosePurchaseOrderRequest
-	0,  // 29: procurement.v1.Procurement.CreateVendor:output_type -> procurement.v1.Vendor
-	0,  // 30: procurement.v1.Procurement.GetVendor:output_type -> procurement.v1.Vendor
-	0,  // 31: procurement.v1.Procurement.UpdateVendor:output_type -> procurement.v1.Vendor
-	0,  // 32: procurement.v1.Procurement.DeactivateVendor:output_type -> procurement.v1.Vendor
-	6,  // 33: procurement.v1.Procurement.ListVendors:output_type -> procurement.v1.ListVendorsResponse
-	7,  // 34: procurement.v1.Procurement.CreateRequisition:output_type -> procurement.v1.Requisition
-	7,  // 35: procurement.v1.Procurement.UpdateRequisition:output_type -> procurement.v1.Requisition
-	7,  // 36: procurement.v1.Procurement.SubmitRequisition:output_type -> procurement.v1.Requisition
-	14, // 37: procurement.v1.Procurement.ListRequisitions:output_type -> procurement.v1.ListRequisitionsResponse
-	7,  // 38: procurement.v1.Procurement.GetRequisition:output_type -> procurement.v1.Requisition
-	17, // 39: procurement.v1.Procurement.DecideApproval:output_type -> procurement.v1.DecideApprovalResponse
-	21, // 40: procurement.v1.Procurement.GetApprovalRules:output_type -> procurement.v1.ApprovalRulesResponse
-	21, // 41: procurement.v1.Procurement.ReplaceApprovalRules:output_type -> procurement.v1.ApprovalRulesResponse
-	25, // 42: procurement.v1.Procurement.CreatePurchaseOrder:output_type -> procurement.v1.CreatePurchaseOrderResponse
-	22, // 43: procurement.v1.Procurement.IssuePurchaseOrder:output_type -> procurement.v1.PurchaseOrder
-	22, // 44: procurement.v1.Procurement.AcknowledgePurchaseOrder:output_type -> procurement.v1.PurchaseOrder
-	22, // 45: procurement.v1.Procurement.CancelPurchaseOrder:output_type -> procurement.v1.PurchaseOrder
-	22, // 46: procurement.v1.Procurement.ClosePurchaseOrder:output_type -> procurement.v1.PurchaseOrder
-	29, // [29:47] is the sub-list for method output_type
-	11, // [11:29] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	31, // 11: procurement.v1.GoodsReceipt.items:type_name -> procurement.v1.GoodsReceiptItem
+	31, // 12: procurement.v1.PostGoodsReceiptRequest.items:type_name -> procurement.v1.GoodsReceiptItem
+	30, // 13: procurement.v1.PostGoodsReceiptResponse.goods_receipt:type_name -> procurement.v1.GoodsReceipt
+	22, // 14: procurement.v1.PostGoodsReceiptResponse.purchase_order:type_name -> procurement.v1.PurchaseOrder
+	1,  // 15: procurement.v1.Procurement.CreateVendor:input_type -> procurement.v1.CreateVendorRequest
+	2,  // 16: procurement.v1.Procurement.GetVendor:input_type -> procurement.v1.GetVendorRequest
+	3,  // 17: procurement.v1.Procurement.UpdateVendor:input_type -> procurement.v1.UpdateVendorRequest
+	4,  // 18: procurement.v1.Procurement.DeactivateVendor:input_type -> procurement.v1.DeactivateVendorRequest
+	5,  // 19: procurement.v1.Procurement.ListVendors:input_type -> procurement.v1.ListVendorsRequest
+	10, // 20: procurement.v1.Procurement.CreateRequisition:input_type -> procurement.v1.CreateRequisitionRequest
+	11, // 21: procurement.v1.Procurement.UpdateRequisition:input_type -> procurement.v1.UpdateRequisitionRequest
+	12, // 22: procurement.v1.Procurement.SubmitRequisition:input_type -> procurement.v1.SubmitRequisitionRequest
+	13, // 23: procurement.v1.Procurement.ListRequisitions:input_type -> procurement.v1.ListRequisitionsRequest
+	15, // 24: procurement.v1.Procurement.GetRequisition:input_type -> procurement.v1.GetRequisitionRequest
+	16, // 25: procurement.v1.Procurement.DecideApproval:input_type -> procurement.v1.DecideApprovalRequest
+	19, // 26: procurement.v1.Procurement.GetApprovalRules:input_type -> procurement.v1.GetApprovalRulesRequest
+	20, // 27: procurement.v1.Procurement.ReplaceApprovalRules:input_type -> procurement.v1.ReplaceApprovalRulesRequest
+	24, // 28: procurement.v1.Procurement.CreatePurchaseOrder:input_type -> procurement.v1.CreatePurchaseOrderRequest
+	26, // 29: procurement.v1.Procurement.IssuePurchaseOrder:input_type -> procurement.v1.IssuePurchaseOrderRequest
+	27, // 30: procurement.v1.Procurement.AcknowledgePurchaseOrder:input_type -> procurement.v1.AcknowledgePurchaseOrderRequest
+	28, // 31: procurement.v1.Procurement.CancelPurchaseOrder:input_type -> procurement.v1.CancelPurchaseOrderRequest
+	29, // 32: procurement.v1.Procurement.ClosePurchaseOrder:input_type -> procurement.v1.ClosePurchaseOrderRequest
+	32, // 33: procurement.v1.Procurement.PostGoodsReceipt:input_type -> procurement.v1.PostGoodsReceiptRequest
+	0,  // 34: procurement.v1.Procurement.CreateVendor:output_type -> procurement.v1.Vendor
+	0,  // 35: procurement.v1.Procurement.GetVendor:output_type -> procurement.v1.Vendor
+	0,  // 36: procurement.v1.Procurement.UpdateVendor:output_type -> procurement.v1.Vendor
+	0,  // 37: procurement.v1.Procurement.DeactivateVendor:output_type -> procurement.v1.Vendor
+	6,  // 38: procurement.v1.Procurement.ListVendors:output_type -> procurement.v1.ListVendorsResponse
+	7,  // 39: procurement.v1.Procurement.CreateRequisition:output_type -> procurement.v1.Requisition
+	7,  // 40: procurement.v1.Procurement.UpdateRequisition:output_type -> procurement.v1.Requisition
+	7,  // 41: procurement.v1.Procurement.SubmitRequisition:output_type -> procurement.v1.Requisition
+	14, // 42: procurement.v1.Procurement.ListRequisitions:output_type -> procurement.v1.ListRequisitionsResponse
+	7,  // 43: procurement.v1.Procurement.GetRequisition:output_type -> procurement.v1.Requisition
+	17, // 44: procurement.v1.Procurement.DecideApproval:output_type -> procurement.v1.DecideApprovalResponse
+	21, // 45: procurement.v1.Procurement.GetApprovalRules:output_type -> procurement.v1.ApprovalRulesResponse
+	21, // 46: procurement.v1.Procurement.ReplaceApprovalRules:output_type -> procurement.v1.ApprovalRulesResponse
+	25, // 47: procurement.v1.Procurement.CreatePurchaseOrder:output_type -> procurement.v1.CreatePurchaseOrderResponse
+	22, // 48: procurement.v1.Procurement.IssuePurchaseOrder:output_type -> procurement.v1.PurchaseOrder
+	22, // 49: procurement.v1.Procurement.AcknowledgePurchaseOrder:output_type -> procurement.v1.PurchaseOrder
+	22, // 50: procurement.v1.Procurement.CancelPurchaseOrder:output_type -> procurement.v1.PurchaseOrder
+	22, // 51: procurement.v1.Procurement.ClosePurchaseOrder:output_type -> procurement.v1.PurchaseOrder
+	33, // 52: procurement.v1.Procurement.PostGoodsReceipt:output_type -> procurement.v1.PostGoodsReceiptResponse
+	34, // [34:53] is the sub-list for method output_type
+	15, // [15:34] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_procurement_v1_procurement_proto_init() }
@@ -2315,7 +2639,7 @@ func file_procurement_v1_procurement_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_procurement_v1_procurement_proto_rawDesc), len(file_procurement_v1_procurement_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   30,
+			NumMessages:   34,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

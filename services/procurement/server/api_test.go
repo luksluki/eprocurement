@@ -27,6 +27,7 @@ import (
 	"github.com/luksluki/eprocurement/internal/platform/rbac"
 	"github.com/luksluki/eprocurement/internal/platform/tenant"
 	"github.com/luksluki/eprocurement/services/procurement/approval"
+	"github.com/luksluki/eprocurement/services/procurement/goodsreceipt"
 	"github.com/luksluki/eprocurement/services/procurement/migrations"
 	"github.com/luksluki/eprocurement/services/procurement/purchaseorder"
 	"github.com/luksluki/eprocurement/services/procurement/requisition"
@@ -66,7 +67,7 @@ func startProcurement(t *testing.T) (procurementv1.ProcurementClient, *pgxpool.P
 	}
 
 	log := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
-	srv := New(log, db, vendor.NewStore(db), requisition.NewStore(db), approval.NewStore(db), purchaseorder.NewStore(db))
+	srv := New(log, db, vendor.NewStore(db), requisition.NewStore(db), approval.NewStore(db), purchaseorder.NewStore(db), goodsreceipt.NewStore(db))
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -328,6 +329,14 @@ func grpcCleanupRequisition(t *testing.T, db *pgxpool.Pool) {
 	_ = tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(context.Background(),
 			`DELETE FROM procurement.outbox WHERE tenant_id IN ($1, $2)`, gTenantA, gTenantB); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(context.Background(),
+			`DELETE FROM procurement.goods_receipts WHERE tenant_id IN ($1, $2)`, gTenantA, gTenantB); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(context.Background(),
+			`DELETE FROM procurement.grn_counters WHERE tenant_id IN ($1, $2)`, gTenantA, gTenantB); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(context.Background(),
@@ -1686,6 +1695,337 @@ func TestMapPurchaseOrderError(t *testing.T) {
 		"unknown error internal": {errors.New("boom"), codes.Internal, "internal error"},
 	} {
 		got := mapPurchaseOrderError(tc.err)
+		if status.Code(got) != tc.code || status.Convert(got).Message() != tc.msg {
+			t.Errorf("%s: got (%v, %q), want (%v, %q)",
+				name, status.Code(got), status.Convert(got).Message(), tc.code, tc.msg)
+		}
+	}
+}
+
+// grpcAcknowledgedPO drives the real flow to an acknowledged PO of tenant A
+// (rules → approved requisition → convert → issue → acknowledge); the
+// returned PO carries its items with ids — the receipt lines' references.
+func grpcAcknowledgedPO(t *testing.T, client procurementv1.ProcurementClient) *procurementv1.PurchaseOrder {
+	t.Helper()
+	if _, err := client.ReplaceApprovalRules(callerCtx(gTenantA, rbac.RoleAdmin),
+		&procurementv1.ReplaceApprovalRulesRequest{Rules: testRules()[:1]}); err != nil {
+		t.Fatalf("configure rules: %v", err)
+	}
+	approved := grpcApprovedRequisition(t, client)
+	vendorA, err := client.CreateVendor(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.CreateVendorRequest{Code: "G-GRN37-" + approved.GetNumber()[3:], Name: "PT GRN"})
+	if err != nil {
+		t.Fatalf("create vendor: %v", err)
+	}
+	wrapped, err := client.CreatePurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.CreatePurchaseOrderRequest{RequisitionId: approved.GetId(), VendorId: vendorA.GetId()})
+	if err != nil || !wrapped.GetCreated() {
+		t.Fatalf("convert = (%v, %v)", wrapped.GetCreated(), err)
+	}
+	po := wrapped.GetPurchaseOrder()
+	if _, err := client.IssuePurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.IssuePurchaseOrderRequest{Id: po.GetId()}); err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	ack, err := client.AcknowledgePurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.AcknowledgePurchaseOrderRequest{Id: po.GetId()})
+	if err != nil || ack.GetStatus() != "acknowledged" {
+		t.Fatalf("acknowledge = (%s, %v)", ack.GetStatus(), err)
+	}
+	for _, it := range ack.GetItems() {
+		if it.GetId() == "" {
+			t.Fatalf("acknowledged PO items carry no ids: %+v", ack.GetItems())
+		}
+	}
+	return ack
+}
+
+// grpcItemByQty picks the PO line with the given qty_ordered — po_items rows
+// share created_at, so load order is not the basket order (dev-note 035).
+func grpcItemByQty(t *testing.T, po *procurementv1.PurchaseOrder, qty int32) *procurementv1.PurchaseOrderItem {
+	t.Helper()
+	for _, it := range po.GetItems() {
+		if it.GetQtyOrdered() == qty {
+			return it
+		}
+	}
+	t.Fatalf("no PO line with qty_ordered %d in %+v", qty, po.GetItems())
+	return nil
+}
+
+// grpcCleanupGRNVendor wipes this suite's fixture vendors (code prefix
+// G-GRN37-); grpcCleanupPOVendor covers only the #35 prefix.
+func grpcCleanupGRNVendor(t *testing.T, db *pgxpool.Pool) {
+	t.Helper()
+	_ = tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		_, err := tx.Exec(context.Background(),
+			`DELETE FROM procurement.vendors WHERE tenant_id IN ($1, $2) AND code LIKE 'G-GRN37-%'`,
+			gTenantA, gTenantB)
+		return err
+	})
+}
+
+// The #37 goods receipts through the full gRPC wiring: RBAC (grn:post is
+// buyer-only), the three status branches with exactly one grn.posted outbox
+// row each (actor + trace + purchase_order entity), the pinned over-receipt
+// detail line, the machine codes of every guard, cross-tenant invisibility,
+// and the anonymous rejection.
+func TestGoodsReceiptGRPC(t *testing.T) {
+	client, db, cleanup := startProcurement(t)
+	defer cleanup()
+	grpcCleanupRequisition(t, db)
+	grpcCleanupPOVendor(t, db)
+	grpcCleanupGRNVendor(t, db)
+	t.Cleanup(func() {
+		grpcCleanupRequisition(t, db)
+		grpcCleanupPOVendor(t, db)
+		grpcCleanupGRNVendor(t, db)
+	})
+
+	po := grpcAcknowledgedPO(t, client)
+	laptop := grpcItemByQty(t, po, 2)
+	mouse := grpcItemByQty(t, po, 3)
+
+	// grn:post is buyer-only: requester, approver, finance, and viewer are
+	// denied at the service-layer re-check.
+	for _, role := range []string{rbac.RoleRequester, rbac.RoleApprover, rbac.RoleFinance, rbac.RoleViewer} {
+		_, err := client.PostGoodsReceipt(callerCtx(gTenantA, role), &procurementv1.PostGoodsReceiptRequest{
+			PoId: po.GetId(),
+			Items: []*procurementv1.GoodsReceiptItem{
+				{PoItemId: laptop.GetId(), QtyReceived: 1},
+			},
+		})
+		if status.Code(err) != codes.PermissionDenied {
+			t.Fatalf("post as %s: code = %v, want PermissionDenied", role, status.Code(err))
+		}
+	}
+
+	// Machine codes: bad id, unknown PO, empty items — before any write.
+	_, err := client.PostGoodsReceipt(callerCtx(gTenantA, rbac.RoleBuyer), &procurementv1.PostGoodsReceiptRequest{
+		PoId: "nope",
+		Items: []*procurementv1.GoodsReceiptItem{
+			{PoItemId: laptop.GetId(), QtyReceived: 1},
+		},
+	})
+	if status.Code(err) != codes.InvalidArgument || status.Convert(err).Message() != "po_id_invalid" {
+		t.Fatalf("bad po id: got (%v, %q)", status.Code(err), status.Convert(err).Message())
+	}
+	_, err = client.PostGoodsReceipt(callerCtx(gTenantA, rbac.RoleBuyer), &procurementv1.PostGoodsReceiptRequest{
+		PoId: "dddddddd-0000-0000-0000-0000000000ff",
+		Items: []*procurementv1.GoodsReceiptItem{
+			{PoItemId: laptop.GetId(), QtyReceived: 1},
+		},
+	})
+	if status.Code(err) != codes.NotFound || status.Convert(err).Message() != "po_not_found" {
+		t.Fatalf("unknown po: got (%v, %q)", status.Code(err), status.Convert(err).Message())
+	}
+	_, err = client.PostGoodsReceipt(callerCtx(gTenantA, rbac.RoleBuyer), &procurementv1.PostGoodsReceiptRequest{
+		PoId: po.GetId(),
+	})
+	if status.Code(err) != codes.InvalidArgument || status.Convert(err).Message() != "grn_items_empty" {
+		t.Fatalf("empty items: got (%v, %q)", status.Code(err), status.Convert(err).Message())
+	}
+	if got := grpcPOEventCount(t, db, po.GetId(), "grn.posted"); got != 0 {
+		t.Fatalf("grn.posted rows after rejections = %d, want 0", got)
+	}
+
+	// Over-receipt: the pinned detail line verbatim, nothing written.
+	_, err = client.PostGoodsReceipt(callerCtx(gTenantA, rbac.RoleBuyer), &procurementv1.PostGoodsReceiptRequest{
+		PoId: po.GetId(),
+		Items: []*procurementv1.GoodsReceiptItem{
+			{PoItemId: laptop.GetId(), QtyReceived: 3},
+		},
+	})
+	want := "grn_over_receipt: po_item=" + laptop.GetId() + " received=0 requested=3 ordered=2"
+	if status.Code(err) != codes.Aborted || status.Convert(err).Message() != want {
+		t.Fatalf("over receipt: got (%v, %q), want (Aborted, %q)", status.Code(err), status.Convert(err).Message(), want)
+	}
+	if got := grpcPOEventCount(t, db, po.GetId(), "grn.posted"); got != 0 {
+		t.Fatalf("grn.posted rows after over-receipt = %d, want 0", got)
+	}
+
+	// Illegal status: a draft PO cannot receive. (The conversion response
+	// carries no item ids — only the locked loads do — so read the line's id
+	// straight from the table for this fixture.)
+	approved := grpcApprovedRequisition(t, client)
+	vendorB, err := client.CreateVendor(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.CreateVendorRequest{Code: "G-GRN37-D", Name: "PT GRN Draft"})
+	if err != nil {
+		t.Fatalf("create draft vendor: %v", err)
+	}
+	draftWrapped, err := client.CreatePurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.CreatePurchaseOrderRequest{RequisitionId: approved.GetId(), VendorId: vendorB.GetId()})
+	if err != nil {
+		t.Fatalf("convert draft: %v", err)
+	}
+	var draftLaptopID string
+	if err := tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		return tx.QueryRow(context.Background(), `
+			SELECT id::text FROM procurement.po_items
+			WHERE po_id = $1 AND qty_ordered = 2`, draftWrapped.GetPurchaseOrder().GetId()).Scan(&draftLaptopID)
+	}); err != nil {
+		t.Fatalf("read draft item id: %v", err)
+	}
+	_, err = client.PostGoodsReceipt(callerCtx(gTenantA, rbac.RoleBuyer), &procurementv1.PostGoodsReceiptRequest{
+		PoId: draftWrapped.GetPurchaseOrder().GetId(),
+		Items: []*procurementv1.GoodsReceiptItem{
+			{PoItemId: draftLaptopID, QtyReceived: 1},
+		},
+	})
+	if status.Code(err) != codes.Aborted || status.Convert(err).Message() != "po_illegal_transition" {
+		t.Fatalf("draft receipt: got (%v, %q)", status.Code(err), status.Convert(err).Message())
+	}
+
+	// Happy path with a trace: first partial → partially_received, GRN
+	// number GRN-000001, one grn.posted row (actor + trace + PO entity).
+	buyer := metadata.AppendToOutgoingContext(callerCtx(gTenantA, rbac.RoleBuyer), "x-trace-id", "trace-grpc-37")
+	first, err := client.PostGoodsReceipt(buyer, &procurementv1.PostGoodsReceiptRequest{
+		PoId:  po.GetId(),
+		Notes: "dock 3",
+		Items: []*procurementv1.GoodsReceiptItem{
+			{PoItemId: laptop.GetId(), QtyReceived: 1},
+		},
+	})
+	if err != nil {
+		t.Fatalf("post 1: %v", err)
+	}
+	if grn := first.GetGoodsReceipt(); grn.GetNumber() != "GRN-000001" || grn.GetPoId() != po.GetId() ||
+		grn.GetReceivedBy() != gUser || grn.GetNotes() != "dock 3" || len(grn.GetItems()) != 1 ||
+		grn.GetItems()[0].GetPoItemId() != laptop.GetId() || grn.GetItems()[0].GetQtyReceived() != 1 {
+		t.Fatalf("grn1 = %+v", grn)
+	}
+	if after := first.GetPurchaseOrder(); after.GetStatus() != "partially_received" {
+		t.Fatalf("po after post 1 = %s, want partially_received", after.GetStatus())
+	}
+	var eventType, entity, actorID, traceID string
+	var payload []byte
+	if err := tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		return tx.QueryRow(context.Background(), `
+			SELECT event_type, entity_type, actor_id::text, trace_id, payload
+			FROM procurement.outbox WHERE entity_id = $1 AND event_type = 'grn.posted'`,
+			po.GetId()).Scan(&eventType, &entity, &actorID, &traceID, &payload)
+	}); err != nil {
+		t.Fatalf("load grn.posted row: %v", err)
+	}
+	if eventType != "grn.posted" || entity != "purchase_order" || actorID != gUser || traceID != "trace-grpc-37" {
+		t.Fatalf("grn.posted row = (%s, %s, %s, %s)", eventType, entity, actorID, traceID)
+	}
+	var posted struct {
+		GRNID      string `json:"grn_id"`
+		Number     string `json:"number"`
+		PONumber   string `json:"po_number"`
+		POStatus   string `json:"po_status"`
+		ReceivedBy string `json:"received_by"`
+		Items      []struct {
+			POItemID    string `json:"po_item_id"`
+			QtyReceived int32  `json:"qty_received"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(payload, &posted); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if posted.GRNID != first.GetGoodsReceipt().GetId() || posted.Number != "GRN-000001" ||
+		posted.PONumber != po.GetNumber() || posted.POStatus != "partially_received" ||
+		posted.ReceivedBy != gUser || len(posted.Items) != 1 ||
+		posted.Items[0].POItemID != laptop.GetId() || posted.Items[0].QtyReceived != 1 {
+		t.Fatalf("grn.posted payload = %+v", posted)
+	}
+
+	// Second partial: same status, second GRN, second outbox row.
+	second, err := client.PostGoodsReceipt(callerCtx(gTenantA, rbac.RoleBuyer), &procurementv1.PostGoodsReceiptRequest{
+		PoId: po.GetId(),
+		Items: []*procurementv1.GoodsReceiptItem{
+			{PoItemId: mouse.GetId(), QtyReceived: 2},
+		},
+	})
+	if err != nil {
+		t.Fatalf("post 2: %v", err)
+	}
+	if second.GetGoodsReceipt().GetNumber() != "GRN-000002" ||
+		second.GetPurchaseOrder().GetStatus() != "partially_received" {
+		t.Fatalf("post 2 = (%s, %s)", second.GetGoodsReceipt().GetNumber(), second.GetPurchaseOrder().GetStatus())
+	}
+	if got := grpcPOEventCount(t, db, po.GetId(), "grn.posted"); got != 2 {
+		t.Fatalf("grn.posted rows after post 2 = %d, want 2", got)
+	}
+
+	// Completion: every line full → received.
+	third, err := client.PostGoodsReceipt(callerCtx(gTenantA, rbac.RoleBuyer), &procurementv1.PostGoodsReceiptRequest{
+		PoId: po.GetId(),
+		Items: []*procurementv1.GoodsReceiptItem{
+			{PoItemId: laptop.GetId(), QtyReceived: 1},
+			{PoItemId: mouse.GetId(), QtyReceived: 1},
+		},
+	})
+	if err != nil || third.GetPurchaseOrder().GetStatus() != "received" {
+		t.Fatalf("post 3 = (%s, %v)", third.GetPurchaseOrder().GetStatus(), err)
+	}
+	for _, it := range third.GetPurchaseOrder().GetItems() {
+		if it.GetQtyReceived() != it.GetQtyOrdered() {
+			t.Fatalf("line %s received %d of %d", it.GetId(), it.GetQtyReceived(), it.GetQtyOrdered())
+		}
+	}
+
+	// A receipt against the received PO answers over-receipt (the cumulative
+	// guard fires before the edge guard), not illegal transition.
+	_, err = client.PostGoodsReceipt(callerCtx(gTenantA, rbac.RoleBuyer), &procurementv1.PostGoodsReceiptRequest{
+		PoId: po.GetId(),
+		Items: []*procurementv1.GoodsReceiptItem{
+			{PoItemId: laptop.GetId(), QtyReceived: 1},
+		},
+	})
+	wantAfter := "grn_over_receipt: po_item=" + laptop.GetId() + " received=2 requested=1 ordered=2"
+	if status.Code(err) != codes.Aborted || status.Convert(err).Message() != wantAfter {
+		t.Fatalf("receipt on received PO: got (%v, %q), want (Aborted, %q)",
+			status.Code(err), status.Convert(err).Message(), wantAfter)
+	}
+
+	// Cross-tenant: tenant B's buyer cannot even see the PO (RLS).
+	_, err = client.PostGoodsReceipt(callerCtx(gTenantB, rbac.RoleBuyer), &procurementv1.PostGoodsReceiptRequest{
+		PoId: po.GetId(),
+		Items: []*procurementv1.GoodsReceiptItem{
+			{PoItemId: laptop.GetId(), QtyReceived: 1},
+		},
+	})
+	if status.Code(err) != codes.NotFound || status.Convert(err).Message() != "po_not_found" {
+		t.Fatalf("cross-tenant: got (%v, %q)", status.Code(err), status.Convert(err).Message())
+	}
+
+	// Anonymous: Unauthenticated before any store hit.
+	if _, err := client.PostGoodsReceipt(context.Background(), &procurementv1.PostGoodsReceiptRequest{
+		PoId: po.GetId(),
+	}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("anonymous: code = %v, want Unauthenticated", status.Code(err))
+	}
+}
+
+// The #37 error mapping as a pure unit test (no database): shape codes →
+// InvalidArgument, the over-receipt detail line and the illegal-transition
+// guard → Aborted, not-found → 404 — the typed error carries its pinned
+// message verbatim while errors.Is keeps the sentinel matchable.
+func TestMapGoodsReceiptError(t *testing.T) {
+	typed := &purchaseorder.OverReceiptError{
+		POItemID: "55555555-0000-0000-0000-0000000000a1", Received: 1, Requested: 2, Ordered: 2,
+	}
+	for name, tc := range map[string]struct {
+		err  error
+		code codes.Code
+		msg  string
+	}{
+		"items empty":        {goodsreceipt.ErrItemsEmpty, codes.InvalidArgument, "grn_items_empty"},
+		"qty invalid":        {goodsreceipt.ErrQtyInvalid, codes.InvalidArgument, "grn_qty_invalid"},
+		"line duplicate":     {goodsreceipt.ErrPOItemDuplicate, codes.InvalidArgument, "grn_po_item_duplicate"},
+		"notes invalid":      {goodsreceipt.ErrNotesInvalid, codes.InvalidArgument, "grn_notes_invalid"},
+		"line unknown":       {purchaseorder.ErrReceiptItemUnknown, codes.InvalidArgument, "grn_po_item_unknown"},
+		"po id invalid":      {purchaseorder.ErrIDInvalid, codes.InvalidArgument, "po_id_invalid"},
+		"illegal transition": {purchaseorder.ErrIllegalTransition, codes.Aborted, "po_illegal_transition"},
+		"po not found":       {purchaseorder.ErrNotFound, codes.NotFound, "po_not_found"},
+		"over receipt typed": {typed, codes.Aborted,
+			"grn_over_receipt: po_item=55555555-0000-0000-0000-0000000000a1 received=1 requested=2 ordered=2"},
+		"over receipt bare": {purchaseorder.ErrOverReceipt, codes.Aborted, "grn_over_receipt"},
+		"unknown internal":  {errors.New("boom"), codes.Internal, "internal error"},
+	} {
+		got := mapGoodsReceiptError(tc.err)
 		if status.Code(got) != tc.code || status.Convert(got).Message() != tc.msg {
 			t.Errorf("%s: got (%v, %q), want (%v, %q)",
 				name, status.Code(got), status.Convert(got).Message(), tc.code, tc.msg)

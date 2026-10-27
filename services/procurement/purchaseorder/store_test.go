@@ -70,6 +70,8 @@ func cleanupPO(t *testing.T, db *pgxpool.Pool) {
 		ctx := context.Background()
 		for _, stmt := range []string{
 			`DELETE FROM procurement.outbox WHERE tenant_id IN ($1, $2)`,
+			`DELETE FROM procurement.goods_receipts WHERE tenant_id IN ($1, $2)`,
+			`DELETE FROM procurement.grn_counters WHERE tenant_id IN ($1, $2)`,
 			`DELETE FROM procurement.purchase_orders WHERE tenant_id IN ($1, $2)`,
 			`DELETE FROM procurement.po_counters WHERE tenant_id IN ($1, $2)`,
 			`DELETE FROM procurement.requisitions WHERE tenant_id IN ($1, $2) AND number LIKE 'PR-%'`,

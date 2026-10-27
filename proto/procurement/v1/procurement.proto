@@ -108,6 +108,17 @@ service Procurement {
   // PO to closed. Any other source status is po_illegal_transition; exactly
   // one po.closed outbox event commits with the transition.
   rpc ClosePurchaseOrder(ClosePurchaseOrderRequest) returns (PurchaseOrder);
+  // PostGoodsReceipt records one goods receipt against an acknowledged or
+  // partially_received PO (FR-07): each line advances the PO line's
+  // cumulative qty_received, over-receipts are rejected with the
+  // grn_over_receipt detail line, and the PO status follows the
+  // post-receipt quantities — partially_received while lines are short,
+  // received once every line reaches qty_ordered (a further partial receipt
+  // on a partially_received PO is legal and leaves the status untouched).
+  // The GRN number (GRN-%06d) is allocated per tenant inside the posting
+  // transaction — a rejected receipt burns no number. Exactly one grn.posted
+  // outbox event commits with every successful receipt.
+  rpc PostGoodsReceipt(PostGoodsReceiptRequest) returns (PostGoodsReceiptResponse);
 }
 
 message Vendor {
@@ -314,6 +325,7 @@ message PurchaseOrderItem {
   int32 qty_ordered = 2;      // > 0
   int32 qty_received = 3;     // 0 on creation; goods receipts (#37) advance it
   int64 unit_price_cents = 4; // >= 0, integer cents in the header currency
+  string id = 5;              // po_items row id; receipt lines reference it (#37)
 }
 
 message CreatePurchaseOrderRequest {
@@ -353,4 +365,40 @@ message CancelPurchaseOrderRequest {
 // received).
 message ClosePurchaseOrderRequest {
   string id = 1;
+}
+
+// GoodsReceipt is one goods-receipt note (#37): who received what, when,
+// against which PO. The number is server-generated per tenant.
+message GoodsReceipt {
+  string id = 1;
+  string tenant_id = 2;
+  string po_id = 3;            // the received-against purchase order
+  string number = 4;           // server-generated per tenant, e.g. "GRN-000042"
+  string received_by = 5;      // user id
+  string received_at = 6;      // RFC 3339
+  string notes = 7;            // free-form, <= 1000 chars, may be empty
+  repeated GoodsReceiptItem items = 8;
+  string created_at = 9;       // RFC 3339
+}
+
+// GoodsReceiptItem is one receipt line: the PO line it advances and the
+// quantity received now (> 0; partial receipts accumulate across GRNs).
+message GoodsReceiptItem {
+  string po_item_id = 1;   // must be a line of the named PO
+  int32 qty_received = 2;  // > 0
+}
+
+// PostGoodsReceiptRequest carries one receipt: the PO (must be acknowledged
+// or partially_received), the lines, and optional notes.
+message PostGoodsReceiptRequest {
+  string po_id = 1;
+  repeated GoodsReceiptItem items = 2;
+  string notes = 3;
+}
+
+// PostGoodsReceiptResponse carries the stored GRN and the PO after the
+// receipt (qty_received advanced; status partially_received or received).
+message PostGoodsReceiptResponse {
+  GoodsReceipt goods_receipt = 1;
+  PurchaseOrder purchase_order = 2;
 }
