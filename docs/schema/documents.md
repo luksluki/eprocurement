@@ -24,6 +24,12 @@ reaper → pending older than ATTACHMENT_PENDING_TTL (default 24h):
   Entity types and ids are validated to a path-safe charset before they
   become key segments; accepted owner kinds are `vendor` (#26),
   `requisition` (#33), and `invoice` (#39).
+- Export artifacts live in the **same single bucket** under
+  `exports/{tenant_id}/{yyyy-mm-dd}/purchase-orders.csv` (#49): the worker
+  writes them (Put) and documents presigns the downloads (PresignGet) —
+  one `S3_BUCKET`, no second bucket env. The `{yyyy-mm-dd}` segment is the
+  fire time's date in `EXPORT_TZ`, not raw UTC; the per-date key makes a
+  re-run overwrite idempotently.
 - Declarations are bounded: mime allowlist (pdf, png, jpeg, webp, docx,
   xlsx), `ATTACHMENT_MAX_SIZE_MB` (default 25), filename 1–255 chars with no
   path separators, checksum must be sha256 hex (lowercased on accept).
@@ -43,6 +49,8 @@ reaper → pending older than ATTACHMENT_PENDING_TTL (default 24h):
 | `ListAttachments` | per entity: `vendor:read` / `requisition:read` / `invoice:read` | by owner (entity type + id), oldest first |
 | `GetDownloadUrl` | per entity: `vendor:read` / `requisition:read` / `invoice:read` | ready attachments only, returns presigned GET |
 | `ListEvents` | `requisition:read` | interceptor map (single permission) |
+| `ListExportRuns` | `export:run` | interceptor map (#49); export run history, newest first |
+| `GetExportDownloadUrl` | `export:run` | interceptor map (#49); presigned GET for successful runs |
 
 Since #33 the attachment methods are **absent from the interceptor's
 methodPermissions map on purpose**: their permission depends on the
@@ -95,8 +103,9 @@ decision (agent 2026-10-25); PRD §15 does not list them.
   `S3_ACCESS_KEY` / `S3_SECRET_KEY` (= `MINIO_ROOT_*` locally).
 - **Reaper job**: runs inside the documents service every
   `REAPER_INTERVAL` (default 30m; `0` disables). It is a singleton there —
-  when the worker service takes over cron with Redis locks, the sweep moves
-  with it.
+  cron itself has lived in the worker since #49 (the nightly export runs
+  under a per-tenant Redis lock), but the reaper **stays in documents**
+  until an issue of its own moves it; the worker does not schedule it.
 
 ## Environment
 
@@ -274,3 +283,69 @@ recipient from the payload, and inserts one document. A duplicate-key error
 on `uniq_event_id` is a **successful replay** (`applied=false`), so a
 redelivered event never creates a second notification. There is no update
 or delete path — the collection is append-only (PRD §17).
+
+## Export run history (#49)
+
+`services/documents/export` is the run history of the worker's nightly CSV
+export (FR-10; the worker writes it, documents serves the read API — the
+#47 notifications precedent). Unlike events/audit_log this collection is
+**not** append-only: one document per tenant per scheduled slot, upserted
+on `{tenant_id, scheduled_for}` (a re-run of a date overwrites, regenerating
+`run_id`), and the missed-run flag updates the newest record in place.
+
+### Collection
+
+`export_runs` — one run record per tenant per slot:
+
+| Field | Type | Notes |
+|---|---|---|
+| `run_id` | string | uuid, regenerated on overwrite |
+| `tenant_id` | string | tenant scoping |
+| `scheduled_for` | date | the slot this run belongs to (the fire time) |
+| `status` | string | `success` \| `failed` |
+| `object_key` | string | `exports/{tenant}/{yyyy-mm-dd}/purchase-orders.csv`; empty on failure |
+| `row_count` | int | PO rows written to the CSV |
+| `missed_previous` | bool | detection found no successful run in the previous slot (boot + fire passes) |
+| `error_message` | string | failure detail (#53's error display); empty on success |
+| `started_at` / `finished_at` | date | run wall clock |
+| `updated_at` | date | projection time |
+
+### Indexes
+
+| Index | Keys | Notes |
+|---|---|---|
+| `uniq_tenant_slot` | `{tenant_id: 1, scheduled_for: 1}` | **unique** — one record per tenant per slot; the upsert key |
+| `tenant_slot` | `{tenant_id: 1, scheduled_for: -1}` | newest-first run history pages |
+
+The worker ensures them at boot, before the scheduler starts (a fresh
+database dedupes from the first run).
+
+### Run lifecycle (worker side)
+
+- **Lock-not-acquired writes no record**: the per-tenant Redis lock
+  (`lock:export:nightly:{tenant}`, SET NX PX + random token, Lua
+  compare-and-delete release) decides the owner; the loser only logs —
+  the run belongs to the winner.
+- **Failed runs are recorded**: PG/MinIO down or the job budget exceeded
+  → `status=failed` + `error_message`; failures do not touch the heartbeat
+  (`job:export:last_success:{tenant}`) — they never reset the 26 h clock.
+- **Missed-run detection** (PRD §14.8) runs at scheduler boot and at every
+  fire: heartbeat older than 26 h OR the previous slot without a successful
+  run (first-ever run exempt) → the fire's record carries
+  `missed_previous=true` / the boot pass flags the newest existing record,
+  plus a structured warning log. No catch-up: a missed slot is never
+  re-run (manual execution is #53's).
+
+### gRPC + REST API (documents.v1)
+
+| Method | Permission | Notes |
+|---|---|---|
+| `ListExportRuns` | `export:run` | interceptor map (finance/admin); newest first, limit default 20 / max 100 |
+| `GetExportDownloadUrl` | `export:run` | interceptor map; successful runs only (`412 export_not_succeeded`), returns a 15-minute presigned GET |
+
+REST (gateway): `GET /api/v1/exports/runs?limit=` and
+`GET /api/v1/exports/runs/{id}/download-url`, both behind
+`RequirePermission(export:run)`; `object_key` never crosses the wire.
+Machine codes: `export_run_id_invalid` (400), `export_run_not_found`
+(404, cross-tenant indistinguishable), `export_not_succeeded` (412).
+`POST /api/v1/exports` (manual export, PRD §15) belongs to #53.

@@ -19,11 +19,13 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Documents_CreateUpload_FullMethodName    = "/documents.v1.Documents/CreateUpload"
-	Documents_CompleteUpload_FullMethodName  = "/documents.v1.Documents/CompleteUpload"
-	Documents_ListAttachments_FullMethodName = "/documents.v1.Documents/ListAttachments"
-	Documents_GetDownloadUrl_FullMethodName  = "/documents.v1.Documents/GetDownloadUrl"
-	Documents_ListEvents_FullMethodName      = "/documents.v1.Documents/ListEvents"
+	Documents_CreateUpload_FullMethodName         = "/documents.v1.Documents/CreateUpload"
+	Documents_CompleteUpload_FullMethodName       = "/documents.v1.Documents/CompleteUpload"
+	Documents_ListAttachments_FullMethodName      = "/documents.v1.Documents/ListAttachments"
+	Documents_GetDownloadUrl_FullMethodName       = "/documents.v1.Documents/GetDownloadUrl"
+	Documents_ListEvents_FullMethodName           = "/documents.v1.Documents/ListEvents"
+	Documents_ListExportRuns_FullMethodName       = "/documents.v1.Documents/ListExportRuns"
+	Documents_GetExportDownloadUrl_FullMethodName = "/documents.v1.Documents/GetExportDownloadUrl"
 )
 
 // DocumentsClient is the client API for Documents service.
@@ -59,6 +61,16 @@ type DocumentsClient interface {
 	// last page. payload_json is the raw event payload JSON — full fidelity of
 	// the procurement outbox JSONB, no restructuring.
 	ListEvents(ctx context.Context, in *ListEventsRequest, opts ...grpc.CallOption) (*ListEventsResponse, error)
+	// ListExportRuns returns the caller tenant's nightly-export run history,
+	// newest first (scheduled_for DESC). Both export methods re-check
+	// export:run in the service-layer interceptor map (finance/admin only —
+	// the first real consumer of that permission, #49).
+	ListExportRuns(ctx context.Context, in *ListExportRunsRequest, opts ...grpc.CallOption) (*ListExportRunsResponse, error)
+	// GetExportDownloadUrl returns a presigned GET URL for one successful
+	// run's CSV object. A failed run has no object (FailedPrecondition
+	// export_not_succeeded); another tenant's run id is indistinguishable
+	// from a missing one.
+	GetExportDownloadUrl(ctx context.Context, in *GetExportDownloadUrlRequest, opts ...grpc.CallOption) (*GetExportDownloadUrlResponse, error)
 }
 
 type documentsClient struct {
@@ -119,6 +131,26 @@ func (c *documentsClient) ListEvents(ctx context.Context, in *ListEventsRequest,
 	return out, nil
 }
 
+func (c *documentsClient) ListExportRuns(ctx context.Context, in *ListExportRunsRequest, opts ...grpc.CallOption) (*ListExportRunsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListExportRunsResponse)
+	err := c.cc.Invoke(ctx, Documents_ListExportRuns_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *documentsClient) GetExportDownloadUrl(ctx context.Context, in *GetExportDownloadUrlRequest, opts ...grpc.CallOption) (*GetExportDownloadUrlResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetExportDownloadUrlResponse)
+	err := c.cc.Invoke(ctx, Documents_GetExportDownloadUrl_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DocumentsServer is the server API for Documents service.
 // All implementations must embed UnimplementedDocumentsServer
 // for forward compatibility.
@@ -152,6 +184,16 @@ type DocumentsServer interface {
 	// last page. payload_json is the raw event payload JSON — full fidelity of
 	// the procurement outbox JSONB, no restructuring.
 	ListEvents(context.Context, *ListEventsRequest) (*ListEventsResponse, error)
+	// ListExportRuns returns the caller tenant's nightly-export run history,
+	// newest first (scheduled_for DESC). Both export methods re-check
+	// export:run in the service-layer interceptor map (finance/admin only —
+	// the first real consumer of that permission, #49).
+	ListExportRuns(context.Context, *ListExportRunsRequest) (*ListExportRunsResponse, error)
+	// GetExportDownloadUrl returns a presigned GET URL for one successful
+	// run's CSV object. A failed run has no object (FailedPrecondition
+	// export_not_succeeded); another tenant's run id is indistinguishable
+	// from a missing one.
+	GetExportDownloadUrl(context.Context, *GetExportDownloadUrlRequest) (*GetExportDownloadUrlResponse, error)
 	mustEmbedUnimplementedDocumentsServer()
 }
 
@@ -176,6 +218,12 @@ func (UnimplementedDocumentsServer) GetDownloadUrl(context.Context, *GetDownload
 }
 func (UnimplementedDocumentsServer) ListEvents(context.Context, *ListEventsRequest) (*ListEventsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListEvents not implemented")
+}
+func (UnimplementedDocumentsServer) ListExportRuns(context.Context, *ListExportRunsRequest) (*ListExportRunsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListExportRuns not implemented")
+}
+func (UnimplementedDocumentsServer) GetExportDownloadUrl(context.Context, *GetExportDownloadUrlRequest) (*GetExportDownloadUrlResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetExportDownloadUrl not implemented")
 }
 func (UnimplementedDocumentsServer) mustEmbedUnimplementedDocumentsServer() {}
 func (UnimplementedDocumentsServer) testEmbeddedByValue()                   {}
@@ -288,6 +336,42 @@ func _Documents_ListEvents_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Documents_ListExportRuns_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListExportRunsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DocumentsServer).ListExportRuns(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Documents_ListExportRuns_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DocumentsServer).ListExportRuns(ctx, req.(*ListExportRunsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Documents_GetExportDownloadUrl_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetExportDownloadUrlRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DocumentsServer).GetExportDownloadUrl(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Documents_GetExportDownloadUrl_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DocumentsServer).GetExportDownloadUrl(ctx, req.(*GetExportDownloadUrlRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Documents_ServiceDesc is the grpc.ServiceDesc for Documents service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -314,6 +398,14 @@ var Documents_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListEvents",
 			Handler:    _Documents_ListEvents_Handler,
+		},
+		{
+			MethodName: "ListExportRuns",
+			Handler:    _Documents_ListExportRuns_Handler,
+		},
+		{
+			MethodName: "GetExportDownloadUrl",
+			Handler:    _Documents_GetExportDownloadUrl_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

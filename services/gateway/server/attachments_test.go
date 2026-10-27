@@ -46,6 +46,14 @@ type fakeDocumentsClient struct {
 	listEventsReq  *documentsv1.ListEventsRequest
 	listEventsResp *documentsv1.ListEventsResponse
 	listEventsErr  error
+
+	listRunsReq  *documentsv1.ListExportRunsRequest
+	listRunsResp *documentsv1.ListExportRunsResponse
+	listRunsErr  error
+
+	exportDownloadReq  *documentsv1.GetExportDownloadUrlRequest
+	exportDownloadResp *documentsv1.GetExportDownloadUrlResponse
+	exportDownloadErr  error
 }
 
 func (f *fakeDocumentsClient) CreateUpload(ctx context.Context, in *documentsv1.CreateUploadRequest, opts ...grpc.CallOption) (*documentsv1.CreateUploadResponse, error) {
@@ -86,6 +94,22 @@ func (f *fakeDocumentsClient) ListEvents(ctx context.Context, in *documentsv1.Li
 		return nil, f.listEventsErr
 	}
 	return f.listEventsResp, nil
+}
+
+func (f *fakeDocumentsClient) ListExportRuns(ctx context.Context, in *documentsv1.ListExportRunsRequest, opts ...grpc.CallOption) (*documentsv1.ListExportRunsResponse, error) {
+	f.lastCtx, f.listRunsReq = ctx, in
+	if f.listRunsErr != nil {
+		return nil, f.listRunsErr
+	}
+	return f.listRunsResp, nil
+}
+
+func (f *fakeDocumentsClient) GetExportDownloadUrl(ctx context.Context, in *documentsv1.GetExportDownloadUrlRequest, opts ...grpc.CallOption) (*documentsv1.GetExportDownloadUrlResponse, error) {
+	f.lastCtx, f.exportDownloadReq = ctx, in
+	if f.exportDownloadErr != nil {
+		return nil, f.exportDownloadErr
+	}
+	return f.exportDownloadResp, nil
 }
 
 // attachmentTestApp wires vendor + attachment routes against fakes and

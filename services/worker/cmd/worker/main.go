@@ -1,17 +1,23 @@
 // Command worker runs the background jobs in ONE binary under ONE signal
-// context (the #45 + #47 composition, dev-note 047):
+// context (the #45 + #47 + #49 composition, dev-note 047):
 //
 //   - the transactional outbox publisher (#45): poll procurement.outbox,
 //     publish the §14.5 envelopes to RabbitMQ, mark published_at;
 //   - the Mongo projection consumers (#47): consume documents.history and
-//     notifications idempotently (unique event_id dedupe).
+//     notifications idempotently (unique event_id dedupe);
+//   - the nightly export scheduler (#49): fire EXPORT_SCHEDULE in EXPORT_TZ,
+//     per tenant take the Redis lock, write the PO register CSV to MinIO,
+//     keep the run history in Mongo export_runs, detect missed runs.
 //
-// SIGINT/SIGTERM stops both halves gracefully (each Run returns nil); a
-// fatal error in either cancels the sibling and fails the process. Boot
-// connects to RabbitMQ and MongoDB with backoff — a not-yet-ready
-// dependency never crash-loops the process (PRD §14.8 "worker down") — and
-// ensures the projection indexes BEFORE consumption starts, so a fresh
-// database dedupes from the first delivery.
+// SIGINT/SIGTERM stops all halves gracefully (each Run returns nil); a
+// fatal error in any cancels the siblings and fails the process. Boot
+// connects to RabbitMQ, MongoDB, Redis, and MinIO with backoff — a
+// not-yet-ready dependency never crash-loops the process (PRD §14.8
+// "worker down") — and ensures the projection + run-history indexes BEFORE
+// consumption starts, so a fresh database dedupes from the first delivery.
+// The export scheduler itself is constructed fail-fast: an invalid
+// schedule/zone or a lock TTL that does not exceed the job budget stops
+// boot rather than silently overlapping (#49).
 //
 // The worker deliberately runs no database migrations: procurement is the
 // only migration applier (single-writer, no advisory-lock races — dev-note
@@ -30,14 +36,18 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/luksluki/eprocurement/internal/platform/logger"
+	exportstore "github.com/luksluki/eprocurement/services/documents/export"
 	"github.com/luksluki/eprocurement/services/documents/history"
 	"github.com/luksluki/eprocurement/services/documents/notifications"
+	"github.com/luksluki/eprocurement/services/documents/objectstore"
 	"github.com/luksluki/eprocurement/services/worker/config"
 	"github.com/luksluki/eprocurement/services/worker/consumer"
+	"github.com/luksluki/eprocurement/services/worker/export"
 	"github.com/luksluki/eprocurement/services/worker/publisher"
 	"github.com/luksluki/eprocurement/services/worker/topology"
 )
@@ -105,41 +115,86 @@ func run() error {
 		return err
 	}
 
+	// Export half (#49): Redis (lock + heartbeat), MinIO (the single
+	// S3_BUCKET documents presigns from), the run-history indexes, then
+	// the scheduler — constructed fail-fast on a bad schedule/zone or a
+	// TTL that does not exceed the job budget.
+	rdb, err := connectRedis(ctx, cfg.RedisURL, log)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil // shutdown during boot: not an error
+		}
+		return err
+	}
+	defer rdb.Close()
+	objects, err := objectstore.New(cfg.S3Endpoint, "", cfg.S3AccessKey,
+		cfg.S3SecretKey, cfg.S3Bucket, cfg.S3UseSSL)
+	if err != nil {
+		return fmt.Errorf("connect object store: %w", err)
+	}
+	if err := objects.EnsureBucket(ctx); err != nil {
+		return fmt.Errorf("ensure bucket %s: %w", cfg.S3Bucket, err)
+	}
+	runsStore := exportstore.NewStore(mdb)
+	if err := runsStore.EnsureIndexes(ctx); err != nil {
+		return fmt.Errorf("ensure export runs indexes: %w", err)
+	}
+	scheduler, err := export.NewScheduler(export.SchedulerConfig{
+		Schedule: cfg.ExportSchedule,
+		Timezone: cfg.ExportTZ,
+		LockTTL:  cfg.ExportLockTTL,
+		Budget:   cfg.ExportJobBudget,
+	}, db, objects, export.NewRedisKV(rdb), runsStore, log)
+	if err != nil {
+		return err
+	}
+
 	log.Info("starting worker",
 		"poll_interval", cfg.PollInterval.String(), "batch_size", cfg.BatchSize,
-		"queues", []string{topology.DocumentsHistoryQueue, topology.NotificationsQueue})
-	return runBoth(ctx, log, loop, runner)
+		"queues", []string{topology.DocumentsHistoryQueue, topology.NotificationsQueue},
+		"export_schedule", cfg.ExportSchedule, "export_tz", cfg.ExportTZ)
+	return runAll(ctx, log,
+		component{"publisher", loop.Run},
+		component{"consumers", runner.Run},
+		component{"exports", scheduler.Run},
+	)
 }
 
-// runBoth runs the publisher loop and the consumer runner concurrently
-// under one derived context. Both Run methods return nil when the context
-// is cancelled (SIGINT/SIGTERM): each settles its in-flight work and stops.
-// A non-nil error from either half is fatal for the process: it cancels the
-// sibling (so the OTHER half stops too instead of running on alone) and is
-// returned after both have exited.
-func runBoth(ctx context.Context, log *slog.Logger, loop *publisher.Loop, runner *consumer.Runner) error {
+// component is one named long-running half of the worker.
+type component struct {
+	name string
+	run  func(context.Context) error
+}
+
+// runAll runs every component concurrently under one derived context. Each
+// Run returns nil when the context is cancelled (SIGINT/SIGTERM): each
+// settles its in-flight work and stops. A non-nil error from any component
+// is fatal for the process: it cancels the siblings (so the others stop
+// too instead of running on alone) and is returned after all have exited.
+func runAll(ctx context.Context, log *slog.Logger, components ...component) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	type component struct {
+	type outcome struct {
 		name string
 		err  error
 	}
-	results := make(chan component, 2)
-	go func() { results <- component{"publisher", loop.Run(runCtx)} }()
-	go func() { results <- component{"consumers", runner.Run(runCtx)} }()
+	results := make(chan outcome, len(components))
+	for _, c := range components {
+		go func(c component) { results <- outcome{c.name, c.run(runCtx)} }(c)
+	}
 
 	var firstErr error
-	for i := 0; i < 2; i++ {
-		c := <-results
-		if c.err == nil {
-			log.Info("worker component stopped", "component", c.name)
+	for range components {
+		o := <-results
+		if o.err == nil {
+			log.Info("worker component stopped", "component", o.name)
 			continue
 		}
-		log.Error("worker component failed", "component", c.name, "error", c.err)
+		log.Error("worker component failed", "component", o.name, "error", o.err)
 		if firstErr == nil {
-			firstErr = fmt.Errorf("%s: %w", c.name, c.err)
-			cancel() // stop the sibling half as well
+			firstErr = fmt.Errorf("%s: %w", o.name, o.err)
+			cancel() // stop the sibling components as well
 		}
 	}
 	return firstErr
@@ -192,6 +247,36 @@ func connectMongo(ctx context.Context, uri string, log *slog.Logger) (*mongo.Cli
 		select {
 		case <-ctx.Done():
 			_ = client.Disconnect(context.Background())
+			return nil, ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, 10*time.Second)
+	}
+}
+
+// connectRedis dials and pings Redis with exponential backoff (1 s → 10 s
+// cap) until the server answers or ctx ends (#49: the export lock and
+// heartbeat live there).
+func connectRedis(ctx context.Context, url string, log *slog.Logger) (*redis.Client, error) {
+	opts, err := redis.ParseURL(url)
+	if err != nil {
+		return nil, fmt.Errorf("parse redis url: %w", err)
+	}
+	client := redis.NewClient(opts)
+	backoff := time.Second
+	for {
+		pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err := client.Ping(pingCtx).Err()
+		cancel()
+		if err == nil {
+			return client, nil
+		}
+		if ctx.Err() == nil {
+			log.Warn("redis not ready; retrying", "error", err, "backoff", backoff.String())
+		}
+		select {
+		case <-ctx.Done():
+			_ = client.Close()
 			return nil, ctx.Err()
 		case <-time.After(backoff):
 		}
