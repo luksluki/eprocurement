@@ -9,6 +9,7 @@
 // attachments. Attachments upload declare → presigned PUT (direct to MinIO)
 // → complete; machine error codes map to per-step messages.
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useFieldArray, useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -301,18 +302,18 @@ export default function RequisitionWizard({ copy }: { copy: WizardCopy }) {
         <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700" role="alert" data-testid="restore-error">
           <p>{restore.message}</p>
           {restore.code ? <p className="mt-1 font-mono text-xs">{restore.code}</p> : null}
-          <a className="mt-2 inline-block underline" href="/app/requisitions/new">
+          <Link className="mt-2 inline-block underline" href="/app/requisitions/new">
             Start a new requisition
-          </a>
+          </Link>
         </div>
       ) : submittedNumber ? (
         <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800" data-testid="submitted">
           <p>
             {copy.submitted.heading} <span className="font-mono">{submittedNumber}</span>
           </p>
-          <a className="mt-2 inline-block underline" href="/app/requisitions">
+          <Link className="mt-2 inline-block underline" href="/app/requisitions">
             {copy.submitted.backToList}
-          </a>
+          </Link>
         </div>
       ) : (
         <form onSubmit={onSubmit} noValidate>

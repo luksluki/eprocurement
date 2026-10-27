@@ -269,11 +269,27 @@ export type AttachmentMeta = {
   uploaded_at: string;
 };
 
+// ApprovalStep is one row of the requisition detail's approval_steps (the
+// gateway's requisitionJSON shape): the sequential workflow with thresholds
+// (issue #30). decided_by/decided_at/reason are empty until a decision lands.
+export type ApprovalStep = {
+  id: string;
+  requisition_id: string;
+  step_no: number;
+  role_required: string;
+  threshold_cents: number;
+  status: string;
+  decided_by: string;
+  decided_at: string;
+  reason: string;
+};
+
 // RequisitionDetail is the GET /api/v1/requisitions/:id shape: the full
-// aggregate (typed items, unlike the list rows' unknown[]) plus the embedded
-// attachment metadata.
-export type RequisitionDetail = Omit<RequisitionHeader, "items"> & {
+// aggregate (typed items and approval steps, unlike the list rows' unknown[])
+// plus the embedded attachment metadata.
+export type RequisitionDetail = Omit<RequisitionHeader, "items" | "approval_steps"> & {
   items: RequisitionItemWire[];
+  approval_steps: ApprovalStep[];
   attachments?: AttachmentMeta[];
 };
 
@@ -322,6 +338,26 @@ export function submitRequisition(
 ): Promise<GatewayResult<RequisitionDetail>> {
   return callGateway(accessToken, `/api/v1/requisitions/${encodeURIComponent(id)}/submit`, {
     method: "POST",
+    idempotencyKey,
+  });
+}
+
+// decideApprovalStep posts an approve/reject decision for one approval step
+// (PRD §15, issue #31). decision ∈ {approve, reject}; a reject requires a
+// non-blank reason ≤ 1000 chars — both re-validated at the edge
+// (services/gateway/server/approvals.go). The optional idempotency key names
+// the decision; a replay on the same step returns the requisition's current
+// state. The response is the updated requisition aggregate.
+export function decideApprovalStep(
+  accessToken: string,
+  stepId: string,
+  decision: "approve" | "reject",
+  reason: string,
+  idempotencyKey?: string,
+): Promise<GatewayResult<RequisitionDetail>> {
+  return callGateway(accessToken, `/api/v1/approvals/${encodeURIComponent(stepId)}/decide`, {
+    method: "POST",
+    body: { decision, reason },
     idempotencyKey,
   });
 }

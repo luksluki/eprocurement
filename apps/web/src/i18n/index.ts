@@ -133,6 +133,67 @@ export type Dictionary = {
     restore: { loading: string; notFound: string; error: string; notDraft: string };
     submitted: { heading: string; backToList: string };
   };
+  timeline: {
+    title: string;
+    empty: string;
+    loading: string;
+    sessionExpired: string;
+    error: string;
+    retry: string;
+    loadMore: string;
+    loadingMore: string;
+    filterLabel: string;
+    filterAll: string;
+  };
+  requisitionDetail: {
+    backToList: string;
+    print: string;
+    notFound: string;
+    loadFailed: string;
+    fields: {
+      requester: string;
+      currency: string;
+      total: string;
+      submitted: string;
+      created: string;
+    };
+    items: {
+      heading: string;
+      description: string;
+      category: string;
+      qty: string;
+      unitPrice: string;
+      lineTotal: string;
+      empty: string;
+    };
+    steps: {
+      heading: string;
+      step: string;
+      roleRequired: string;
+      threshold: string;
+      status: string;
+      decidedBy: string;
+      decidedAt: string;
+      reason: string;
+      empty: string;
+    };
+    attachments: {
+      heading: string;
+      empty: string;
+    };
+    actions: {
+      approve: string;
+      reject: string;
+      reasonLabel: string;
+      reasonPlaceholder: string;
+      reasonRequired: string;
+      reasonTooLong: string;
+      submitting: string;
+      genericError: string;
+      sessionExpired: string;
+      errorMessages: Record<string, string>;
+    };
+  };
   pages: {
     requisitions: PageCopy;
     approvals: PageCopy;
@@ -268,6 +329,78 @@ const id: Dictionary = {
         "Permintaan ini sudah bukan draf (mungkin sudah dikirim dari tab lain) — formulir bersifat baca-saja dan autosave dihentikan.",
     },
     submitted: { heading: "Permintaan terkirim:", backToList: "Kembali ke daftar permintaan" },
+  },
+  timeline: {
+    title: "Linimasa",
+    empty: "Belum ada peristiwa.",
+    loading: "Memuat linimasa…",
+    sessionExpired: "Sesi berakhir — mengalihkan ke halaman masuk…",
+    error: "Gagal memuat peristiwa — gateway mungkin tidak terjangkau.",
+    retry: "Coba lagi",
+    loadMore: "Muat lebih banyak",
+    loadingMore: "Memuat…",
+    filterLabel: "Jenis peristiwa",
+    filterAll: "Semua jenis",
+  },
+  requisitionDetail: {
+    backToList: "Kembali ke daftar permintaan",
+    print: "Cetak",
+    notFound: "Permintaan tidak ditemukan (atau milik tenant lain).",
+    loadFailed: "Gagal memuat permintaan.",
+    fields: {
+      requester: "Pemohon",
+      currency: "Mata uang",
+      total: "Total",
+      submitted: "Dikirim",
+      created: "Dibuat",
+    },
+    items: {
+      heading: "Item",
+      description: "Deskripsi",
+      category: "Kategori",
+      qty: "Jumlah",
+      unitPrice: "Harga satuan",
+      lineTotal: "Total baris",
+      empty: "Tidak ada item.",
+    },
+    steps: {
+      heading: "Langkah persetujuan",
+      step: "Langkah",
+      roleRequired: "Peran wajib",
+      threshold: "Ambang batas",
+      status: "Status",
+      decidedBy: "Diputuskan oleh",
+      decidedAt: "Diputuskan pada",
+      reason: "Alasan",
+      empty: "Belum ada langkah persetujuan (terbentuk saat dikirim).",
+    },
+    attachments: {
+      heading: "Lampiran",
+      empty: "Tidak ada lampiran.",
+    },
+    actions: {
+      approve: "Setujui",
+      reject: "Tolak",
+      reasonLabel: "Alasan (wajib untuk menolak)",
+      reasonPlaceholder: "Alasan keputusan…",
+      reasonRequired: "Penolakan memerlukan alasan.",
+      reasonTooLong: "Alasan maksimal 1000 karakter.",
+      submitting: "Memutuskan…",
+      genericError: "Gagal memutuskan — coba lagi.",
+      sessionExpired: "Sesi berakhir — mengalihkan ke halaman masuk…",
+      errorMessages: {
+        approval_step_not_current: "Langkah ini sudah bukan langkah berjalan (mungkin sudah diputus orang lain).",
+        approval_step_not_found: "Langkah persetujuan tidak ditemukan.",
+        approval_self_forbidden: "Anda tidak dapat menyetujui permintaan sendiri.",
+        approval_role_forbidden: "Langkah ini memerlukan peran yang tidak Anda pegang.",
+        approval_decision_invalid: "Keputusan harus setujui atau tolak.",
+        approval_reason_required: "Penolakan memerlukan alasan.",
+        approval_reason_invalid: "Alasan maksimal 1000 karakter.",
+        approval_idempotency_key_invalid: "Kunci idempotensi tidak valid.",
+        approval_idempotency_key_conflict: "Kunci idempotensi sudah dipakai untuk langkah lain.",
+        gateway_unavailable: "Gateway tidak terjangkau.",
+      },
+    },
   },
   pages: {
     requisitions: {
@@ -434,6 +567,78 @@ const en: Dictionary = {
         "This requisition is no longer a draft (it may have been submitted from another tab) — the form is read-only and autosave stopped.",
     },
     submitted: { heading: "Requisition submitted:", backToList: "Back to the requisition list" },
+  },
+  timeline: {
+    title: "Timeline",
+    empty: "No events yet.",
+    loading: "Loading timeline…",
+    sessionExpired: "Session expired — redirecting to sign-in…",
+    error: "Failed to load events — the gateway may be unreachable.",
+    retry: "Retry",
+    loadMore: "Load more",
+    loadingMore: "Loading…",
+    filterLabel: "Event type",
+    filterAll: "All types",
+  },
+  requisitionDetail: {
+    backToList: "Back to the requisition list",
+    print: "Print",
+    notFound: "Requisition not found (or it belongs to another tenant).",
+    loadFailed: "Failed to load the requisition.",
+    fields: {
+      requester: "Requester",
+      currency: "Currency",
+      total: "Total",
+      submitted: "Submitted",
+      created: "Created",
+    },
+    items: {
+      heading: "Items",
+      description: "Description",
+      category: "Category",
+      qty: "Qty",
+      unitPrice: "Unit price",
+      lineTotal: "Line total",
+      empty: "No items.",
+    },
+    steps: {
+      heading: "Approval steps",
+      step: "Step",
+      roleRequired: "Role required",
+      threshold: "Threshold",
+      status: "Status",
+      decidedBy: "Decided by",
+      decidedAt: "Decided at",
+      reason: "Reason",
+      empty: "No approval steps yet (they are created on submit).",
+    },
+    attachments: {
+      heading: "Attachments",
+      empty: "No attachments.",
+    },
+    actions: {
+      approve: "Approve",
+      reject: "Reject",
+      reasonLabel: "Reason (required to reject)",
+      reasonPlaceholder: "Reason for the decision…",
+      reasonRequired: "A reject requires a reason.",
+      reasonTooLong: "Reason must be at most 1000 characters.",
+      submitting: "Deciding…",
+      genericError: "Failed to decide — try again.",
+      sessionExpired: "Session expired — redirecting to sign-in…",
+      errorMessages: {
+        approval_step_not_current: "This step is no longer the current pending step (someone may have decided it).",
+        approval_step_not_found: "Approval step not found.",
+        approval_self_forbidden: "You cannot decide your own requisition.",
+        approval_role_forbidden: "This step requires a role you do not hold.",
+        approval_decision_invalid: "Decision must be approve or reject.",
+        approval_reason_required: "A reject requires a reason.",
+        approval_reason_invalid: "Reason must be at most 1000 characters.",
+        approval_idempotency_key_invalid: "Invalid idempotency key.",
+        approval_idempotency_key_conflict: "The idempotency key was already used for another step.",
+        gateway_unavailable: "The gateway is unreachable.",
+      },
+    },
   },
   pages: {
     requisitions: {

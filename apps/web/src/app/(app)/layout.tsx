@@ -40,7 +40,9 @@ export default async function AppShellLayout({ children }: { children: ReactNode
 
   return (
     <div className="flex min-h-screen">
-      <aside className="hidden w-60 shrink-0 flex-col border-r border-slate-200 bg-white md:flex">
+      {/* print:hidden — the printed page is the document itself (issue #34's
+          print-friendly requisition detail), not the app chrome. */}
+      <aside className="hidden w-60 shrink-0 flex-col border-r border-slate-200 bg-white print:hidden md:flex">
         <div className="flex items-center gap-2 border-b border-slate-200 px-4 py-4">
           <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-900 text-sm font-bold text-white">
             {dict.brand.initials}
@@ -50,7 +52,7 @@ export default async function AppShellLayout({ children }: { children: ReactNode
         <SidebarNav isAdmin={isAdmin} mainNav={mainNav} adminNav={adminNav} labels={{ ariaLabel: dict.nav.ariaLabel, admin: dict.nav.admin }} />
       </aside>
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex items-center justify-between gap-4 border-b border-slate-200 bg-white px-6 py-3">
+        <header className="flex items-center justify-between gap-4 border-b border-slate-200 bg-white px-6 py-3 print:hidden">
           <div className="min-w-0">
             <p className="truncate text-sm font-medium">
               {dict.header.tenantLabel} {claims.tenantId}
