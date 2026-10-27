@@ -16,15 +16,17 @@ import (
 	"github.com/luksluki/eprocurement/internal/platform/rbac"
 	"github.com/luksluki/eprocurement/services/procurement/approval"
 	"github.com/luksluki/eprocurement/services/procurement/goodsreceipt"
+	"github.com/luksluki/eprocurement/services/procurement/invoice"
 	"github.com/luksluki/eprocurement/services/procurement/purchaseorder"
 	"github.com/luksluki/eprocurement/services/procurement/requisition"
 	"github.com/luksluki/eprocurement/services/procurement/vendor"
 )
 
-// api adapts the vendor, requisition, approval, purchase-order, and
-// goods-receipt domains to the procurement.v1 gRPC contract. Every method
-// reads the caller identity the gateway propagated (tenant scoping, audit
-// ids); the RBAC interceptor has already re-checked the permission.
+// api adapts the vendor, requisition, approval, purchase-order,
+// goods-receipt, and invoice domains to the procurement.v1 gRPC contract.
+// Every method reads the caller identity the gateway propagated (tenant
+// scoping, audit ids); the RBAC interceptor has already re-checked the
+// permission.
 type api struct {
 	procurementv1.UnimplementedProcurementServer
 	store          *vendor.Store
@@ -32,6 +34,7 @@ type api struct {
 	approvals      *approval.Store
 	purchaseOrders *purchaseorder.Store
 	goodsReceipts  *goodsreceipt.Store
+	invoices       *invoice.Store
 	log            *slog.Logger
 }
 
@@ -702,6 +705,103 @@ func (a *api) PostGoodsReceipt(ctx context.Context, req *procurementv1.PostGoods
 		GoodsReceipt:  goodsReceiptPB(grn),
 		PurchaseOrder: purchaseOrderPB(po),
 	}, nil
+}
+
+// mapInvoiceError maps invoice domain and store errors to gRPC codes. Same
+// contract as the other mappers — sentinels carry their machine code
+// verbatim in the gRPC message — except the over-billing answer: the typed
+// *invoice.OverBillError carries the pinned detail line
+// ("inv_over_bill: po_number=… invoiced=… requested=… total=…") as the
+// message, which the gateway's dedicated renderer splits on the first
+// colon. Shape codes → InvalidArgument, duplicate number → AlreadyExists,
+// illegal PO status → Aborted (409), not-found → 404 (also the
+// cross-tenant answer, via RLS).
+func mapInvoiceError(err error) error {
+	var over *invoice.OverBillError
+	switch {
+	case errors.As(err, &over):
+		return status.Error(codes.Aborted, over.Error())
+	case errors.Is(err, invoice.ErrOverBill):
+		return status.Error(codes.Aborted, err.Error())
+	case errors.Is(err, invoice.ErrNumberInvalid),
+		errors.Is(err, invoice.ErrItemsEmpty),
+		errors.Is(err, invoice.ErrQtyInvalid),
+		errors.Is(err, invoice.ErrUnitPriceInvalid),
+		errors.Is(err, invoice.ErrPOItemDuplicate),
+		errors.Is(err, invoice.ErrPOItemUnknown),
+		errors.Is(err, invoice.ErrIDInvalid),
+		errors.Is(err, purchaseorder.ErrIDInvalid):
+		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, invoice.ErrNumberDuplicate):
+		return status.Error(codes.AlreadyExists, err.Error())
+	case errors.Is(err, purchaseorder.ErrIllegalTransition):
+		return status.Error(codes.Aborted, err.Error())
+	case errors.Is(err, invoice.ErrNotFound),
+		errors.Is(err, purchaseorder.ErrNotFound):
+		return status.Error(codes.NotFound, err.Error())
+	default:
+		return status.Error(codes.Internal, "internal error")
+	}
+}
+
+// invoicePB renders the invoice aggregate for the wire.
+func invoicePB(inv invoice.Invoice) *procurementv1.Invoice {
+	items := make([]*procurementv1.InvoiceItem, 0, len(inv.Items))
+	for _, it := range inv.Items {
+		items = append(items, &procurementv1.InvoiceItem{
+			PoItemId: it.POItemID, Qty: it.Qty, UnitPriceCents: it.UnitPriceCents,
+		})
+	}
+	return &procurementv1.Invoice{
+		Id: inv.ID, TenantId: inv.TenantID, PoId: inv.POID,
+		VendorId: inv.VendorID, Number: inv.Number, Currency: inv.Currency,
+		TotalCents: inv.TotalCents, Status: inv.Status,
+		MatchResultJson: inv.MatchResult, Items: items,
+		CreatedBy: inv.CreatedBy, CreatedAt: invoice.RFC3339(inv.CreatedAt),
+	}
+}
+
+// CreateInvoice records one vendor invoice against an acknowledged,
+// partially_received, or received PO of the caller's tenant (invoice:write
+// — finance/admin at both layers; #39). vendor_id and currency come from
+// the locked PO, the total is recomputed server-side, and the cumulative
+// over-billing guard runs under the PO row lock; every guard failure rolls
+// the whole creation transaction back. The PO is never mutated and no
+// outbox event is written.
+func (a *api) CreateInvoice(ctx context.Context, req *procurementv1.CreateInvoiceRequest) (*procurementv1.Invoice, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]invoice.Item, 0, len(req.GetItems()))
+	for _, it := range req.GetItems() {
+		items = append(items, invoice.Item{
+			POItemID: strings.TrimSpace(it.GetPoItemId()),
+			Qty:      it.GetQty(), UnitPriceCents: it.GetUnitPriceCents(),
+		})
+	}
+	inv, err := a.invoices.Create(ctx, auth.TenantID, invoice.CreateInput{
+		POID: strings.TrimSpace(req.GetPoId()), Number: req.GetNumber(),
+		Items: items, Actor: auth.UserID,
+	})
+	if err != nil {
+		return nil, mapInvoiceError(err)
+	}
+	return invoicePB(inv), nil
+}
+
+// GetInvoice serves the detail read (invoice:read, tenant-wide): header plus
+// lines. Other tenants' invoices are indistinguishable from missing ones.
+func (a *api) GetInvoice(ctx context.Context, req *procurementv1.GetInvoiceRequest) (*procurementv1.Invoice, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	inv, err := a.invoices.Get(ctx, auth.TenantID, strings.TrimSpace(req.GetId()))
+	if err != nil {
+		return nil, mapInvoiceError(err)
+	}
+	return invoicePB(inv), nil
 }
 
 func vendorPB(v vendor.Vendor) *procurementv1.Vendor {

@@ -31,6 +31,7 @@ type DocumentsClient interface {
 const (
 	entityVendor      = "vendor"
 	entityRequisition = "requisition"
+	entityInvoice     = "invoice"
 )
 
 // registerAttachmentRoutes wires /api/v1/vendors/:id/attachments under the
@@ -54,6 +55,18 @@ func registerRequisitionAttachmentRoutes(reqs fiber.Router, verifier *token.Veri
 	reqs.Post("/:id/attachments", RequirePermission(rbac.RequisitionWrite), createRequisitionAttachment(requisitions, documents))
 	reqs.Post("/:id/attachments/:attachmentId/complete", RequirePermission(rbac.RequisitionWrite), completeAttachment(documents))
 	reqs.Get("/:id/attachments/:attachmentId/download", RequirePermission(rbac.RequisitionRead), downloadAttachment(documents))
+}
+
+// registerInvoiceAttachmentRoutes wires the invoice attachment routes
+// (#39): declare/complete/download under /api/v1/invoices/:id/attachments.
+// Declare checks the invoice exists in procurement first (the vendor
+// pattern); complete/download only bind the attachment to the path's
+// invoice id. Permissions are the invoice area's (finance/admin write,
+// everyone read) — no ownership rule, invoices belong to the tenant.
+func registerInvoiceAttachmentRoutes(invoices fiber.Router, verifier *token.Verifier, procurement ProcurementClient, documents DocumentsClient) {
+	invoices.Post("/:id/attachments", RequirePermission(rbac.InvoiceWrite), createInvoiceAttachment(procurement, documents))
+	invoices.Post("/:id/attachments/:attachmentId/complete", RequirePermission(rbac.InvoiceWrite), completeAttachment(documents))
+	invoices.Get("/:id/attachments/:attachmentId/download", RequirePermission(rbac.InvoiceRead), downloadAttachment(documents))
 }
 
 type attachmentBody struct {
@@ -130,6 +143,49 @@ func createRequisitionAttachment(requisitions ProcurementClient, documents Docum
 		resp, err := documents.CreateUpload(forwardContext(c, claims), &documentsv1.CreateUploadRequest{
 			EntityType:     entityRequisition,
 			EntityId:       r.GetId(),
+			Filename:       strings.TrimSpace(body.Filename),
+			MimeType:       body.MimeType,
+			SizeBytes:      body.SizeBytes,
+			ChecksumSha256: body.ChecksumSHA256,
+		})
+		if err != nil {
+			return attachmentError(c, err)
+		}
+		out := attachmentJSON(resp.GetAttachment())
+		out["upload"] = fiber.Map{
+			"url":        resp.GetUploadUrl(),
+			"method":     resp.GetMethod(),
+			"expires_at": resp.GetExpiresAt(),
+			"headers":    fiber.Map{"Content-Type": resp.GetAttachment().GetMimeType()},
+		}
+		return c.Status(fiber.StatusCreated).JSON(out)
+	}
+}
+
+// createInvoiceAttachment serves POST /api/v1/invoices/:id/attachments
+// (#39): the vendor pattern — the invoice must exist in procurement (a
+// cross-tenant or unknown id answers its 404/400 before any documents
+// call), then the declaration goes to documents. The create API never
+// requires an attachment (the demo flow does, #41/#40 — maintainer decision
+// 2026-10-27); declaring one is this separate step because the architecture
+// has no cross-service atomicity.
+func createInvoiceAttachment(procurement ProcurementClient, documents DocumentsClient) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		claims, ok := claimsOf(c)
+		if !ok {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "missing bearer token"})
+		}
+		var body attachmentBody
+		if err := c.BodyParser(&body); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid JSON body", "code": "body_invalid"})
+		}
+		if _, err := procurement.GetInvoice(forwardContext(c, claims),
+			&procurementv1.GetInvoiceRequest{Id: c.Params("id")}); err != nil {
+			return invoiceError(c, err)
+		}
+		resp, err := documents.CreateUpload(forwardContext(c, claims), &documentsv1.CreateUploadRequest{
+			EntityType:     entityInvoice,
+			EntityId:       c.Params("id"),
 			Filename:       strings.TrimSpace(body.Filename),
 			MimeType:       body.MimeType,
 			SizeBytes:      body.SizeBytes,

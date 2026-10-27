@@ -25,7 +25,7 @@ const presignTTL = 15 * time.Minute
 
 // entityPermissions maps an attachment owner kind to the permissions its
 // attachments require (#33: vendors and requisitions live under different
-// areas of the rbac matrix). The attachment gRPC methods are absent from the
+// areas of the rbac matrix; #39 adds invoices). The attachment gRPC methods are absent from the
 // interceptor's methodPermissions map on purpose — the interceptor cannot
 // know the entity type before the call runs — so each handler re-checks the
 // per-entity permission here, as soon as the entity type is known (for
@@ -37,6 +37,7 @@ type entityPerm struct{ read, write string }
 var entityPermissions = map[string]entityPerm{
 	attachment.EntityTypeVendor:      {rbac.VendorRead, rbac.VendorWrite},
 	attachment.EntityTypeRequisition: {rbac.RequisitionRead, rbac.RequisitionWrite},
+	attachment.EntityTypeInvoice:     {rbac.InvoiceRead, rbac.InvoiceWrite},
 }
 
 // requireEntityWrite enforces the entity's write permission (declare,

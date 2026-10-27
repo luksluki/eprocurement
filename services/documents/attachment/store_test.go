@@ -97,7 +97,7 @@ func TestStoreList(t *testing.T) {
 	}
 
 	// Unknown entity kind is rejected before any query.
-	if _, err := store.List(t.Context(), "t-a", "invoice", "v-9"); err != ErrEntityInvalid {
+	if _, err := store.List(t.Context(), "t-a", "contract", "v-9"); err != ErrEntityInvalid {
 		t.Fatalf("List entity error = %v, want ErrEntityInvalid", err)
 	}
 

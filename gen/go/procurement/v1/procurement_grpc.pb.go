@@ -38,6 +38,8 @@ const (
 	Procurement_CancelPurchaseOrder_FullMethodName      = "/procurement.v1.Procurement/CancelPurchaseOrder"
 	Procurement_ClosePurchaseOrder_FullMethodName       = "/procurement.v1.Procurement/ClosePurchaseOrder"
 	Procurement_PostGoodsReceipt_FullMethodName         = "/procurement.v1.Procurement/PostGoodsReceipt"
+	Procurement_CreateInvoice_FullMethodName            = "/procurement.v1.Procurement/CreateInvoice"
+	Procurement_GetInvoice_FullMethodName               = "/procurement.v1.Procurement/GetInvoice"
 )
 
 // ProcurementClient is the client API for Procurement service.
@@ -159,6 +161,28 @@ type ProcurementClient interface {
 	// transaction — a rejected receipt burns no number. Exactly one grn.posted
 	// outbox event commits with every successful receipt.
 	PostGoodsReceipt(ctx context.Context, in *PostGoodsReceiptRequest, opts ...grpc.CallOption) (*PostGoodsReceiptResponse, error)
+	// CreateInvoice records one vendor invoice against an acknowledged,
+	// partially_received, or received PO of the caller's tenant (#39): the
+	// vendor_id and currency are derived server-side from the locked PO
+	// (never client input), total_cents is recomputed server-side from the
+	// lines, and the cumulative over-billing guard rejects — strictly, no
+	// tolerance at create (tolerance is the #40 match's concern) — any
+	// invoice whose amount plus the PO's existing invoices would exceed
+	// po.total_cents, with the inv_over_bill detail line. The number is the
+	// vendor's own invoice number, unique per (tenant, vendor) — the same
+	// number under a different vendor is a different invoice. The PO is
+	// locked but never mutated, and no outbox event is written (the §14.6
+	// catalog's invoice.* events belong to the #40 match). Attachments are
+	// declared after creation through the documents service (the architecture
+	// has no cross-service atomicity); the "attachment required" obligation
+	// is enforced by the demo flow (#41/#40), not by this API.
+	CreateInvoice(ctx context.Context, in *CreateInvoiceRequest, opts ...grpc.CallOption) (*Invoice, error)
+	// GetInvoice returns one invoice of the caller's tenant — the detail read
+	// with the lines. Other tenants' invoices are indistinguishable from
+	// missing ones. status stays pending until the #40 match moves it;
+	// match_result_json carries the match's explanation once it ran (empty
+	// while pending).
+	GetInvoice(ctx context.Context, in *GetInvoiceRequest, opts ...grpc.CallOption) (*Invoice, error)
 }
 
 type procurementClient struct {
@@ -359,6 +383,26 @@ func (c *procurementClient) PostGoodsReceipt(ctx context.Context, in *PostGoodsR
 	return out, nil
 }
 
+func (c *procurementClient) CreateInvoice(ctx context.Context, in *CreateInvoiceRequest, opts ...grpc.CallOption) (*Invoice, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Invoice)
+	err := c.cc.Invoke(ctx, Procurement_CreateInvoice_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *procurementClient) GetInvoice(ctx context.Context, in *GetInvoiceRequest, opts ...grpc.CallOption) (*Invoice, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Invoice)
+	err := c.cc.Invoke(ctx, Procurement_GetInvoice_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ProcurementServer is the server API for Procurement service.
 // All implementations must embed UnimplementedProcurementServer
 // for forward compatibility.
@@ -478,6 +522,28 @@ type ProcurementServer interface {
 	// transaction — a rejected receipt burns no number. Exactly one grn.posted
 	// outbox event commits with every successful receipt.
 	PostGoodsReceipt(context.Context, *PostGoodsReceiptRequest) (*PostGoodsReceiptResponse, error)
+	// CreateInvoice records one vendor invoice against an acknowledged,
+	// partially_received, or received PO of the caller's tenant (#39): the
+	// vendor_id and currency are derived server-side from the locked PO
+	// (never client input), total_cents is recomputed server-side from the
+	// lines, and the cumulative over-billing guard rejects — strictly, no
+	// tolerance at create (tolerance is the #40 match's concern) — any
+	// invoice whose amount plus the PO's existing invoices would exceed
+	// po.total_cents, with the inv_over_bill detail line. The number is the
+	// vendor's own invoice number, unique per (tenant, vendor) — the same
+	// number under a different vendor is a different invoice. The PO is
+	// locked but never mutated, and no outbox event is written (the §14.6
+	// catalog's invoice.* events belong to the #40 match). Attachments are
+	// declared after creation through the documents service (the architecture
+	// has no cross-service atomicity); the "attachment required" obligation
+	// is enforced by the demo flow (#41/#40), not by this API.
+	CreateInvoice(context.Context, *CreateInvoiceRequest) (*Invoice, error)
+	// GetInvoice returns one invoice of the caller's tenant — the detail read
+	// with the lines. Other tenants' invoices are indistinguishable from
+	// missing ones. status stays pending until the #40 match moves it;
+	// match_result_json carries the match's explanation once it ran (empty
+	// while pending).
+	GetInvoice(context.Context, *GetInvoiceRequest) (*Invoice, error)
 	mustEmbedUnimplementedProcurementServer()
 }
 
@@ -544,6 +610,12 @@ func (UnimplementedProcurementServer) ClosePurchaseOrder(context.Context, *Close
 }
 func (UnimplementedProcurementServer) PostGoodsReceipt(context.Context, *PostGoodsReceiptRequest) (*PostGoodsReceiptResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method PostGoodsReceipt not implemented")
+}
+func (UnimplementedProcurementServer) CreateInvoice(context.Context, *CreateInvoiceRequest) (*Invoice, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CreateInvoice not implemented")
+}
+func (UnimplementedProcurementServer) GetInvoice(context.Context, *GetInvoiceRequest) (*Invoice, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetInvoice not implemented")
 }
 func (UnimplementedProcurementServer) mustEmbedUnimplementedProcurementServer() {}
 func (UnimplementedProcurementServer) testEmbeddedByValue()                     {}
@@ -908,6 +980,42 @@ func _Procurement_PostGoodsReceipt_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Procurement_CreateInvoice_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateInvoiceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProcurementServer).CreateInvoice(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Procurement_CreateInvoice_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProcurementServer).CreateInvoice(ctx, req.(*CreateInvoiceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Procurement_GetInvoice_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetInvoiceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProcurementServer).GetInvoice(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Procurement_GetInvoice_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProcurementServer).GetInvoice(ctx, req.(*GetInvoiceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Procurement_ServiceDesc is the grpc.ServiceDesc for Procurement service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -990,6 +1098,14 @@ var Procurement_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "PostGoodsReceipt",
 			Handler:    _Procurement_PostGoodsReceipt_Handler,
+		},
+		{
+			MethodName: "CreateInvoice",
+			Handler:    _Procurement_CreateInvoice_Handler,
+		},
+		{
+			MethodName: "GetInvoice",
+			Handler:    _Procurement_GetInvoice_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

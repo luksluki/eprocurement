@@ -22,8 +22,8 @@ reaper → pending older than ATTACHMENT_PENDING_TTL (default 24h):
 
 - Object keys follow PRD §13: `attachments/{tenant_id}/{entity}/{uuid}`.
   Entity types and ids are validated to a path-safe charset before they
-  become key segments; accepted owner kinds are `vendor` (#26) and
-  `requisition` (#33) — invoices reuse the same shape later.
+  become key segments; accepted owner kinds are `vendor` (#26),
+  `requisition` (#33), and `invoice` (#39).
 - Declarations are bounded: mime allowlist (pdf, png, jpeg, webp, docx,
   xlsx), `ATTACHMENT_MAX_SIZE_MB` (default 25), filename 1–255 chars with no
   path separators, checksum must be sha256 hex (lowercased on accept).
@@ -38,10 +38,10 @@ reaper → pending older than ATTACHMENT_PENDING_TTL (default 24h):
 
 | Method | Permission | Notes |
 |---|---|---|
-| `CreateUpload` | per entity: `vendor:write` / `requisition:write` | validates the declaration, returns presigned PUT + pending metadata |
-| `CompleteUpload` | per entity: `vendor:write` / `requisition:write` | verifies size/mime/checksum, flips to `ready` |
-| `ListAttachments` | per entity: `vendor:read` / `requisition:read` | by owner (entity type + id), oldest first |
-| `GetDownloadUrl` | per entity: `vendor:read` / `requisition:read` | ready attachments only, returns presigned GET |
+| `CreateUpload` | per entity: `vendor:write` / `requisition:write` / `invoice:write` | validates the declaration, returns presigned PUT + pending metadata |
+| `CompleteUpload` | per entity: `vendor:write` / `requisition:write` / `invoice:write` | verifies size/mime/checksum, flips to `ready` |
+| `ListAttachments` | per entity: `vendor:read` / `requisition:read` / `invoice:read` | by owner (entity type + id), oldest first |
+| `GetDownloadUrl` | per entity: `vendor:read` / `requisition:read` / `invoice:read` | ready attachments only, returns presigned GET |
 | `ListEvents` | `requisition:read` | interceptor map (single permission) |
 
 Since #33 the attachment methods are **absent from the interceptor's
@@ -66,9 +66,13 @@ never a silent pass.
 | `POST /api/v1/requisitions/:id/attachments/:attachmentId/complete` (#33) | `requisition:write` | → attachment metadata, `status: ready` |
 | `GET /api/v1/requisitions/:id/attachments/:attachmentId/download` (#33) | `requisition:read` | → `download: {url, expires_at}` |
 | `GET /api/v1/requisitions/:id` (#33) | `requisition:read` | requisition detail embeds `attachments: [...]` (absent when documents is not wired) |
+| `POST /api/v1/invoices/:id/attachments` (#39) | `invoice:write` | same body → `201` with the presigned PUT envelope |
+| `POST /api/v1/invoices/:id/attachments/:attachmentId/complete` (#39) | `invoice:write` | → attachment metadata, `status: ready` |
+| `GET /api/v1/invoices/:id/attachments/:attachmentId/download` (#39) | `invoice:read` | → `download: {url, expires_at}` |
+| `GET /api/v1/invoices/:id` (#39) | `invoice:read` | invoice detail embeds `attachments: [...]` (absent when documents is not wired) |
 
 The gateway verifies the owner exists (procurement `GetVendor` /
-`GetRequisition`) before any documents call. The requisition declare route
+`GetRequisition` / `GetInvoice`) before any documents call. The requisition declare route
 additionally mirrors procurement's ownership rule — the caller must be the
 draft's `requester_id` (admins excepted), else 403 `requisition_forbidden`;
 attachments on a requisition are writes to it. Complete/download only bind
@@ -77,9 +81,9 @@ appears in REST responses. Machine error codes (`attachment_too_large`,
 `attachment_checksum_mismatch`, …) pass through unchanged; validation →
 400, missing → 404, lifecycle violations → 412. The human message for
 `attachment_entity_invalid` is neutral ("attachment owner type is not
-supported") because the mapping is shared by the vendor and requisition
-routes. These requisition routes are sanctioned by the #33 issue decision
-(agent 2026-10-25); PRD §15 does not list them.
+supported") because the mapping is shared by the vendor, requisition, and
+invoice routes. These requisition routes are sanctioned by the #33 issue
+decision (agent 2026-10-25); PRD §15 does not list them.
 
 ## Storage
 
