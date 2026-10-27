@@ -119,6 +119,28 @@ service Procurement {
   // transaction — a rejected receipt burns no number. Exactly one grn.posted
   // outbox event commits with every successful receipt.
   rpc PostGoodsReceipt(PostGoodsReceiptRequest) returns (PostGoodsReceiptResponse);
+  // CreateInvoice records one vendor invoice against an acknowledged,
+  // partially_received, or received PO of the caller's tenant (#39): the
+  // vendor_id and currency are derived server-side from the locked PO
+  // (never client input), total_cents is recomputed server-side from the
+  // lines, and the cumulative over-billing guard rejects — strictly, no
+  // tolerance at create (tolerance is the #40 match's concern) — any
+  // invoice whose amount plus the PO's existing invoices would exceed
+  // po.total_cents, with the inv_over_bill detail line. The number is the
+  // vendor's own invoice number, unique per (tenant, vendor) — the same
+  // number under a different vendor is a different invoice. The PO is
+  // locked but never mutated, and no outbox event is written (the §14.6
+  // catalog's invoice.* events belong to the #40 match). Attachments are
+  // declared after creation through the documents service (the architecture
+  // has no cross-service atomicity); the "attachment required" obligation
+  // is enforced by the demo flow (#41/#40), not by this API.
+  rpc CreateInvoice(CreateInvoiceRequest) returns (Invoice);
+  // GetInvoice returns one invoice of the caller's tenant — the detail read
+  // with the lines. Other tenants' invoices are indistinguishable from
+  // missing ones. status stays pending until the #40 match moves it;
+  // match_result_json carries the match's explanation once it ran (empty
+  // while pending).
+  rpc GetInvoice(GetInvoiceRequest) returns (Invoice);
 }
 
 message Vendor {
@@ -401,4 +423,45 @@ message PostGoodsReceiptRequest {
 message PostGoodsReceiptResponse {
   GoodsReceipt goods_receipt = 1;
   PurchaseOrder purchase_order = 2;
+}
+
+// Invoice is one vendor invoice (#39): the vendor's bill against one PO's
+// lines. vendor_id and currency are derived server-side from the locked PO;
+// total_cents is recomputed server-side from the lines.
+message Invoice {
+  string id = 1;
+  string tenant_id = 2;
+  string po_id = 3;             // the billed purchase order
+  string vendor_id = 4;         // derived from the PO, never client input
+  string number = 5;            // the vendor's own number, unique per (tenant, vendor)
+  string currency = 6;          // IDR | USD — the PO's currency
+  int64 total_cents = 7;        // server-computed sum of qty × unit_price_cents
+  string status = 8;            // pending | matched | discrepancy — pending until #40 matches
+  string match_result_json = 9; // the #40 match's explanation, empty while pending
+  repeated InvoiceItem items = 10;
+  string created_by = 11;       // user id
+  string created_at = 12;       // RFC 3339
+}
+
+// InvoiceItem is one invoice line: the PO line it bills, the invoiced
+// quantity (> 0), and the invoiced unit price (>= 0, integer cents in the
+// header currency).
+message InvoiceItem {
+  string po_item_id = 1;      // must be a line of the named PO, at most once per invoice
+  int32 qty = 2;              // > 0
+  int64 unit_price_cents = 3; // >= 0
+}
+
+// CreateInvoiceRequest carries one invoice: the PO to bill (must be
+// acknowledged, partially_received, or received), the vendor's invoice
+// number, and the lines.
+message CreateInvoiceRequest {
+  string po_id = 1;
+  string number = 2;
+  repeated InvoiceItem items = 3;
+}
+
+// GetInvoiceRequest names the invoice to read.
+message GetInvoiceRequest {
+  string id = 1;
 }

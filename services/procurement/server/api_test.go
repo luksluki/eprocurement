@@ -28,6 +28,7 @@ import (
 	"github.com/luksluki/eprocurement/internal/platform/tenant"
 	"github.com/luksluki/eprocurement/services/procurement/approval"
 	"github.com/luksluki/eprocurement/services/procurement/goodsreceipt"
+	"github.com/luksluki/eprocurement/services/procurement/invoice"
 	"github.com/luksluki/eprocurement/services/procurement/migrations"
 	"github.com/luksluki/eprocurement/services/procurement/purchaseorder"
 	"github.com/luksluki/eprocurement/services/procurement/requisition"
@@ -67,7 +68,7 @@ func startProcurement(t *testing.T) (procurementv1.ProcurementClient, *pgxpool.P
 	}
 
 	log := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
-	srv := New(log, db, vendor.NewStore(db), requisition.NewStore(db), approval.NewStore(db), purchaseorder.NewStore(db), goodsreceipt.NewStore(db))
+	srv := New(log, db, vendor.NewStore(db), requisition.NewStore(db), approval.NewStore(db), purchaseorder.NewStore(db), goodsreceipt.NewStore(db), invoice.NewStore(db))
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -323,12 +324,17 @@ func TestMapRequisitionError(t *testing.T) {
 
 // grpcCleanupRequisition wipes the PR rows, counters, approval rules, and
 // PO rows this test family creates in the shared test tenants (items and
-// steps cascade).
+// steps cascade). Invoices go first: they hold no-cascade FKs to
+// purchase_orders (#39), so PO deletion would fail underneath them.
 func grpcCleanupRequisition(t *testing.T, db *pgxpool.Pool) {
 	t.Helper()
 	_ = tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(context.Background(),
 			`DELETE FROM procurement.outbox WHERE tenant_id IN ($1, $2)`, gTenantA, gTenantB); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(context.Background(),
+			`DELETE FROM procurement.invoices WHERE tenant_id IN ($1, $2)`, gTenantA, gTenantB); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(context.Background(),
@@ -2026,6 +2032,297 @@ func TestMapGoodsReceiptError(t *testing.T) {
 		"unknown internal":  {errors.New("boom"), codes.Internal, "internal error"},
 	} {
 		got := mapGoodsReceiptError(tc.err)
+		if status.Code(got) != tc.code || status.Convert(got).Message() != tc.msg {
+			t.Errorf("%s: got (%v, %q), want (%v, %q)",
+				name, status.Code(got), status.Convert(got).Message(), tc.code, tc.msg)
+		}
+	}
+}
+
+// grpcInvoicablePO drives the real flow to an acknowledged PO of tenant A
+// (rules → approved requisition → convert → issue → acknowledge) under the
+// given fixture vendor code — the invoice tests' own prefix, wiped by
+// grpcCleanupInvoiceVendor.
+func grpcInvoicablePO(t *testing.T, client procurementv1.ProcurementClient, code string) *procurementv1.PurchaseOrder {
+	t.Helper()
+	if _, err := client.ReplaceApprovalRules(callerCtx(gTenantA, rbac.RoleAdmin),
+		&procurementv1.ReplaceApprovalRulesRequest{Rules: testRules()[:1]}); err != nil {
+		t.Fatalf("configure rules: %v", err)
+	}
+	approved := grpcApprovedRequisition(t, client)
+	vendorA, err := client.CreateVendor(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.CreateVendorRequest{Code: code, Name: "PT Invoice"})
+	if err != nil {
+		t.Fatalf("create vendor: %v", err)
+	}
+	wrapped, err := client.CreatePurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.CreatePurchaseOrderRequest{RequisitionId: approved.GetId(), VendorId: vendorA.GetId()})
+	if err != nil || !wrapped.GetCreated() {
+		t.Fatalf("convert = (%v, %v)", wrapped.GetCreated(), err)
+	}
+	po := wrapped.GetPurchaseOrder()
+	if _, err := client.IssuePurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.IssuePurchaseOrderRequest{Id: po.GetId()}); err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	ack, err := client.AcknowledgePurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.AcknowledgePurchaseOrderRequest{Id: po.GetId()})
+	if err != nil || ack.GetStatus() != "acknowledged" {
+		t.Fatalf("acknowledge = (%s, %v)", ack.GetStatus(), err)
+	}
+	return ack
+}
+
+// grpcCleanupInvoiceVendor wipes this suite's fixture vendors (prefix
+// G-INV39-).
+func grpcCleanupInvoiceVendor(t *testing.T, db *pgxpool.Pool) {
+	t.Helper()
+	_ = tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		_, err := tx.Exec(context.Background(),
+			`DELETE FROM procurement.vendors WHERE tenant_id IN ($1, $2) AND code LIKE 'G-INV39-%'`,
+			gTenantA, gTenantB)
+		return err
+	})
+}
+
+// grpcInvoiceEventCount counts the tenants' invoice.* outbox rows — create
+// writes none (#39); matched/discrepancy belong to #40.
+func grpcInvoiceEventCount(t *testing.T, db *pgxpool.Pool) int {
+	t.Helper()
+	var n int
+	if err := tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		return tx.QueryRow(context.Background(),
+			`SELECT count(*) FROM procurement.outbox WHERE tenant_id IN ($1, $2) AND event_type LIKE 'invoice.%'`,
+			gTenantA, gTenantB).Scan(&n)
+	}); err != nil {
+		t.Fatalf("count invoice events: %v", err)
+	}
+	return n
+}
+
+// The #39 invoices through the full gRPC wiring: RBAC (invoice:write is
+// finance/admin only — the buyer is denied, unlike grn:post), the derived
+// vendor/currency, the server-side total, the pinned over-bill detail line,
+// the machine codes of every guard, the duplicate rule per (tenant, vendor),
+// no invoice.* outbox rows, no PO mutation, cross-tenant invisibility, and
+// the anonymous rejection.
+func TestInvoiceGRPC(t *testing.T) {
+	client, db, cleanup := startProcurement(t)
+	defer cleanup()
+	grpcCleanupRequisition(t, db)
+	grpcCleanupPOVendor(t, db)
+	grpcCleanupGRNVendor(t, db)
+	grpcCleanupInvoiceVendor(t, db)
+	t.Cleanup(func() {
+		grpcCleanupRequisition(t, db)
+		grpcCleanupPOVendor(t, db)
+		grpcCleanupGRNVendor(t, db)
+		grpcCleanupInvoiceVendor(t, db)
+	})
+
+	po := grpcInvoicablePO(t, client, "G-INV39-A")
+	laptop := grpcItemByQty(t, po, 2)
+	mouse := grpcItemByQty(t, po, 3)
+
+	// invoice:write is finance/admin: requester, buyer, approver, and viewer
+	// are denied at the service-layer re-check.
+	for _, role := range []string{rbac.RoleRequester, rbac.RoleBuyer, rbac.RoleApprover, rbac.RoleViewer} {
+		_, err := client.CreateInvoice(callerCtx(gTenantA, role), &procurementv1.CreateInvoiceRequest{
+			PoId: po.GetId(), Number: "INV-RBAC",
+			Items: []*procurementv1.InvoiceItem{{PoItemId: laptop.GetId(), Qty: 1, UnitPriceCents: 1}},
+		})
+		if status.Code(err) != codes.PermissionDenied {
+			t.Fatalf("create as %s: code = %v, want PermissionDenied", role, status.Code(err))
+		}
+	}
+
+	// Machine codes: bad po id, unknown PO, empty number, empty items, bad
+	// line shapes, unknown line — before any write.
+	for name, tc := range map[string]struct {
+		req  *procurementv1.CreateInvoiceRequest
+		code codes.Code
+		msg  string
+	}{
+		"bad po id": {&procurementv1.CreateInvoiceRequest{
+			PoId: "nope", Number: "INV-1",
+			Items: []*procurementv1.InvoiceItem{{PoItemId: laptop.GetId(), Qty: 1, UnitPriceCents: 1}},
+		}, codes.InvalidArgument, "po_id_invalid"},
+		"unknown po": {&procurementv1.CreateInvoiceRequest{
+			PoId: "dddddddd-0000-0000-0000-0000000000ff", Number: "INV-1",
+			Items: []*procurementv1.InvoiceItem{{PoItemId: laptop.GetId(), Qty: 1, UnitPriceCents: 1}},
+		}, codes.NotFound, "po_not_found"},
+		"empty number": {&procurementv1.CreateInvoiceRequest{
+			PoId:  po.GetId(),
+			Items: []*procurementv1.InvoiceItem{{PoItemId: laptop.GetId(), Qty: 1, UnitPriceCents: 1}},
+		}, codes.InvalidArgument, "inv_number_invalid"},
+		"empty items": {&procurementv1.CreateInvoiceRequest{
+			PoId: po.GetId(), Number: "INV-1",
+		}, codes.InvalidArgument, "inv_items_empty"},
+		"zero qty": {&procurementv1.CreateInvoiceRequest{
+			PoId: po.GetId(), Number: "INV-1",
+			Items: []*procurementv1.InvoiceItem{{PoItemId: laptop.GetId(), Qty: 0, UnitPriceCents: 1}},
+		}, codes.InvalidArgument, "inv_qty_invalid"},
+		"duplicate line": {&procurementv1.CreateInvoiceRequest{
+			PoId: po.GetId(), Number: "INV-1",
+			Items: []*procurementv1.InvoiceItem{
+				{PoItemId: laptop.GetId(), Qty: 1, UnitPriceCents: 1},
+				{PoItemId: laptop.GetId(), Qty: 1, UnitPriceCents: 1},
+			},
+		}, codes.InvalidArgument, "inv_po_item_duplicate"},
+		"unknown line": {&procurementv1.CreateInvoiceRequest{
+			PoId: po.GetId(), Number: "INV-1",
+			Items: []*procurementv1.InvoiceItem{{PoItemId: "dddddddd-0000-0000-0000-0000000000ee", Qty: 1, UnitPriceCents: 1}},
+		}, codes.InvalidArgument, "inv_po_item_unknown"},
+	} {
+		_, err := client.CreateInvoice(callerCtx(gTenantA, rbac.RoleFinance), tc.req)
+		if status.Code(err) != tc.code || status.Convert(err).Message() != tc.msg {
+			t.Errorf("%s: got (%v, %q), want (%v, %q)", name,
+				status.Code(err), status.Convert(err).Message(), tc.code, tc.msg)
+		}
+	}
+
+	// Over-bill: 2 × 8,000,000 > the 15,450,000 PO total — the pinned detail
+	// line verbatim, nothing written.
+	_, err := client.CreateInvoice(callerCtx(gTenantA, rbac.RoleFinance), &procurementv1.CreateInvoiceRequest{
+		PoId: po.GetId(), Number: "INV-OVER",
+		Items: []*procurementv1.InvoiceItem{{PoItemId: laptop.GetId(), Qty: 2, UnitPriceCents: 8000000}},
+	})
+	want := "inv_over_bill: po_number=" + po.GetNumber() + " invoiced=0 requested=16000000 total=15450000"
+	if status.Code(err) != codes.Aborted || status.Convert(err).Message() != want {
+		t.Fatalf("over bill: got (%v, %q), want (Aborted, %q)", status.Code(err), status.Convert(err).Message(), want)
+	}
+
+	// Illegal status: a draft PO cannot be invoiced.
+	approved := grpcApprovedRequisition(t, client)
+	vendorB, err := client.CreateVendor(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.CreateVendorRequest{Code: "G-INV39-D", Name: "PT Invoice Draft"})
+	if err != nil {
+		t.Fatalf("create draft vendor: %v", err)
+	}
+	draftWrapped, err := client.CreatePurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.CreatePurchaseOrderRequest{RequisitionId: approved.GetId(), VendorId: vendorB.GetId()})
+	if err != nil {
+		t.Fatalf("convert draft: %v", err)
+	}
+	var draftLaptopID string
+	if err := tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		return tx.QueryRow(context.Background(), `
+			SELECT id::text FROM procurement.po_items
+			WHERE po_id = $1 AND qty_ordered = 2`, draftWrapped.GetPurchaseOrder().GetId()).Scan(&draftLaptopID)
+	}); err != nil {
+		t.Fatalf("read draft item id: %v", err)
+	}
+	_, err = client.CreateInvoice(callerCtx(gTenantA, rbac.RoleFinance), &procurementv1.CreateInvoiceRequest{
+		PoId: draftWrapped.GetPurchaseOrder().GetId(), Number: "INV-DRAFT",
+		Items: []*procurementv1.InvoiceItem{{PoItemId: draftLaptopID, Qty: 1, UnitPriceCents: 400000}},
+	})
+	if status.Code(err) != codes.Aborted || status.Convert(err).Message() != "po_illegal_transition" {
+		t.Fatalf("draft invoice: got (%v, %q)", status.Code(err), status.Convert(err).Message())
+	}
+
+	// Happy path: finance creates against the acknowledged PO — vendor and
+	// currency derived, total recomputed, status pending, no match result.
+	created, err := client.CreateInvoice(callerCtx(gTenantA, rbac.RoleFinance), &procurementv1.CreateInvoiceRequest{
+		PoId: po.GetId(), Number: " INV/2026/0001 ",
+		Items: []*procurementv1.InvoiceItem{
+			{PoItemId: laptop.GetId(), Qty: 2, UnitPriceCents: 7500000},
+			{PoItemId: mouse.GetId(), Qty: 1, UnitPriceCents: 150000},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if created.GetNumber() != "INV/2026/0001" || created.GetPoId() != po.GetId() ||
+		created.GetVendorId() != po.GetVendorId() || created.GetCurrency() != "IDR" ||
+		created.GetTotalCents() != 15150000 || created.GetStatus() != "pending" ||
+		created.GetMatchResultJson() != "" || created.GetCreatedBy() != gUser || created.GetCreatedAt() == "" {
+		t.Fatalf("invoice = %+v", created)
+	}
+	if len(created.GetItems()) != 2 {
+		t.Fatalf("items = %+v", created.GetItems())
+	}
+	// No invoice.* outbox rows; the PO stays acknowledged and untouched.
+	if got := grpcInvoiceEventCount(t, db); got != 0 {
+		t.Fatalf("invoice.* outbox rows after create = %d, want 0", got)
+	}
+
+	// Duplicate number for the same vendor → AlreadyExists.
+	_, err = client.CreateInvoice(callerCtx(gTenantA, rbac.RoleFinance), &procurementv1.CreateInvoiceRequest{
+		PoId: po.GetId(), Number: "INV/2026/0001",
+		Items: []*procurementv1.InvoiceItem{{PoItemId: mouse.GetId(), Qty: 1, UnitPriceCents: 150000}},
+	})
+	if status.Code(err) != codes.AlreadyExists || status.Convert(err).Message() != "inv_number_duplicate" {
+		t.Fatalf("duplicate: got (%v, %q), want AlreadyExists inv_number_duplicate", status.Code(err), status.Convert(err).Message())
+	}
+
+	// GetInvoice: the detail read with lines (order is by created_at, id —
+	// the lines share created_at, so assert membership, not position); bad
+	// id; cross-tenant 404.
+	got, err := client.GetInvoice(callerCtx(gTenantA, rbac.RoleViewer),
+		&procurementv1.GetInvoiceRequest{Id: created.GetId()})
+	if err != nil || got.GetId() != created.GetId() || len(got.GetItems()) != 2 {
+		t.Fatalf("get = (%+v, %v)", got, err)
+	}
+	gotLaptop := false
+	for _, it := range got.GetItems() {
+		if it.GetPoItemId() == laptop.GetId() && it.GetQty() == 2 && it.GetUnitPriceCents() == 7500000 {
+			gotLaptop = true
+		}
+	}
+	if !gotLaptop {
+		t.Fatalf("get items carry no laptop line: %+v", got.GetItems())
+	}
+	if _, err := client.GetInvoice(callerCtx(gTenantA, rbac.RoleViewer),
+		&procurementv1.GetInvoiceRequest{Id: "nope"}); status.Code(err) != codes.InvalidArgument ||
+		status.Convert(err).Message() != "inv_id_invalid" {
+		t.Fatalf("get bad id: got (%v, %q)", status.Code(err), status.Convert(err).Message())
+	}
+	if _, err := client.GetInvoice(callerCtx(gTenantB, rbac.RoleViewer),
+		&procurementv1.GetInvoiceRequest{Id: created.GetId()}); status.Code(err) != codes.NotFound ||
+		status.Convert(err).Message() != "inv_not_found" {
+		t.Fatalf("cross-tenant get: got (%v, %q), want NotFound inv_not_found", status.Code(err), status.Convert(err).Message())
+	}
+
+	// Anonymous: Unauthenticated before any store hit.
+	if _, err := client.CreateInvoice(context.Background(), &procurementv1.CreateInvoiceRequest{
+		PoId: po.GetId(), Number: "INV-ANON",
+	}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("anonymous: code = %v, want Unauthenticated", status.Code(err))
+	}
+}
+
+// The #39 error mapping as a pure unit test (no database): shape codes →
+// InvalidArgument, the over-bill detail line and the illegal-status guard →
+// Aborted, duplicate number → AlreadyExists, not-found → 404 — the typed
+// error carries its pinned message verbatim while errors.Is keeps the
+// sentinel matchable.
+func TestMapInvoiceError(t *testing.T) {
+	typed := &invoice.OverBillError{
+		PONumber: "PO-000001", Invoiced: 6000000, Requested: 6000000, Total: 10000000,
+	}
+	for name, tc := range map[string]struct {
+		err  error
+		code codes.Code
+		msg  string
+	}{
+		"number invalid":     {invoice.ErrNumberInvalid, codes.InvalidArgument, "inv_number_invalid"},
+		"items empty":        {invoice.ErrItemsEmpty, codes.InvalidArgument, "inv_items_empty"},
+		"qty invalid":        {invoice.ErrQtyInvalid, codes.InvalidArgument, "inv_qty_invalid"},
+		"price invalid":      {invoice.ErrUnitPriceInvalid, codes.InvalidArgument, "inv_unit_price_invalid"},
+		"line duplicate":     {invoice.ErrPOItemDuplicate, codes.InvalidArgument, "inv_po_item_duplicate"},
+		"line unknown":       {invoice.ErrPOItemUnknown, codes.InvalidArgument, "inv_po_item_unknown"},
+		"invoice id invalid": {invoice.ErrIDInvalid, codes.InvalidArgument, "inv_id_invalid"},
+		"po id invalid":      {purchaseorder.ErrIDInvalid, codes.InvalidArgument, "po_id_invalid"},
+		"duplicate number":   {invoice.ErrNumberDuplicate, codes.AlreadyExists, "inv_number_duplicate"},
+		"illegal transition": {purchaseorder.ErrIllegalTransition, codes.Aborted, "po_illegal_transition"},
+		"invoice not found":  {invoice.ErrNotFound, codes.NotFound, "inv_not_found"},
+		"po not found":       {purchaseorder.ErrNotFound, codes.NotFound, "po_not_found"},
+		"over bill typed": {typed, codes.Aborted,
+			"inv_over_bill: po_number=PO-000001 invoiced=6000000 requested=6000000 total=10000000"},
+		"over bill bare":   {invoice.ErrOverBill, codes.Aborted, "inv_over_bill"},
+		"unknown internal": {errors.New("boom"), codes.Internal, "internal error"},
+	} {
+		got := mapInvoiceError(tc.err)
 		if status.Code(got) != tc.code || status.Convert(got).Message() != tc.msg {
 			t.Errorf("%s: got (%v, %q), want (%v, %q)",
 				name, status.Code(got), status.Convert(got).Message(), tc.code, tc.msg)

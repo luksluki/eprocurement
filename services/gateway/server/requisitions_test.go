@@ -121,6 +121,16 @@ func (f *fakeRequisitionClient) PostGoodsReceipt(ctx context.Context, in *procur
 	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
 }
 
+// The #39 invoice methods satisfy the widened ProcurementClient interface;
+// the invoice tests use their own fake with recording.
+func (f *fakeRequisitionClient) CreateInvoice(ctx context.Context, in *procurementv1.CreateInvoiceRequest, opts ...grpc.CallOption) (*procurementv1.Invoice, error) {
+	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
+}
+
+func (f *fakeRequisitionClient) GetInvoice(ctx context.Context, in *procurementv1.GetInvoiceRequest, opts ...grpc.CallOption) (*procurementv1.Invoice, error) {
+	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
+}
+
 func (f *fakeRequisitionClient) GetApprovalRules(ctx context.Context, in *procurementv1.GetApprovalRulesRequest, opts ...grpc.CallOption) (*procurementv1.ApprovalRulesResponse, error) {
 	return &procurementv1.ApprovalRulesResponse{}, nil
 }

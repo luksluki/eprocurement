@@ -22,11 +22,12 @@ const (
 	StatusReady   = "ready"
 )
 
-// Attachment owner kinds wired so far: vendor (#26) and requisition (#33).
-// Invoices follow the same shape in later issues.
+// Attachment owner kinds wired so far: vendor (#26), requisition (#33), and
+// invoice (#39).
 const (
 	EntityTypeVendor      = "vendor"
 	EntityTypeRequisition = "requisition"
+	EntityTypeInvoice     = "invoice"
 )
 
 // entityTypes is the accepted owner-kind set; entity types become object-key
@@ -34,6 +35,7 @@ const (
 var entityTypes = map[string]bool{
 	EntityTypeVendor:      true,
 	EntityTypeRequisition: true,
+	EntityTypeInvoice:     true,
 }
 
 // ValidEntity reports whether entityType is an accepted owner kind.

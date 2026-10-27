@@ -22,7 +22,8 @@ func TestValidateCreate(t *testing.T) {
 	}{
 		{"valid", func(a, b, c, d *string, e *int64, f *string) {}, nil},
 		{"entity requisition", func(a, b, c, d *string, e *int64, f *string) { *a = EntityTypeRequisition }, nil},
-		{"entity unknown", func(a, b, c, d *string, e *int64, f *string) { *a = "invoice" }, ErrEntityInvalid},
+		{"entity invoice", func(a, b, c, d *string, e *int64, f *string) { *a = EntityTypeInvoice }, nil},
+		{"entity unknown", func(a, b, c, d *string, e *int64, f *string) { *a = "contract" }, ErrEntityInvalid},
 		{"entity id with slash", func(a, b, c, d *string, e *int64, f *string) { *b = "../escape" }, ErrEntityInvalid},
 		{"entity id empty", func(a, b, c, d *string, e *int64, f *string) { *b = "" }, ErrEntityInvalid},
 		{"filename empty", func(a, b, c, d *string, e *int64, f *string) { *c = "" }, ErrFilenameInvalid},

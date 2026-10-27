@@ -229,7 +229,7 @@ func TestCreateUploadValidation(t *testing.T) {
 			SizeBytes: 2 << 20, ChecksumSha256: sha256Hex([]byte("x")), // limit is 1 MiB here
 		}, attachment.ErrTooLarge.Error()},
 		{"entity", &documentsv1.CreateUploadRequest{
-			EntityType: "invoice", EntityId: gVendor,
+			EntityType: "contract", EntityId: gVendor,
 			Filename: "a.pdf", MimeType: "application/pdf",
 			SizeBytes: 10, ChecksumSha256: sha256Hex([]byte("x")),
 		}, attachment.ErrEntityInvalid.Error()},
@@ -400,10 +400,85 @@ func TestAttachmentRequisitionEntity(t *testing.T) {
 	// Unknown entity on the read path is the domain's machine code, not a
 	// silent pass.
 	_, err = client.ListAttachments(viewerCtx(), &documentsv1.ListAttachmentsRequest{
-		EntityType: "invoice", EntityId: gRequisition,
+		EntityType: "contract", EntityId: gRequisition,
 	})
 	if st, _ := status.FromError(err); st.Code() != codes.InvalidArgument || st.Message() != attachment.ErrEntityInvalid.Error() {
 		t.Fatalf("unknown entity list error = %v", err)
+	}
+}
+
+// Invoice attachments (#39): the per-entity permission table gains the
+// invoice area — finance (invoice:write) declares and completes, a buyer is
+// denied the write, and reads stay broad (invoice:read; a viewer lists and
+// downloads). 'invoice' is now an accepted entity type, so the owner key
+// layout applies unchanged.
+func TestAttachmentInvoiceEntity(t *testing.T) {
+	client, stop := startDocuments(t)
+	defer stop()
+
+	gInvoice := "eeeeeeee-2222-0000-0000-0000000000dd"
+	financeCtx := callerCtx(gTenantA, rbac.RoleFinance)
+
+	// Finance declares an invoice attachment: pending metadata, object key
+	// under attachments/{tenant}/invoice/{uuid}.
+	content := []byte("invoice scan bytes")
+	created, err := client.CreateUpload(financeCtx, &documentsv1.CreateUploadRequest{
+		EntityType:     attachment.EntityTypeInvoice,
+		EntityId:       gInvoice,
+		Filename:       "invoice-2026-001.pdf",
+		MimeType:       "application/pdf",
+		SizeBytes:      int64(len(content)),
+		ChecksumSha256: sha256Hex(content),
+	})
+	if err != nil {
+		t.Fatalf("CreateUpload invoice: %v", err)
+	}
+	att := created.GetAttachment()
+	if att.GetEntityType() != attachment.EntityTypeInvoice || att.GetEntityId() != gInvoice {
+		t.Fatalf("attachment = %+v", att)
+	}
+	if att.GetObjectKey() != attachment.ObjectKey(gTenantA, attachment.EntityTypeInvoice, att.GetId()) {
+		t.Fatalf("object key = %q", att.GetObjectKey())
+	}
+
+	// A buyer cannot declare an invoice attachment (invoice:write is
+	// finance/admin only).
+	_, err = client.CreateUpload(buyerCtx(), &documentsv1.CreateUploadRequest{
+		EntityType:     attachment.EntityTypeInvoice,
+		EntityId:       gInvoice,
+		Filename:       "a.pdf", MimeType: "application/pdf",
+		SizeBytes: 4, ChecksumSha256: sha256Hex([]byte("x")),
+	})
+	if st, _ := status.FromError(err); st.Code() != codes.PermissionDenied ||
+		st.Message() != "permission_denied: requires invoice:write" {
+		t.Fatalf("buyer invoice declare error = %v, want PermissionDenied requires invoice:write", err)
+	}
+
+	// Finance completes; a viewer lists and downloads (invoice:read is broad).
+	httpPut(t, created.GetUploadUrl(), "application/pdf", content)
+	ready, err := client.CompleteUpload(financeCtx, &documentsv1.CompleteUploadRequest{AttachmentId: att.GetId()})
+	if err != nil || ready.GetStatus() != attachment.StatusReady {
+		t.Fatalf("complete = (%+v, %v)", ready, err)
+	}
+	list, err := client.ListAttachments(viewerCtx(), &documentsv1.ListAttachmentsRequest{
+		EntityType: attachment.EntityTypeInvoice, EntityId: gInvoice,
+	})
+	if err != nil || len(list.GetAttachments()) != 1 || list.GetAttachments()[0].GetId() != att.GetId() {
+		t.Fatalf("list = (%+v, %v)", list, err)
+	}
+	dl, err := client.GetDownloadUrl(viewerCtx(), &documentsv1.GetDownloadUrlRequest{AttachmentId: att.GetId()})
+	if err != nil || dl.GetDownloadUrl() == "" {
+		t.Fatalf("download = (%+v, %v)", dl, err)
+	}
+
+	// Cross-tenant denial on the invoice entity: tenant B's list of tenant
+	// A's invoice owner is empty (tenant-scoped query, no leak, no error).
+	listB, err := client.ListAttachments(callerCtx(gTenantB, rbac.RoleViewer),
+		&documentsv1.ListAttachmentsRequest{
+			EntityType: attachment.EntityTypeInvoice, EntityId: gInvoice,
+		})
+	if err != nil || len(listB.GetAttachments()) != 0 {
+		t.Fatalf("tenant B invoice list = (%+v, %v)", listB, err)
 	}
 }
 

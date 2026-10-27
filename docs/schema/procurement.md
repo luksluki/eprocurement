@@ -663,6 +663,114 @@ mechanism on this route — a conscious deviation from the submit/decide
 precedent, documented in dev-note 037 (a retried partial receipt that still
 fits records twice; a decide-key-style follow-up is the candidate fix).
 
+## Invoices (#39)
+
+The storage mirror of the `invoice` domain package — the model and create
+API of the invoice epic; the 3-way match itself is #40 (FR-08).
+`procurement.invoices`:
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | `gen_random_uuid()` |
+| `tenant_id` | uuid NOT NULL | RLS scoping key |
+| `po_id` | uuid NOT NULL | FK → `purchase_orders` (no cascade — an invoiced PO must not be deletable) |
+| `vendor_id` | uuid NOT NULL | FK → `vendors`; **derived server-side from the locked PO**, never client input (**delta vs §13**: the PRD lists vendor_id as a plain column) |
+| `number` | text NOT NULL | the **vendor's own** invoice number (not generated here); `UNIQUE (tenant_id, vendor_id, number)` — unique per vendor, so the same number under a different vendor is a different invoice |
+| `currency` | text NOT NULL CHECK IDR\|USD | the PO's currency (**delta vs §13**) |
+| `total_cents` | bigint NOT NULL | the §13 "amount" as integer cents, **recomputed server-side** from the lines (**delta vs §13**) |
+| `status` | text NOT NULL DEFAULT 'pending' | CHECK `pending | matched | discrepancy` — #40's values ship in the CHECK from day one |
+| `match_result` | jsonb NULL | #40's match explanation; NULL/empty while pending (never written by #39) |
+| `created_at` | timestamptz NOT NULL | audit timestamp |
+| `created_by` | uuid | audit (**delta vs §13**) |
+
+`procurement.invoice_lines` (no `tenant_id` — the PRD §13 convention; tenancy
+derives from the parent invoice, transitively from the PO):
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | `gen_random_uuid()` |
+| `invoice_id` | uuid NOT NULL | FK → `invoices` `ON DELETE CASCADE` |
+| `po_item_id` | uuid NOT NULL | FK → `po_items`; must be a line of the same PO (domain guard) |
+| `qty` | integer NOT NULL | CHECK `> 0` |
+| `unit_price_cents` | bigint NOT NULL | CHECK `>= 0` |
+| `created_at` | timestamptz NOT NULL | |
+
+`UNIQUE (invoice_id, po_item_id)` — one invoice bills each PO line at most
+once; further billings are further invoices. **RLS**: the 0001/0003 tenant
+pattern on both tables (lines derive tenancy from the parent invoice via
+`EXISTS`, so isolation stays transitive).
+
+**Store contract** (`invoice.Store.Create`, one tenant transaction with a
+pinned step order): validate the request shape before the transaction opens
+(non-empty trimmed number ≤ 100 chars; non-empty lines, qty > 0,
+unit_price ≥ 0, unique line ids — 400s) → lock the PO row `FOR UPDATE`
+(`purchaseorder.LoadForUpdate` — the serialization point shared with every
+lifecycle transition and receipt, so concurrent invoice/receipt pairs
+serialize; **vendor_id and currency are read from this locked aggregate**)
+→ line membership (each po_item_id must name a line of this PO) → recompute
+`total_cents` server-side → the **cumulative over-billing guard** → the
+status gate → insert header + lines (23505 on
+`invoices_tenant_vendor_number_uidx` → `inv_number_duplicate`) → a backstop
+re-SUM of the PO's invoices inside the transaction. The PO's own columns
+are **never written** (no qty_invoiced, no status move) and **no outbox row
+is appended** — the §14.6 catalog names `invoice.matched` /
+`invoice.discrepancy` only, both #40's (the vendor/requisition creation
+precedent). Any failure rolls the whole transaction back.
+
+**Over-billing (pinned error format, cumulative and strict).** SUM of the
+PO's existing invoices' `total_cents` + this invoice's server-computed
+total must be **≤ `po.total_cents` — strictly, no tolerance at create**
+(tolerance is the #40 match's concern, FR-08). A violation answers 409 with
+the gRPC message **exactly**:
+
+```
+inv_over_bill: po_number=<n> invoiced=<i> requested=<r> total=<t>
+```
+
+The machine code is the strict prefix before the first colon; `<i>` is the
+PO's invoiced total before this request, `<r>` this invoice's recomputed
+total, `<t>` the PO's total_cents — the `grn_over_receipt` twin of #37
+(sentinel `invoice.ErrOverBill` + typed `*OverBillError`, dedicated gateway
+renderer with body `code` = the token before the colon and `error` = the
+full detail). The guard runs **before** the status gate (the #37 pinned
+order): a billing that cannot fit answers `inv_over_bill` even on a PO
+whose status would also reject, and a post-insert re-SUM backstop inside
+the transaction answers the same typed error if it ever fires. Concurrency:
+two creates whose combined totals exceed the budget serialize on the PO row
+lock — exactly one commits.
+
+**Invoicable PO statuses.** Only `acknowledged | partially_received |
+received` may be invoiced (maintainer decision 2026-10-27, the GRN #37 set);
+`draft`/`issued`/`cancelled`/`closed` answer 409 `po_illegal_transition`
+(reused sentinel).
+
+**Attachments (maintainer decision 2026-10-27).** Full support ships with
+#39: entity type `invoice` in documents (`entityPermissions`:
+`invoice:read`/`invoice:write`), gateway routes
+`POST|POST /:id/attachments(/:attachmentId/complete)` +
+`GET /:id/attachments/:attachmentId/download` under `/api/v1/invoices`
+(declare checks the invoice exists first — the vendor pattern), and
+`GET /api/v1/invoices/:id` embeds `attachments` when documents is wired
+(absent otherwise). The create API **does not require an attachment**: the
+architecture declares attachments after entity creation with no
+cross-service atomicity, so the "attachment required" obligation is the
+demo flow's — UI #41 requires it and/or the #40 match guard rejects without
+a ready attachment.
+
+**API** (create is `invoice:write` — finance/admin at gateway and
+interceptor, per the rbac matrix; the reads are the broad `invoice:read`):
+gRPC `CreateInvoice` / `GetInvoice`; REST `POST /api/v1/invoices` (PRD §15)
+with body `{"po_id": "<uuid>", "number": "<vendor number>", "items":
+[{"po_item_id": "<uuid>", "qty": n, "unit_price_cents": c}]}` — 201 + the
+stored invoice; `GET /api/v1/invoices/{id}` — the detail read with lines
+(and `attachments` when documents is wired). Error codes:
+`inv_number_invalid`, `inv_items_empty`, `inv_qty_invalid`,
+`inv_unit_price_invalid`, `inv_po_item_duplicate`, `inv_po_item_unknown` (a
+po_item_id that is no line of this PO), `po_id_invalid`, `inv_id_invalid` →
+400 · `inv_over_bill`, `po_illegal_transition`, `inv_number_duplicate` →
+409 · `po_not_found`, `inv_not_found` → 404 (also the cross-tenant answers,
+via RLS). The list endpoint and the invoice UI are #41's.
+
 ## Requisition state machine (#28)
 
 Seven legal edges (loose cancel — maintainer decision on #28):
@@ -781,6 +889,8 @@ missing (404 `requisition_not_found`).
 - #35: PO creation from an approved requisition (done — 0007 tables, draft PO with copied lines, per-tenant gap-free `PO-%06d` numbering, conversion replay contract, tx-scoped active-vendor gate `ForUseTx`, guarded `approved → closed`, one `po.created` outbox event). Goods receipts (#37) and the missing `pr.converted` requisition-side event are follow-ups.
 - #36: PO lifecycle state machine (done — ten legal edges over the seven statuses, receipt-guarded cancel, `issued_at` on issue, guarded tenant-scoped transitions serialized on the PO row lock, one outbox event per transition, gRPC + REST issue/acknowledge/cancel/close at `po:write`). Goods receipts (#37) drive the receipt edges.
 - #37: goods receipts with partial receipt rules (done — 0008 tables, `GRN-%06d` gap-free per tenant, `purchaseorder.ApplyReceipt` three-branch status selection with the same-status branch, cumulative over-receipt guard with the pinned `grn_over_receipt: …` detail line and the dedicated REST renderer, one `grn.posted` outbox row per receipt typed to the PO, gRPC + REST at `grn:post`). See the [Goods receipts](#goods-receipts-37) section.
+- #39: invoice model and create API (done — 0009 tables, vendor invoice numbers unique per (tenant, vendor), vendor/currency derived server-side from the locked PO, server-recomputed totals, the cumulative strict `inv_over_bill: …` guard with the dedicated REST renderer, `pending|matched|discrepancy` status CHECK with `match_result` reserved for #40, attachment entity + routes + embedded detail read, no outbox row on create). See the [Invoices](#invoices-39) section.
+- #40/#41: the 3-way match (writes `match_result`, moves status, emits `invoice.matched`/`invoice.discrepancy`) and the invoice list/UI — the follow-ups this model was built for.
 - Approvals read endpoints/queue #32-34 (M2–M3).
 - The timeline/event read path (#42/#43/#47, `GET /api/v1/events`) consumes the outbox's `entity_type`/`entity_id` columns; a tenant+entity index arrives with whichever issue first queries them.
 
