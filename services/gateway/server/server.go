@@ -46,6 +46,9 @@ type ProcurementClient interface {
 	PostGoodsReceipt(ctx context.Context, in *procurementv1.PostGoodsReceiptRequest, opts ...grpc.CallOption) (*procurementv1.PostGoodsReceiptResponse, error)
 	CreateInvoice(ctx context.Context, in *procurementv1.CreateInvoiceRequest, opts ...grpc.CallOption) (*procurementv1.Invoice, error)
 	GetInvoice(ctx context.Context, in *procurementv1.GetInvoiceRequest, opts ...grpc.CallOption) (*procurementv1.Invoice, error)
+	MatchInvoice(ctx context.Context, in *procurementv1.MatchInvoiceRequest, opts ...grpc.CallOption) (*procurementv1.Invoice, error)
+	GetMatchSettings(ctx context.Context, in *procurementv1.GetMatchSettingsRequest, opts ...grpc.CallOption) (*procurementv1.MatchSettings, error)
+	ReplaceMatchSettings(ctx context.Context, in *procurementv1.ReplaceMatchSettingsRequest, opts ...grpc.CallOption) (*procurementv1.MatchSettings, error)
 }
 
 type gatewayOptions struct {
@@ -56,8 +59,8 @@ type gatewayOptions struct {
 }
 
 // WithProcurement proxies the procurement API under /api/v1/vendors,
-// /api/v1/requisitions, /api/v1/approvals, /api/v1/purchase-orders, and
-// /api/v1/invoices.
+// /api/v1/requisitions, /api/v1/approvals, /api/v1/purchase-orders,
+// /api/v1/invoices, and /api/v1/match-settings.
 func WithProcurement(client ProcurementClient) Option {
 	return func(o *gatewayOptions) { o.procurement = client }
 }
@@ -122,6 +125,7 @@ func New(log *slog.Logger, verifier *token.Verifier, opts ...Option) *fiber.App 
 		registerApprovalRoutes(app, verifier, o.procurement)
 		registerPurchaseOrderRoutes(app, verifier, o.procurement)
 		registerInvoiceRoutes(app, verifier, o.procurement, o.documents)
+		registerMatchSettingsRoutes(app, verifier, o.procurement)
 	}
 	if o.documents != nil {
 		registerEventRoutes(app, verifier, o.documents)

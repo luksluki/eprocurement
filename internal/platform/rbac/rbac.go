@@ -32,6 +32,7 @@ const (
 	GRNPost           = "grn:post"
 	InvoiceRead       = "invoice:read"
 	InvoiceWrite      = "invoice:write"
+	MatchConfigure    = "match:configure"
 	ExportRun         = "export:run"
 	AuditRead         = "audit:read"
 	UsersManage       = "users:manage"
@@ -67,6 +68,10 @@ var matrix = []entry{
 	{GRNPost, []string{RoleBuyer}},
 	{InvoiceRead, []string{RoleRequester, RoleApprover, RoleBuyer, RoleFinance, RoleViewer}},
 	{InvoiceWrite, []string{RoleFinance}},
+	// Admin-only by design (the approval:configure twin — #40's maintainer
+	// decision 2026-10-28: tolerances live on the tenant admin's
+	// /admin/settings surface): no non-admin role grants it.
+	{MatchConfigure, nil},
 	{ExportRun, []string{RoleFinance}},
 	{AuditRead, []string{RoleViewer}},
 	{UsersManage, nil},

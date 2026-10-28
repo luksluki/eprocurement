@@ -131,6 +131,20 @@ func (f *fakeRequisitionClient) GetInvoice(ctx context.Context, in *procurementv
 	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
 }
 
+// The #40 match methods satisfy the widened ProcurementClient interface;
+// the match/settings tests use their own fakes with recording.
+func (f *fakeRequisitionClient) MatchInvoice(ctx context.Context, in *procurementv1.MatchInvoiceRequest, opts ...grpc.CallOption) (*procurementv1.Invoice, error) {
+	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
+}
+
+func (f *fakeRequisitionClient) GetMatchSettings(ctx context.Context, in *procurementv1.GetMatchSettingsRequest, opts ...grpc.CallOption) (*procurementv1.MatchSettings, error) {
+	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
+}
+
+func (f *fakeRequisitionClient) ReplaceMatchSettings(ctx context.Context, in *procurementv1.ReplaceMatchSettingsRequest, opts ...grpc.CallOption) (*procurementv1.MatchSettings, error) {
+	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
+}
+
 func (f *fakeRequisitionClient) GetApprovalRules(ctx context.Context, in *procurementv1.GetApprovalRulesRequest, opts ...grpc.CallOption) (*procurementv1.ApprovalRulesResponse, error) {
 	return &procurementv1.ApprovalRulesResponse{}, nil
 }

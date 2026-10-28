@@ -141,6 +141,27 @@ service Procurement {
   // match_result_json carries the match's explanation once it ran (empty
   // while pending).
   rpc GetInvoice(GetInvoiceRequest) returns (Invoice);
+  // MatchInvoice applies the three-way match (#40, FR-08) to one invoice of
+  // the caller's tenant: every line's cumulative invoiced quantity (across
+  // ALL the PO's invoices, this one included) is checked against the PO
+  // line's received quantity — upper-side only, within the tenant's
+  // qty_pct tolerance — and this invoice's unit price against the PO price,
+  // symmetrically within price_pct. The verdict lands atomically with its
+  // explanation: status moves pending/discrepancy → matched/discrepancy,
+  // match_result_json fills with the per-line detail, and exactly one
+  // invoice.matched or invoice.discrepancy outbox event commits with it.
+  // Re-running on matched is rejected (409 inv_already_matched);
+  // pending/discrepancy may be re-matched (a late GRN resolving a
+  // discrepancy), each run appending its own event. No attachment gate —
+  // the "attachment required" obligation stays with the demo flow (#41).
+  rpc MatchInvoice(MatchInvoiceRequest) returns (Invoice);
+  // GetMatchSettings returns the caller tenant's match tolerances; a tenant
+  // with no stored row reads the effective defaults 0%/0% (strict).
+  rpc GetMatchSettings(GetMatchSettingsRequest) returns (MatchSettings);
+  // ReplaceMatchSettings upserts the caller tenant's match tolerances
+  // (match:configure, admin-only). Values apply to match runs that start
+  // after the commit; stored match results are immutable history.
+  rpc ReplaceMatchSettings(ReplaceMatchSettingsRequest) returns (MatchSettings);
 }
 
 message Vendor {
@@ -464,4 +485,26 @@ message CreateInvoiceRequest {
 // GetInvoiceRequest names the invoice to read.
 message GetInvoiceRequest {
   string id = 1;
+}
+
+// MatchInvoiceRequest names the invoice to match (the caller's tenant comes
+// from the auth metadata; invoice:write — finance/admin).
+message MatchInvoiceRequest {
+  string id = 1;
+}
+
+// MatchSettings are the tenant's three-way match tolerances (FR-08), whole
+// percentages. qty_pct bounds how far the PO's cumulative invoiced quantity
+// may exceed the received quantity (upper side only); price_pct bounds the
+// symmetric deviation of an invoice unit price from the PO price.
+message MatchSettings {
+  int32 qty_pct = 1;   // 0..100
+  int32 price_pct = 2; // 0..100
+}
+
+message GetMatchSettingsRequest {}
+
+message ReplaceMatchSettingsRequest {
+  int32 qty_pct = 1;   // 0..100; else 400 match_qty_pct_invalid
+  int32 price_pct = 2; // 0..100; else 400 match_price_pct_invalid
 }

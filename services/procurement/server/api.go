@@ -17,13 +17,15 @@ import (
 	"github.com/luksluki/eprocurement/services/procurement/approval"
 	"github.com/luksluki/eprocurement/services/procurement/goodsreceipt"
 	"github.com/luksluki/eprocurement/services/procurement/invoice"
+	"github.com/luksluki/eprocurement/services/procurement/match"
 	"github.com/luksluki/eprocurement/services/procurement/purchaseorder"
 	"github.com/luksluki/eprocurement/services/procurement/requisition"
 	"github.com/luksluki/eprocurement/services/procurement/vendor"
 )
 
 // api adapts the vendor, requisition, approval, purchase-order,
-// goods-receipt, and invoice domains to the procurement.v1 gRPC contract.
+// goods-receipt, invoice, and match domains to the procurement.v1 gRPC
+// contract.
 // Every method reads the caller identity the gateway propagated (tenant
 // scoping, audit ids); the RBAC interceptor has already re-checked the
 // permission.
@@ -35,6 +37,7 @@ type api struct {
 	purchaseOrders *purchaseorder.Store
 	goodsReceipts  *goodsreceipt.Store
 	invoices       *invoice.Store
+	matches        *match.Store
 	log            *slog.Logger
 }
 
@@ -734,6 +737,8 @@ func mapInvoiceError(err error) error {
 		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, invoice.ErrNumberDuplicate):
 		return status.Error(codes.AlreadyExists, err.Error())
+	case errors.Is(err, invoice.ErrAlreadyMatched):
+		return status.Error(codes.Aborted, err.Error())
 	case errors.Is(err, purchaseorder.ErrIllegalTransition):
 		return status.Error(codes.Aborted, err.Error())
 	case errors.Is(err, invoice.ErrNotFound),
@@ -802,6 +807,73 @@ func (a *api) GetInvoice(ctx context.Context, req *procurementv1.GetInvoiceReque
 		return nil, mapInvoiceError(err)
 	}
 	return invoicePB(inv), nil
+}
+
+// MatchInvoice applies the three-way match to one invoice of the caller's
+// tenant (invoice:write — finance/admin at both layers; #40, FR-08). The
+// store owns the pinned step order: PO row lock, locked invoice re-read,
+// the matched re-run guard, the tenant's tolerances (defaults 0%/0%), the
+// cumulative invoiced sums, then the pure engine's verdict commits with
+// status, match_result, and exactly one invoice.matched / invoice.discrepancy
+// outbox event. pending/discrepancy may be (re-)matched; matched answers
+// 409 inv_already_matched.
+func (a *api) MatchInvoice(ctx context.Context, req *procurementv1.MatchInvoiceRequest) (*procurementv1.Invoice, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	inv, _, err := a.matches.Match(ctx, auth.TenantID, strings.TrimSpace(req.GetId()), auth.UserID)
+	if err != nil {
+		return nil, mapInvoiceError(err)
+	}
+	return invoicePB(inv), nil
+}
+
+// mapMatchError maps the match settings' validation codes to gRPC codes —
+// the same verbatim-machine-code contract as the other mappers.
+func mapMatchError(err error) error {
+	switch {
+	case errors.Is(err, match.ErrQtyPctInvalid),
+		errors.Is(err, match.ErrPricePctInvalid):
+		return status.Error(codes.InvalidArgument, err.Error())
+	default:
+		return status.Error(codes.Internal, "internal error")
+	}
+}
+
+// GetMatchSettings returns the caller tenant's tolerances
+// (match:configure, admin-only by matrix); a tenant with no row reads the
+// effective defaults 0%/0%.
+func (a *api) GetMatchSettings(ctx context.Context, _ *procurementv1.GetMatchSettingsRequest) (*procurementv1.MatchSettings, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	settings, err := a.matches.GetSettings(ctx, auth.TenantID)
+	if err != nil {
+		return nil, mapMatchError(err)
+	}
+	return matchSettingsPB(settings), nil
+}
+
+// ReplaceMatchSettings upserts the caller tenant's tolerances
+// (match:configure, admin-only by matrix). Bounds 0..100 answer 400 with
+// the field's machine code; stored match results are immutable history.
+func (a *api) ReplaceMatchSettings(ctx context.Context, req *procurementv1.ReplaceMatchSettingsRequest) (*procurementv1.MatchSettings, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	stored, err := a.matches.ReplaceSettings(ctx, auth.TenantID,
+		match.Settings{QtyPct: req.GetQtyPct(), PricePct: req.GetPricePct()}, auth.UserID)
+	if err != nil {
+		return nil, mapMatchError(err)
+	}
+	return matchSettingsPB(stored), nil
+}
+
+func matchSettingsPB(s match.Settings) *procurementv1.MatchSettings {
+	return &procurementv1.MatchSettings{QtyPct: s.QtyPct, PricePct: s.PricePct}
 }
 
 func vendorPB(v vendor.Vendor) *procurementv1.Vendor {
