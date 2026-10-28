@@ -36,6 +36,29 @@ type fakeInvoiceClient struct {
 	getRes *procurementv1.Invoice
 	getErr error
 	getCtx context.Context
+
+	matchReq *procurementv1.MatchInvoiceRequest
+	matchRes *procurementv1.Invoice
+	matchErr error
+	matchCtx context.Context
+}
+
+func (f *fakeInvoiceClient) MatchInvoice(ctx context.Context, in *procurementv1.MatchInvoiceRequest, opts ...grpc.CallOption) (*procurementv1.Invoice, error) {
+	f.matchCtx, f.matchReq = ctx, in
+	if f.matchErr != nil {
+		return nil, f.matchErr
+	}
+	return f.matchRes, nil
+}
+
+// The settings surface uses its own recording fake (matchsettings_test.go);
+// these stubs only satisfy the widened interface for this suite's app.
+func (f *fakeInvoiceClient) GetMatchSettings(ctx context.Context, in *procurementv1.GetMatchSettingsRequest, opts ...grpc.CallOption) (*procurementv1.MatchSettings, error) {
+	return nil, status.Error(codes.Unimplemented, "not called in invoice tests")
+}
+
+func (f *fakeInvoiceClient) ReplaceMatchSettings(ctx context.Context, in *procurementv1.ReplaceMatchSettingsRequest, opts ...grpc.CallOption) (*procurementv1.MatchSettings, error) {
+	return nil, status.Error(codes.Unimplemented, "not called in invoice tests")
 }
 
 func (f *fakeInvoiceClient) CreateInvoice(ctx context.Context, in *procurementv1.CreateInvoiceRequest, opts ...grpc.CallOption) (*procurementv1.Invoice, error) {
@@ -336,5 +359,74 @@ func TestInvoiceAttachmentRoutes(t *testing.T) {
 	resp = doReq(t, app, viewerHeader, http.MethodGet, "/api/v1/invoices/inv-1/attachments/att-1/download", "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("viewer download status = %d, want 200", resp.StatusCode)
+	}
+}
+
+// AC (#40): POST /api/v1/invoices/:id/match is invoice:write (finance/
+// admin — the finance reviewer persona) — buyer and viewer are denied 403
+// at the edge before any procurement call — and the finance call forwards
+// the path id with the claims as gRPC metadata, answering 200 with the
+// updated invoice.
+func TestMatchInvoiceRoute(t *testing.T) {
+	for name, role := range map[string]string{
+		"buyer":  rbac.RoleBuyer,
+		"viewer": rbac.RoleViewer,
+	} {
+		app, fake, _, sign := invoiceTestApp(t, nil)
+		fake.matchRes = sampleInvoice()
+		resp, body := reqDo(t, app, "POST", "/api/v1/invoices/inv-1/match", sign(role), "", nil)
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s: status = %d, body = %v", name, resp.StatusCode, body)
+		}
+		if body["required"] != rbac.InvoiceWrite {
+			t.Fatalf("%s: body = %v, want required %s", name, body, rbac.InvoiceWrite)
+		}
+		if fake.matchReq != nil {
+			t.Fatalf("%s: procurement called despite the denial", name)
+		}
+	}
+	app, fake, header, _ := invoiceTestApp(t, nil)
+	matched := sampleInvoice()
+	matched.Status = "matched"
+	matched.MatchResultJson = `{"matched":true,"lines":[]}`
+	fake.matchRes = matched
+	resp, body := reqDo(t, app, "POST", "/api/v1/invoices/inv-1/match", header.Get("Authorization")[7:], "", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("finance match status = %d, body = %v", resp.StatusCode, body)
+	}
+	if body["status"] != "matched" || body["match_result_json"] != `{"matched":true,"lines":[]}` {
+		t.Fatalf("match body = %v", body)
+	}
+	if fake.matchReq.GetId() != "inv-1" {
+		t.Fatalf("forwarded id = %q, want inv-1", fake.matchReq.GetId())
+	}
+	md := metadataOf(t, fake.matchCtx)
+	if md["x-tenant-id"] != "tenant-29" || md["x-user-id"] != "user-29" || md["x-role"] != rbac.RoleFinance {
+		t.Fatalf("propagated metadata = %v", md)
+	}
+}
+
+// AC (#40): the match route's error mapping — the re-run guard renders 409
+// with the inv_already_matched machine code, unknown invoices 404, bad ids
+// 400 — all through the shared mapping.
+func TestMatchInvoiceRouteErrors(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err  error
+		code int
+		want string
+	}{
+		"already matched": {status.Error(codes.Aborted, "inv_already_matched"), http.StatusConflict, "inv_already_matched"},
+		"not found":       {status.Error(codes.NotFound, "inv_not_found"), http.StatusNotFound, "inv_not_found"},
+		"bad id":          {status.Error(codes.InvalidArgument, "inv_id_invalid"), http.StatusBadRequest, "inv_id_invalid"},
+	} {
+		app, fake, header, _ := invoiceTestApp(t, nil)
+		fake.matchErr = tc.err
+		resp, body := reqDo(t, app, "POST", "/api/v1/invoices/inv-1/match", header.Get("Authorization")[7:], "", nil)
+		if resp.StatusCode != tc.code {
+			t.Fatalf("%s: status = %d, body = %v", name, resp.StatusCode, body)
+		}
+		if body["code"] != tc.want {
+			t.Fatalf("%s: code = %v, want %q", name, body["code"], tc.want)
+		}
 	}
 }

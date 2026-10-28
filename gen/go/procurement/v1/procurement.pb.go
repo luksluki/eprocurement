@@ -2614,6 +2614,196 @@ func (x *GetInvoiceRequest) GetId() string {
 	return ""
 }
 
+// MatchInvoiceRequest names the invoice to match (the caller's tenant comes
+// from the auth metadata; invoice:write — finance/admin).
+type MatchInvoiceRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MatchInvoiceRequest) Reset() {
+	*x = MatchInvoiceRequest{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[38]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MatchInvoiceRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MatchInvoiceRequest) ProtoMessage() {}
+
+func (x *MatchInvoiceRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[38]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MatchInvoiceRequest.ProtoReflect.Descriptor instead.
+func (*MatchInvoiceRequest) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{38}
+}
+
+func (x *MatchInvoiceRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+// MatchSettings are the tenant's three-way match tolerances (FR-08), whole
+// percentages. qty_pct bounds how far the PO's cumulative invoiced quantity
+// may exceed the received quantity (upper side only); price_pct bounds the
+// symmetric deviation of an invoice unit price from the PO price.
+type MatchSettings struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	QtyPct        int32                  `protobuf:"varint,1,opt,name=qty_pct,json=qtyPct,proto3" json:"qty_pct,omitempty"`       // 0..100
+	PricePct      int32                  `protobuf:"varint,2,opt,name=price_pct,json=pricePct,proto3" json:"price_pct,omitempty"` // 0..100
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MatchSettings) Reset() {
+	*x = MatchSettings{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[39]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MatchSettings) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MatchSettings) ProtoMessage() {}
+
+func (x *MatchSettings) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[39]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MatchSettings.ProtoReflect.Descriptor instead.
+func (*MatchSettings) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{39}
+}
+
+func (x *MatchSettings) GetQtyPct() int32 {
+	if x != nil {
+		return x.QtyPct
+	}
+	return 0
+}
+
+func (x *MatchSettings) GetPricePct() int32 {
+	if x != nil {
+		return x.PricePct
+	}
+	return 0
+}
+
+type GetMatchSettingsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetMatchSettingsRequest) Reset() {
+	*x = GetMatchSettingsRequest{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[40]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetMatchSettingsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetMatchSettingsRequest) ProtoMessage() {}
+
+func (x *GetMatchSettingsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[40]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetMatchSettingsRequest.ProtoReflect.Descriptor instead.
+func (*GetMatchSettingsRequest) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{40}
+}
+
+type ReplaceMatchSettingsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	QtyPct        int32                  `protobuf:"varint,1,opt,name=qty_pct,json=qtyPct,proto3" json:"qty_pct,omitempty"`       // 0..100; else 400 match_qty_pct_invalid
+	PricePct      int32                  `protobuf:"varint,2,opt,name=price_pct,json=pricePct,proto3" json:"price_pct,omitempty"` // 0..100; else 400 match_price_pct_invalid
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReplaceMatchSettingsRequest) Reset() {
+	*x = ReplaceMatchSettingsRequest{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[41]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReplaceMatchSettingsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReplaceMatchSettingsRequest) ProtoMessage() {}
+
+func (x *ReplaceMatchSettingsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[41]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReplaceMatchSettingsRequest.ProtoReflect.Descriptor instead.
+func (*ReplaceMatchSettingsRequest) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{41}
+}
+
+func (x *ReplaceMatchSettingsRequest) GetQtyPct() int32 {
+	if x != nil {
+		return x.QtyPct
+	}
+	return 0
+}
+
+func (x *ReplaceMatchSettingsRequest) GetPricePct() int32 {
+	if x != nil {
+		return x.PricePct
+	}
+	return 0
+}
+
 var File_procurement_v1_procurement_proto protoreflect.FileDescriptor
 
 const file_procurement_v1_procurement_proto_rawDesc = "" +
@@ -2830,7 +3020,16 @@ const file_procurement_v1_procurement_proto_rawDesc = "" +
 	"\x06number\x18\x02 \x01(\tR\x06number\x121\n" +
 	"\x05items\x18\x03 \x03(\v2\x1b.procurement.v1.InvoiceItemR\x05items\"#\n" +
 	"\x11GetInvoiceRequest\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id2\x9c\x0f\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"%\n" +
+	"\x13MatchInvoiceRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"E\n" +
+	"\rMatchSettings\x12\x17\n" +
+	"\aqty_pct\x18\x01 \x01(\x05R\x06qtyPct\x12\x1b\n" +
+	"\tprice_pct\x18\x02 \x01(\x05R\bpricePct\"\x19\n" +
+	"\x17GetMatchSettingsRequest\"S\n" +
+	"\x1bReplaceMatchSettingsRequest\x12\x17\n" +
+	"\aqty_pct\x18\x01 \x01(\x05R\x06qtyPct\x12\x1b\n" +
+	"\tprice_pct\x18\x02 \x01(\x05R\bpricePct2\xaa\x11\n" +
 	"\vProcurement\x12K\n" +
 	"\fCreateVendor\x12#.procurement.v1.CreateVendorRequest\x1a\x16.procurement.v1.Vendor\x12E\n" +
 	"\tGetVendor\x12 .procurement.v1.GetVendorRequest\x1a\x16.procurement.v1.Vendor\x12K\n" +
@@ -2853,7 +3052,10 @@ const file_procurement_v1_procurement_proto_rawDesc = "" +
 	"\x10PostGoodsReceipt\x12'.procurement.v1.PostGoodsReceiptRequest\x1a(.procurement.v1.PostGoodsReceiptResponse\x12N\n" +
 	"\rCreateInvoice\x12$.procurement.v1.CreateInvoiceRequest\x1a\x17.procurement.v1.Invoice\x12H\n" +
 	"\n" +
-	"GetInvoice\x12!.procurement.v1.GetInvoiceRequest\x1a\x17.procurement.v1.InvoiceBFZDgithub.com/luksluki/eprocurement/gen/go/procurement/v1;procurementv1b\x06proto3"
+	"GetInvoice\x12!.procurement.v1.GetInvoiceRequest\x1a\x17.procurement.v1.Invoice\x12L\n" +
+	"\fMatchInvoice\x12#.procurement.v1.MatchInvoiceRequest\x1a\x17.procurement.v1.Invoice\x12Z\n" +
+	"\x10GetMatchSettings\x12'.procurement.v1.GetMatchSettingsRequest\x1a\x1d.procurement.v1.MatchSettings\x12b\n" +
+	"\x14ReplaceMatchSettings\x12+.procurement.v1.ReplaceMatchSettingsRequest\x1a\x1d.procurement.v1.MatchSettingsBFZDgithub.com/luksluki/eprocurement/gen/go/procurement/v1;procurementv1b\x06proto3"
 
 var (
 	file_procurement_v1_procurement_proto_rawDescOnce sync.Once
@@ -2867,7 +3069,7 @@ func file_procurement_v1_procurement_proto_rawDescGZIP() []byte {
 	return file_procurement_v1_procurement_proto_rawDescData
 }
 
-var file_procurement_v1_procurement_proto_msgTypes = make([]protoimpl.MessageInfo, 38)
+var file_procurement_v1_procurement_proto_msgTypes = make([]protoimpl.MessageInfo, 42)
 var file_procurement_v1_procurement_proto_goTypes = []any{
 	(*Vendor)(nil),                          // 0: procurement.v1.Vendor
 	(*CreateVendorRequest)(nil),             // 1: procurement.v1.CreateVendorRequest
@@ -2907,6 +3109,10 @@ var file_procurement_v1_procurement_proto_goTypes = []any{
 	(*InvoiceItem)(nil),                     // 35: procurement.v1.InvoiceItem
 	(*CreateInvoiceRequest)(nil),            // 36: procurement.v1.CreateInvoiceRequest
 	(*GetInvoiceRequest)(nil),               // 37: procurement.v1.GetInvoiceRequest
+	(*MatchInvoiceRequest)(nil),             // 38: procurement.v1.MatchInvoiceRequest
+	(*MatchSettings)(nil),                   // 39: procurement.v1.MatchSettings
+	(*GetMatchSettingsRequest)(nil),         // 40: procurement.v1.GetMatchSettingsRequest
+	(*ReplaceMatchSettingsRequest)(nil),     // 41: procurement.v1.ReplaceMatchSettingsRequest
 }
 var file_procurement_v1_procurement_proto_depIdxs = []int32{
 	0,  // 0: procurement.v1.ListVendorsResponse.vendors:type_name -> procurement.v1.Vendor
@@ -2947,29 +3153,35 @@ var file_procurement_v1_procurement_proto_depIdxs = []int32{
 	32, // 35: procurement.v1.Procurement.PostGoodsReceipt:input_type -> procurement.v1.PostGoodsReceiptRequest
 	36, // 36: procurement.v1.Procurement.CreateInvoice:input_type -> procurement.v1.CreateInvoiceRequest
 	37, // 37: procurement.v1.Procurement.GetInvoice:input_type -> procurement.v1.GetInvoiceRequest
-	0,  // 38: procurement.v1.Procurement.CreateVendor:output_type -> procurement.v1.Vendor
-	0,  // 39: procurement.v1.Procurement.GetVendor:output_type -> procurement.v1.Vendor
-	0,  // 40: procurement.v1.Procurement.UpdateVendor:output_type -> procurement.v1.Vendor
-	0,  // 41: procurement.v1.Procurement.DeactivateVendor:output_type -> procurement.v1.Vendor
-	6,  // 42: procurement.v1.Procurement.ListVendors:output_type -> procurement.v1.ListVendorsResponse
-	7,  // 43: procurement.v1.Procurement.CreateRequisition:output_type -> procurement.v1.Requisition
-	7,  // 44: procurement.v1.Procurement.UpdateRequisition:output_type -> procurement.v1.Requisition
-	7,  // 45: procurement.v1.Procurement.SubmitRequisition:output_type -> procurement.v1.Requisition
-	14, // 46: procurement.v1.Procurement.ListRequisitions:output_type -> procurement.v1.ListRequisitionsResponse
-	7,  // 47: procurement.v1.Procurement.GetRequisition:output_type -> procurement.v1.Requisition
-	17, // 48: procurement.v1.Procurement.DecideApproval:output_type -> procurement.v1.DecideApprovalResponse
-	21, // 49: procurement.v1.Procurement.GetApprovalRules:output_type -> procurement.v1.ApprovalRulesResponse
-	21, // 50: procurement.v1.Procurement.ReplaceApprovalRules:output_type -> procurement.v1.ApprovalRulesResponse
-	25, // 51: procurement.v1.Procurement.CreatePurchaseOrder:output_type -> procurement.v1.CreatePurchaseOrderResponse
-	22, // 52: procurement.v1.Procurement.IssuePurchaseOrder:output_type -> procurement.v1.PurchaseOrder
-	22, // 53: procurement.v1.Procurement.AcknowledgePurchaseOrder:output_type -> procurement.v1.PurchaseOrder
-	22, // 54: procurement.v1.Procurement.CancelPurchaseOrder:output_type -> procurement.v1.PurchaseOrder
-	22, // 55: procurement.v1.Procurement.ClosePurchaseOrder:output_type -> procurement.v1.PurchaseOrder
-	33, // 56: procurement.v1.Procurement.PostGoodsReceipt:output_type -> procurement.v1.PostGoodsReceiptResponse
-	34, // 57: procurement.v1.Procurement.CreateInvoice:output_type -> procurement.v1.Invoice
-	34, // 58: procurement.v1.Procurement.GetInvoice:output_type -> procurement.v1.Invoice
-	38, // [38:59] is the sub-list for method output_type
-	17, // [17:38] is the sub-list for method input_type
+	38, // 38: procurement.v1.Procurement.MatchInvoice:input_type -> procurement.v1.MatchInvoiceRequest
+	40, // 39: procurement.v1.Procurement.GetMatchSettings:input_type -> procurement.v1.GetMatchSettingsRequest
+	41, // 40: procurement.v1.Procurement.ReplaceMatchSettings:input_type -> procurement.v1.ReplaceMatchSettingsRequest
+	0,  // 41: procurement.v1.Procurement.CreateVendor:output_type -> procurement.v1.Vendor
+	0,  // 42: procurement.v1.Procurement.GetVendor:output_type -> procurement.v1.Vendor
+	0,  // 43: procurement.v1.Procurement.UpdateVendor:output_type -> procurement.v1.Vendor
+	0,  // 44: procurement.v1.Procurement.DeactivateVendor:output_type -> procurement.v1.Vendor
+	6,  // 45: procurement.v1.Procurement.ListVendors:output_type -> procurement.v1.ListVendorsResponse
+	7,  // 46: procurement.v1.Procurement.CreateRequisition:output_type -> procurement.v1.Requisition
+	7,  // 47: procurement.v1.Procurement.UpdateRequisition:output_type -> procurement.v1.Requisition
+	7,  // 48: procurement.v1.Procurement.SubmitRequisition:output_type -> procurement.v1.Requisition
+	14, // 49: procurement.v1.Procurement.ListRequisitions:output_type -> procurement.v1.ListRequisitionsResponse
+	7,  // 50: procurement.v1.Procurement.GetRequisition:output_type -> procurement.v1.Requisition
+	17, // 51: procurement.v1.Procurement.DecideApproval:output_type -> procurement.v1.DecideApprovalResponse
+	21, // 52: procurement.v1.Procurement.GetApprovalRules:output_type -> procurement.v1.ApprovalRulesResponse
+	21, // 53: procurement.v1.Procurement.ReplaceApprovalRules:output_type -> procurement.v1.ApprovalRulesResponse
+	25, // 54: procurement.v1.Procurement.CreatePurchaseOrder:output_type -> procurement.v1.CreatePurchaseOrderResponse
+	22, // 55: procurement.v1.Procurement.IssuePurchaseOrder:output_type -> procurement.v1.PurchaseOrder
+	22, // 56: procurement.v1.Procurement.AcknowledgePurchaseOrder:output_type -> procurement.v1.PurchaseOrder
+	22, // 57: procurement.v1.Procurement.CancelPurchaseOrder:output_type -> procurement.v1.PurchaseOrder
+	22, // 58: procurement.v1.Procurement.ClosePurchaseOrder:output_type -> procurement.v1.PurchaseOrder
+	33, // 59: procurement.v1.Procurement.PostGoodsReceipt:output_type -> procurement.v1.PostGoodsReceiptResponse
+	34, // 60: procurement.v1.Procurement.CreateInvoice:output_type -> procurement.v1.Invoice
+	34, // 61: procurement.v1.Procurement.GetInvoice:output_type -> procurement.v1.Invoice
+	34, // 62: procurement.v1.Procurement.MatchInvoice:output_type -> procurement.v1.Invoice
+	39, // 63: procurement.v1.Procurement.GetMatchSettings:output_type -> procurement.v1.MatchSettings
+	39, // 64: procurement.v1.Procurement.ReplaceMatchSettings:output_type -> procurement.v1.MatchSettings
+	41, // [41:65] is the sub-list for method output_type
+	17, // [17:41] is the sub-list for method input_type
 	17, // [17:17] is the sub-list for extension type_name
 	17, // [17:17] is the sub-list for extension extendee
 	0,  // [0:17] is the sub-list for field type_name
@@ -2986,7 +3198,7 @@ func file_procurement_v1_procurement_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_procurement_v1_procurement_proto_rawDesc), len(file_procurement_v1_procurement_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   38,
+			NumMessages:   42,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

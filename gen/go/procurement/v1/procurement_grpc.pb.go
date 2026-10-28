@@ -40,6 +40,9 @@ const (
 	Procurement_PostGoodsReceipt_FullMethodName         = "/procurement.v1.Procurement/PostGoodsReceipt"
 	Procurement_CreateInvoice_FullMethodName            = "/procurement.v1.Procurement/CreateInvoice"
 	Procurement_GetInvoice_FullMethodName               = "/procurement.v1.Procurement/GetInvoice"
+	Procurement_MatchInvoice_FullMethodName             = "/procurement.v1.Procurement/MatchInvoice"
+	Procurement_GetMatchSettings_FullMethodName         = "/procurement.v1.Procurement/GetMatchSettings"
+	Procurement_ReplaceMatchSettings_FullMethodName     = "/procurement.v1.Procurement/ReplaceMatchSettings"
 )
 
 // ProcurementClient is the client API for Procurement service.
@@ -183,6 +186,27 @@ type ProcurementClient interface {
 	// match_result_json carries the match's explanation once it ran (empty
 	// while pending).
 	GetInvoice(ctx context.Context, in *GetInvoiceRequest, opts ...grpc.CallOption) (*Invoice, error)
+	// MatchInvoice applies the three-way match (#40, FR-08) to one invoice of
+	// the caller's tenant: every line's cumulative invoiced quantity (across
+	// ALL the PO's invoices, this one included) is checked against the PO
+	// line's received quantity — upper-side only, within the tenant's
+	// qty_pct tolerance — and this invoice's unit price against the PO price,
+	// symmetrically within price_pct. The verdict lands atomically with its
+	// explanation: status moves pending/discrepancy → matched/discrepancy,
+	// match_result_json fills with the per-line detail, and exactly one
+	// invoice.matched or invoice.discrepancy outbox event commits with it.
+	// Re-running on matched is rejected (409 inv_already_matched);
+	// pending/discrepancy may be re-matched (a late GRN resolving a
+	// discrepancy), each run appending its own event. No attachment gate —
+	// the "attachment required" obligation stays with the demo flow (#41).
+	MatchInvoice(ctx context.Context, in *MatchInvoiceRequest, opts ...grpc.CallOption) (*Invoice, error)
+	// GetMatchSettings returns the caller tenant's match tolerances; a tenant
+	// with no stored row reads the effective defaults 0%/0% (strict).
+	GetMatchSettings(ctx context.Context, in *GetMatchSettingsRequest, opts ...grpc.CallOption) (*MatchSettings, error)
+	// ReplaceMatchSettings upserts the caller tenant's match tolerances
+	// (match:configure, admin-only). Values apply to match runs that start
+	// after the commit; stored match results are immutable history.
+	ReplaceMatchSettings(ctx context.Context, in *ReplaceMatchSettingsRequest, opts ...grpc.CallOption) (*MatchSettings, error)
 }
 
 type procurementClient struct {
@@ -403,6 +427,36 @@ func (c *procurementClient) GetInvoice(ctx context.Context, in *GetInvoiceReques
 	return out, nil
 }
 
+func (c *procurementClient) MatchInvoice(ctx context.Context, in *MatchInvoiceRequest, opts ...grpc.CallOption) (*Invoice, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Invoice)
+	err := c.cc.Invoke(ctx, Procurement_MatchInvoice_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *procurementClient) GetMatchSettings(ctx context.Context, in *GetMatchSettingsRequest, opts ...grpc.CallOption) (*MatchSettings, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MatchSettings)
+	err := c.cc.Invoke(ctx, Procurement_GetMatchSettings_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *procurementClient) ReplaceMatchSettings(ctx context.Context, in *ReplaceMatchSettingsRequest, opts ...grpc.CallOption) (*MatchSettings, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MatchSettings)
+	err := c.cc.Invoke(ctx, Procurement_ReplaceMatchSettings_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ProcurementServer is the server API for Procurement service.
 // All implementations must embed UnimplementedProcurementServer
 // for forward compatibility.
@@ -544,6 +598,27 @@ type ProcurementServer interface {
 	// match_result_json carries the match's explanation once it ran (empty
 	// while pending).
 	GetInvoice(context.Context, *GetInvoiceRequest) (*Invoice, error)
+	// MatchInvoice applies the three-way match (#40, FR-08) to one invoice of
+	// the caller's tenant: every line's cumulative invoiced quantity (across
+	// ALL the PO's invoices, this one included) is checked against the PO
+	// line's received quantity — upper-side only, within the tenant's
+	// qty_pct tolerance — and this invoice's unit price against the PO price,
+	// symmetrically within price_pct. The verdict lands atomically with its
+	// explanation: status moves pending/discrepancy → matched/discrepancy,
+	// match_result_json fills with the per-line detail, and exactly one
+	// invoice.matched or invoice.discrepancy outbox event commits with it.
+	// Re-running on matched is rejected (409 inv_already_matched);
+	// pending/discrepancy may be re-matched (a late GRN resolving a
+	// discrepancy), each run appending its own event. No attachment gate —
+	// the "attachment required" obligation stays with the demo flow (#41).
+	MatchInvoice(context.Context, *MatchInvoiceRequest) (*Invoice, error)
+	// GetMatchSettings returns the caller tenant's match tolerances; a tenant
+	// with no stored row reads the effective defaults 0%/0% (strict).
+	GetMatchSettings(context.Context, *GetMatchSettingsRequest) (*MatchSettings, error)
+	// ReplaceMatchSettings upserts the caller tenant's match tolerances
+	// (match:configure, admin-only). Values apply to match runs that start
+	// after the commit; stored match results are immutable history.
+	ReplaceMatchSettings(context.Context, *ReplaceMatchSettingsRequest) (*MatchSettings, error)
 	mustEmbedUnimplementedProcurementServer()
 }
 
@@ -616,6 +691,15 @@ func (UnimplementedProcurementServer) CreateInvoice(context.Context, *CreateInvo
 }
 func (UnimplementedProcurementServer) GetInvoice(context.Context, *GetInvoiceRequest) (*Invoice, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetInvoice not implemented")
+}
+func (UnimplementedProcurementServer) MatchInvoice(context.Context, *MatchInvoiceRequest) (*Invoice, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method MatchInvoice not implemented")
+}
+func (UnimplementedProcurementServer) GetMatchSettings(context.Context, *GetMatchSettingsRequest) (*MatchSettings, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetMatchSettings not implemented")
+}
+func (UnimplementedProcurementServer) ReplaceMatchSettings(context.Context, *ReplaceMatchSettingsRequest) (*MatchSettings, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReplaceMatchSettings not implemented")
 }
 func (UnimplementedProcurementServer) mustEmbedUnimplementedProcurementServer() {}
 func (UnimplementedProcurementServer) testEmbeddedByValue()                     {}
@@ -1016,6 +1100,60 @@ func _Procurement_GetInvoice_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Procurement_MatchInvoice_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MatchInvoiceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProcurementServer).MatchInvoice(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Procurement_MatchInvoice_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProcurementServer).MatchInvoice(ctx, req.(*MatchInvoiceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Procurement_GetMatchSettings_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetMatchSettingsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProcurementServer).GetMatchSettings(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Procurement_GetMatchSettings_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProcurementServer).GetMatchSettings(ctx, req.(*GetMatchSettingsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Procurement_ReplaceMatchSettings_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReplaceMatchSettingsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProcurementServer).ReplaceMatchSettings(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Procurement_ReplaceMatchSettings_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProcurementServer).ReplaceMatchSettings(ctx, req.(*ReplaceMatchSettingsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Procurement_ServiceDesc is the grpc.ServiceDesc for Procurement service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1106,6 +1244,18 @@ var Procurement_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetInvoice",
 			Handler:    _Procurement_GetInvoice_Handler,
+		},
+		{
+			MethodName: "MatchInvoice",
+			Handler:    _Procurement_MatchInvoice_Handler,
+		},
+		{
+			MethodName: "GetMatchSettings",
+			Handler:    _Procurement_GetMatchSettings_Handler,
+		},
+		{
+			MethodName: "ReplaceMatchSettings",
+			Handler:    _Procurement_ReplaceMatchSettings_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

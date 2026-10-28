@@ -88,3 +88,26 @@ func TestOverBillError(t *testing.T) {
 		t.Fatalf("errors.Is(typed, itself) = false")
 	}
 }
+
+// The #40 re-run guard: matched is final, pending and discrepancy may be
+// (re-)matched — a late GRN resolving a discrepancy is the intended loop
+// (maintainer decision 2026-10-28).
+func TestMatchGuard(t *testing.T) {
+	cases := []struct {
+		status  string
+		wantErr error
+	}{
+		{StatusPending, nil},
+		{StatusDiscrepancy, nil},
+		{StatusMatched, ErrAlreadyMatched},
+		{"", nil}, // unknown statuses are not this guard's business
+	}
+	for _, tc := range cases {
+		if err := MatchGuard(tc.status); !errors.Is(err, tc.wantErr) {
+			t.Errorf("MatchGuard(%q) = %v, want %v", tc.status, err, tc.wantErr)
+		}
+	}
+	if ErrAlreadyMatched.Error() != "inv_already_matched" {
+		t.Fatalf("sentinel = %q, want inv_already_matched", ErrAlreadyMatched.Error())
+	}
+}

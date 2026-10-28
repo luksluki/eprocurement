@@ -771,6 +771,109 @@ po_item_id that is no line of this PO), `po_id_invalid`, `inv_id_invalid` →
 409 · `po_not_found`, `inv_not_found` → 404 (also the cross-tenant answers,
 via RLS). The list endpoint and the invoice UI are #41's.
 
+## Three-way match (#40)
+
+The storage mirror of the `match` package — the pure engine (match.go) plus
+the transactional store (store.go) that FR-08 names. `procurement.match_settings`:
+
+| Column | Type | Notes |
+|---|---|---|
+| `tenant_id` | uuid PK | one row per tenant (the tolerance pair is a scalar, not a rule set) |
+| `qty_pct` | integer NOT NULL CHECK 0..100 | how far cumulative invoiced qty may exceed received (upper side only) |
+| `price_pct` | integer NOT NULL CHECK 0..100 | symmetric deviation of an invoice unit price from the PO price |
+| `updated_at` | timestamptz NOT NULL | audit timestamp |
+| `updated_by` | uuid | audit |
+
+**RLS**: the 0005 approval_rules pattern (tenant-scoped policy, forced,
+granted to `eproc_app`). **No row means the effective defaults 0%/0%
+(strict)** — never an error; a fresh tenant matches exactly without any
+seeding step. Whole percentages only.
+
+**Engine semantics (pinned).** The engine is pure — no IO, no clock — and
+every comparison is integer cross-multiplication, no float. For each of the
+matched invoice's lines (result lines follow the PO items'
+`(created_at, id)` order regardless of the invoice's line order):
+
+- **Quantity, cumulative, upper side only** (maintainer decision
+  2026-10-28 on the basis + the agent decision on the direction): the PO's
+  cumulative invoiced qty for the line — SUM over **every** invoice of the
+  PO, this one included — must satisfy
+  `invoiced×100 ≤ qty_received×(100+qty_pct)`. Exact equality sits inside
+  the tolerance. Under-invoicing (**progress billing** — invoicing 30 of a
+  received 60) is **not** a violation; only exceeding the receipts is. A
+  billed line with no receipt at all (`received = 0`, `invoiced > 0`) is
+  always a violation. The cumulative basis is what catches two invoices
+  that each fit but jointly over-bill.
+- **Price, symmetric**: this invoice's unit price must satisfy
+  `|Δ|×100 ≤ po_price×price_pct` against the PO price. `po_price = 0`
+  matches only a zero invoice price (any positive price is a violation).
+
+**match_result (jsonb, pinned shape).** One object per run, marshalled from
+a fixed struct (PostgreSQL stores the jsonb canonical form; both forms are
+deterministic):
+
+```json
+{"matched": false,
+ "lines": [{"po_item_id": "…", "qty_ordered": 100, "qty_received": 60,
+            "qty_invoiced": 80, "po_unit_price_cents": 1000,
+            "invoice_unit_price_cents": 1000,
+            "qty_breach": true, "price_breach": false,
+            "reason": "inv_over_bill_qty: po_item=… invoiced=80 received=60 pct=0"}]}
+```
+
+`qty_invoiced` is the cumulative sum; the reason lines are pinned detail
+lines in the `inv_over_bill` family (machine code before the first colon,
+then the numbers): `inv_over_bill_qty: po_item=<id> invoiced=<i>
+received=<r> pct=<p>` and `inv_over_bill_price: po_item=<id> po_price=<p>
+invoice_price=<q> pct=<p>`; `""` on a clean line. Identical state produces
+byte-identical output (engine-tested).
+
+**Store contract** (`match.Store.Match`, one tenant transaction with a
+pinned step order): fail fast on a non-UUID id → resolve the invoice
+header unlocked (RLS: cross-tenant is `inv_not_found`) → **lock the PO row
+FOR UPDATE** (`purchaseorder.LoadForUpdate`, the serialization point shared
+with every lifecycle transition, receipt, and invoice create — concurrent
+matches serialize here and the cumulative sums read one snapshot) →
+re-read the invoice `FOR UPDATE` with its lines → the **re-run guard**
+(`matched` answers 409 `inv_already_matched`; `pending`/`discrepancy` may
+be re-matched — a late GRN resolving a discrepancy, each run appending its
+own event) → read the tolerances (defaults 0%/0%) → SUM the cumulative
+invoiced qty per line over all the PO's invoices → the pure engine → the
+guarded `UPDATE … SET status, match_result WHERE status IN
+('pending','discrepancy')` (0 rows answers `inv_already_matched`, the
+belt-and-braces twin of the lock) → **exactly one outbox row** —
+`invoice.matched` or `invoice.discrepancy` (§14.6 catalog, entity_type
+`invoice`, the grn.posted pattern) — committed with everything above. Any
+failure rolls the whole transaction back; the `purchase_orders` row is
+never written. The outbox payload carries the invoice's identity, the PO
+number, the landed status, and the same result lines.
+
+**Settings** (`GetSettings`/`ReplaceSettings`): read answers the defaults
+while no row exists; replace validates 0..100 (`match_qty_pct_invalid`,
+`match_price_pct_invalid` → 400) then upserts in one transaction. New
+values apply to match runs that start after the commit; stored results are
+immutable history.
+
+**Attachment gate: none** (maintainer decision 2026-10-28, resolving the
+'and/or' left open by the 2026-10-27 #39 decision): #40 does not gate
+matching on a ready attachment and introduces no synchronous
+procurement→documents call — the "attachment required" obligation stays
+with the demo flow/UI (#41).
+
+**API** (match is `invoice:write` — finance/admin at gateway and
+interceptor, the same money-records gate as creating an invoice, no new
+permission for the act; settings are `match:configure` — admin-only, the
+`approval:configure` twin): gRPC `MatchInvoice` /
+`GetMatchSettings` / `ReplaceMatchSettings`; REST
+`POST /api/v1/invoices/{id}/match` (PRD §15; 200 + the updated invoice with
+`status` and `match_result_json`) and admin-only
+`GET|PUT /api/v1/match-settings` with body `{"qty_pct": n, "price_pct":
+n}`. Error codes: `inv_id_invalid`, `match_qty_pct_invalid`,
+`match_price_pct_invalid` → 400 · `inv_already_matched` → 409 ·
+`inv_not_found` → 404 (also the cross-tenant answer, via RLS). The worker
+is untouched: `documents.history` binds `#` and `invoice.discrepancy` is
+already in the notifications routing keys.
+
 ## Requisition state machine (#28)
 
 Seven legal edges (loose cancel — maintainer decision on #28):
@@ -890,7 +993,8 @@ missing (404 `requisition_not_found`).
 - #36: PO lifecycle state machine (done — ten legal edges over the seven statuses, receipt-guarded cancel, `issued_at` on issue, guarded tenant-scoped transitions serialized on the PO row lock, one outbox event per transition, gRPC + REST issue/acknowledge/cancel/close at `po:write`). Goods receipts (#37) drive the receipt edges.
 - #37: goods receipts with partial receipt rules (done — 0008 tables, `GRN-%06d` gap-free per tenant, `purchaseorder.ApplyReceipt` three-branch status selection with the same-status branch, cumulative over-receipt guard with the pinned `grn_over_receipt: …` detail line and the dedicated REST renderer, one `grn.posted` outbox row per receipt typed to the PO, gRPC + REST at `grn:post`). See the [Goods receipts](#goods-receipts-37) section.
 - #39: invoice model and create API (done — 0009 tables, vendor invoice numbers unique per (tenant, vendor), vendor/currency derived server-side from the locked PO, server-recomputed totals, the cumulative strict `inv_over_bill: …` guard with the dedicated REST renderer, `pending|matched|discrepancy` status CHECK with `match_result` reserved for #40, attachment entity + routes + embedded detail read, no outbox row on create). See the [Invoices](#invoices-39) section.
-- #40/#41: the 3-way match (writes `match_result`, moves status, emits `invoice.matched`/`invoice.discrepancy`) and the invoice list/UI — the follow-ups this model was built for.
+- #40: three-way match with tolerance (done — 0010 `match_settings` (defaults 0%/0%), the pure integer engine with the cumulative upper-side qty guard and the symmetric price guard, the pinned `match_result` shape with `inv_over_bill_qty`/`inv_over_bill_price` reason lines, the transactional Match under the PO row lock with the `matched` re-run guard and exactly one `invoice.matched`/`invoice.discrepancy` outbox row per run, gRPC `MatchInvoice`/`GetMatchSettings`/`ReplaceMatchSettings`, REST `POST /api/v1/invoices/{id}/match` + admin-only `GET|PUT /api/v1/match-settings` behind `match:configure`, no attachment gate). See the [Three-way match](#three-way-match-40) section.
+- #41: the invoice list endpoint, the `/app/invoices` UI, and the demo-flow enforcement of 'attachment required' — the remaining follow-ups of this model.
 - Approvals read endpoints/queue #32-34 (M2–M3).
 - The timeline/event read path (#42/#43/#47, `GET /api/v1/events`) consumes the outbox's `entity_type`/`entity_id` columns; a tenant+entity index arrives with whichever issue first queries them.
 

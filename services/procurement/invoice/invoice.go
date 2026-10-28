@@ -47,6 +47,12 @@ var (
 	// keeps matching the bare sentinel — the purchaseorder.OverReceiptError
 	// pattern of #37.
 	ErrOverBill = errors.New("inv_over_bill")
+	// ErrAlreadyMatched is the #40 match's re-run guard: an invoice whose
+	// status is already matched rejects a re-run (409). pending and
+	// discrepancy may be re-matched — a late GRN resolving a discrepancy is
+	// the intended loop, and each run appends its own event (maintainer
+	// decision 2026-10-28).
+	ErrAlreadyMatched = errors.New("inv_already_matched")
 )
 
 // OverBillError names the PO whose existing invoices plus this request
@@ -110,6 +116,18 @@ type Invoice struct {
 	Items       []Item
 	CreatedBy   string
 	CreatedAt   time.Time
+}
+
+// MatchGuard answers whether the invoice's status admits a match run
+// (#40): matched is final (ErrAlreadyMatched); pending and discrepancy may
+// be (re-)matched. The store re-checks it under the PO row lock and again
+// in the guarded UPDATE, so the guard here is the fast pre-transaction
+// answer.
+func MatchGuard(status string) error {
+	if status == StatusMatched {
+		return ErrAlreadyMatched
+	}
+	return nil
 }
 
 // ValidateNumber checks the vendor invoice number's shape: non-empty after

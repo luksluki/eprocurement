@@ -12,6 +12,7 @@ import (
 	"github.com/luksluki/eprocurement/services/procurement/approval"
 	"github.com/luksluki/eprocurement/services/procurement/goodsreceipt"
 	"github.com/luksluki/eprocurement/services/procurement/invoice"
+	"github.com/luksluki/eprocurement/services/procurement/match"
 	"github.com/luksluki/eprocurement/services/procurement/purchaseorder"
 	"github.com/luksluki/eprocurement/services/procurement/requisition"
 	"github.com/luksluki/eprocurement/services/procurement/vendor"
@@ -38,6 +39,11 @@ const ServiceName = "procurement"
 // an invoice is finance/admin (invoice:write — the money-records gate) and
 // the detail read is the broad invoice:read; the over-billing, duplicate,
 // and PO-status guards are domain checks inside the creation transaction.
+// Matching an invoice (#40) is finance/admin as well — invoice:write, the
+// same money-records gate as creating one (the finance reviewer persona,
+// PRD §5; no new permission for the match action). Configuring match
+// tolerances is admin-only (match:configure has no non-admin role — the
+// approval:configure twin).
 var methodPermissions = rbac.MethodPermissions{
 	"/procurement.v1.Procurement/CreateVendor":             rbac.VendorWrite,
 	"/procurement.v1.Procurement/GetVendor":                rbac.VendorRead,
@@ -60,10 +66,13 @@ var methodPermissions = rbac.MethodPermissions{
 	"/procurement.v1.Procurement/PostGoodsReceipt":         rbac.GRNPost,
 	"/procurement.v1.Procurement/CreateInvoice":            rbac.InvoiceWrite,
 	"/procurement.v1.Procurement/GetInvoice":               rbac.InvoiceRead,
+	"/procurement.v1.Procurement/MatchInvoice":             rbac.InvoiceWrite,
+	"/procurement.v1.Procurement/GetMatchSettings":         rbac.MatchConfigure,
+	"/procurement.v1.Procurement/ReplaceMatchSettings":     rbac.MatchConfigure,
 }
 
 // New returns a grpcserver.Server with the procurement API registered.
-func New(log *slog.Logger, pinger grpcserver.Pinger, store *vendor.Store, requisitions *requisition.Store, approvals *approval.Store, purchaseOrders *purchaseorder.Store, goodsReceipts *goodsreceipt.Store, invoices *invoice.Store, opts ...grpcserver.Option) *grpcserver.Server {
+func New(log *slog.Logger, pinger grpcserver.Pinger, store *vendor.Store, requisitions *requisition.Store, approvals *approval.Store, purchaseOrders *purchaseorder.Store, goodsReceipts *goodsreceipt.Store, invoices *invoice.Store, matches *match.Store, opts ...grpcserver.Option) *grpcserver.Server {
 	srv := grpcserver.New(log, pinger, append([]grpcserver.Option{
 		grpcserver.WithServiceName(ServiceName),
 		grpcserver.WithUnary(rbac.UnaryInterceptor(methodPermissions)),
@@ -71,7 +80,7 @@ func New(log *slog.Logger, pinger grpcserver.Pinger, store *vendor.Store, requis
 	procurementv1.RegisterProcurementServer(srv.GRPC(), &api{
 		store: store, requisitions: requisitions, approvals: approvals,
 		purchaseOrders: purchaseOrders, goodsReceipts: goodsReceipts,
-		invoices: invoices, log: log,
+		invoices: invoices, matches: matches, log: log,
 	})
 	return srv
 }

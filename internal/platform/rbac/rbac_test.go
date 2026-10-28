@@ -16,6 +16,7 @@ var wantPermission = map[string][]string{
 	GRNPost:           {RoleBuyer},
 	InvoiceRead:       {RoleRequester, RoleApprover, RoleBuyer, RoleFinance, RoleViewer},
 	InvoiceWrite:      {RoleFinance},
+	MatchConfigure:    {},
 	ExportRun:         {RoleFinance},
 	AuditRead:         {RoleViewer},
 	UsersManage:       {},

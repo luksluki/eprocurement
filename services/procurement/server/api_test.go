@@ -29,6 +29,7 @@ import (
 	"github.com/luksluki/eprocurement/services/procurement/approval"
 	"github.com/luksluki/eprocurement/services/procurement/goodsreceipt"
 	"github.com/luksluki/eprocurement/services/procurement/invoice"
+	"github.com/luksluki/eprocurement/services/procurement/match"
 	"github.com/luksluki/eprocurement/services/procurement/migrations"
 	"github.com/luksluki/eprocurement/services/procurement/purchaseorder"
 	"github.com/luksluki/eprocurement/services/procurement/requisition"
@@ -68,7 +69,7 @@ func startProcurement(t *testing.T) (procurementv1.ProcurementClient, *pgxpool.P
 	}
 
 	log := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
-	srv := New(log, db, vendor.NewStore(db), requisition.NewStore(db), approval.NewStore(db), purchaseorder.NewStore(db), goodsreceipt.NewStore(db), invoice.NewStore(db))
+	srv := New(log, db, vendor.NewStore(db), requisition.NewStore(db), approval.NewStore(db), purchaseorder.NewStore(db), goodsreceipt.NewStore(db), invoice.NewStore(db), match.NewStore(db))
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -2314,6 +2315,7 @@ func TestMapInvoiceError(t *testing.T) {
 		"invoice id invalid": {invoice.ErrIDInvalid, codes.InvalidArgument, "inv_id_invalid"},
 		"po id invalid":      {purchaseorder.ErrIDInvalid, codes.InvalidArgument, "po_id_invalid"},
 		"duplicate number":   {invoice.ErrNumberDuplicate, codes.AlreadyExists, "inv_number_duplicate"},
+		"already matched":    {invoice.ErrAlreadyMatched, codes.Aborted, "inv_already_matched"},
 		"illegal transition": {purchaseorder.ErrIllegalTransition, codes.Aborted, "po_illegal_transition"},
 		"invoice not found":  {invoice.ErrNotFound, codes.NotFound, "inv_not_found"},
 		"po not found":       {purchaseorder.ErrNotFound, codes.NotFound, "po_not_found"},
@@ -2323,6 +2325,199 @@ func TestMapInvoiceError(t *testing.T) {
 		"unknown internal": {errors.New("boom"), codes.Internal, "internal error"},
 	} {
 		got := mapInvoiceError(tc.err)
+		if status.Code(got) != tc.code || status.Convert(got).Message() != tc.msg {
+			t.Errorf("%s: got (%v, %q), want (%v, %q)",
+				name, status.Code(got), status.Convert(got).Message(), tc.code, tc.msg)
+		}
+	}
+}
+
+// grpcCleanupMatchSettings wipes this suite's tolerance rows and fixture
+// vendors (the 0010 table has no FK neighbors; the G-MT40- vendors belong
+// to the match tests alone).
+func grpcCleanupMatchSettings(t *testing.T, db *pgxpool.Pool) {
+	t.Helper()
+	_ = tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		ctx := context.Background()
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM procurement.match_settings WHERE tenant_id IN ($1, $2)`, gTenantA, gTenantB); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx,
+			`DELETE FROM procurement.vendors WHERE tenant_id IN ($1, $2) AND code LIKE 'G-MT40-%'`, gTenantA, gTenantB)
+		return err
+	})
+}
+
+// The #40 match through the full gRPC wiring: RBAC (MatchInvoice is
+// invoice:write — finance/admin; the buyer and viewer are denied), the
+// status move pending → discrepancy → matched with the late-GRN resolution
+// loop, exactly one invoice.* outbox event per successful run, the matched
+// re-run guard (Aborted inv_already_matched), the machine codes, and the
+// admin-only settings surface (match:configure denies finance).
+func TestMatchGRPC(t *testing.T) {
+	client, db, cleanup := startProcurement(t)
+	defer cleanup()
+	grpcCleanupRequisition(t, db)
+	grpcCleanupInvoiceVendor(t, db)
+	grpcCleanupMatchSettings(t, db)
+	t.Cleanup(func() {
+		grpcCleanupRequisition(t, db)
+		grpcCleanupInvoiceVendor(t, db)
+		grpcCleanupMatchSettings(t, db)
+	})
+
+	po := grpcInvoicablePO(t, client, "G-MT40-A")
+	laptop := grpcItemByQty(t, po, 2)
+
+	// invoice:write is finance/admin: requester, buyer, approver, and viewer
+	// are denied at the service-layer re-check (buyer can post GRNs but not
+	// match; viewer reads but cannot act).
+	created, err := client.CreateInvoice(callerCtx(gTenantA, rbac.RoleFinance), &procurementv1.CreateInvoiceRequest{
+		PoId: po.GetId(), Number: "INV-MT40-1",
+		Items: []*procurementv1.InvoiceItem{{PoItemId: laptop.GetId(), Qty: 1, UnitPriceCents: 7500000}},
+	})
+	if err != nil {
+		t.Fatalf("create invoice: %v", err)
+	}
+	for _, role := range []string{rbac.RoleRequester, rbac.RoleBuyer, rbac.RoleApprover, rbac.RoleViewer} {
+		_, err := client.MatchInvoice(callerCtx(gTenantA, role), &procurementv1.MatchInvoiceRequest{Id: created.GetId()})
+		if status.Code(err) != codes.PermissionDenied {
+			t.Fatalf("match as %s: code = %v, want PermissionDenied", role, status.Code(err))
+		}
+	}
+
+	// Machine codes: bad id, missing id — before any write.
+	if _, err := client.MatchInvoice(callerCtx(gTenantA, rbac.RoleFinance),
+		&procurementv1.MatchInvoiceRequest{Id: "nope"}); status.Code(err) != codes.InvalidArgument ||
+		status.Convert(err).Message() != "inv_id_invalid" {
+		t.Fatalf("bad id: got (%v, %q)", status.Code(err), status.Convert(err).Message())
+	}
+	if _, err := client.MatchInvoice(callerCtx(gTenantA, rbac.RoleFinance),
+		&procurementv1.MatchInvoiceRequest{Id: "dddddddd-0000-0000-0000-0000000000ff"}); status.Code(err) != codes.NotFound ||
+		status.Convert(err).Message() != "inv_not_found" {
+		t.Fatalf("missing id: got (%v, %q)", status.Code(err), status.Convert(err).Message())
+	}
+
+	// First run: no receipt exists yet — the billed line flags discrepancy
+	// with the pinned qty reason, exactly one invoice.discrepancy event.
+	discrepant, err := client.MatchInvoice(callerCtx(gTenantA, rbac.RoleFinance),
+		&procurementv1.MatchInvoiceRequest{Id: created.GetId()})
+	if err != nil {
+		t.Fatalf("match: %v", err)
+	}
+	if discrepant.GetStatus() != "discrepancy" {
+		t.Fatalf("status = %s, want discrepancy", discrepant.GetStatus())
+	}
+	if !strings.Contains(discrepant.GetMatchResultJson(), "inv_over_bill_qty") ||
+		!strings.Contains(discrepant.GetMatchResultJson(), `"qty_received":0`) {
+		t.Fatalf("match_result = %s, want the qty breach detail", discrepant.GetMatchResultJson())
+	}
+	if got := grpcInvoiceEventCount(t, db); got != 1 {
+		t.Fatalf("invoice.* events after first run = %d, want 1", got)
+	}
+
+	// The late GRN: the buyer posts the receipt, the finance re-run resolves
+	// the discrepancy — history stays append-only (two events by now).
+	if _, err := client.PostGoodsReceipt(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.PostGoodsReceiptRequest{
+			PoId:  po.GetId(),
+			Items: []*procurementv1.GoodsReceiptItem{{PoItemId: laptop.GetId(), QtyReceived: 1}},
+		}); err != nil {
+		t.Fatalf("post grn: %v", err)
+	}
+	matched, err := client.MatchInvoice(callerCtx(gTenantA, rbac.RoleFinance),
+		&procurementv1.MatchInvoiceRequest{Id: created.GetId()})
+	if err != nil {
+		t.Fatalf("resolve re-run: %v", err)
+	}
+	if matched.GetStatus() != "matched" || !strings.Contains(matched.GetMatchResultJson(), `"matched":true`) {
+		t.Fatalf("resolved = (%s, %s), want matched", matched.GetStatus(), matched.GetMatchResultJson())
+	}
+	if got := grpcInvoiceEventCount(t, db); got != 2 {
+		t.Fatalf("invoice.* events after resolution = %d, want 2", got)
+	}
+
+	// The re-run guard: matched is final — Aborted inv_already_matched, no
+	// third event.
+	if _, err := client.MatchInvoice(callerCtx(gTenantA, rbac.RoleFinance),
+		&procurementv1.MatchInvoiceRequest{Id: created.GetId()}); status.Code(err) != codes.Aborted ||
+		status.Convert(err).Message() != "inv_already_matched" {
+		t.Fatalf("re-run: got (%v, %q), want Aborted inv_already_matched", status.Code(err), status.Convert(err).Message())
+	}
+	if got := grpcInvoiceEventCount(t, db); got != 2 {
+		t.Fatalf("invoice.* events after rejected re-run = %d, want 2", got)
+	}
+
+	// Cross-tenant: the other tenant's finance reads nothing.
+	if _, err := client.MatchInvoice(callerCtx(gTenantB, rbac.RoleFinance),
+		&procurementv1.MatchInvoiceRequest{Id: created.GetId()}); status.Code(err) != codes.NotFound ||
+		status.Convert(err).Message() != "inv_not_found" {
+		t.Fatalf("cross-tenant: got (%v, %q), want NotFound inv_not_found", status.Code(err), status.Convert(err).Message())
+	}
+
+	// The settings surface: match:configure is admin-only — finance (the
+	// money role), buyer, and viewer are all denied.
+	for _, role := range []string{rbac.RoleFinance, rbac.RoleBuyer, rbac.RoleViewer} {
+		if _, err := client.GetMatchSettings(callerCtx(gTenantA, role),
+			&procurementv1.GetMatchSettingsRequest{}); status.Code(err) != codes.PermissionDenied {
+			t.Fatalf("get settings as %s: code = %v, want PermissionDenied", role, status.Code(err))
+		}
+		if _, err := client.ReplaceMatchSettings(callerCtx(gTenantA, role),
+			&procurementv1.ReplaceMatchSettingsRequest{QtyPct: 1, PricePct: 1}); status.Code(err) != codes.PermissionDenied {
+			t.Fatalf("replace settings as %s: code = %v, want PermissionDenied", role, status.Code(err))
+		}
+	}
+
+	// Admin reads the effective defaults (no row yet), replaces, and reads
+	// the stored values back; bounds answer the machine codes.
+	def, err := client.GetMatchSettings(callerCtx(gTenantA, rbac.RoleAdmin), &procurementv1.GetMatchSettingsRequest{})
+	if err != nil || def.GetQtyPct() != 0 || def.GetPricePct() != 0 {
+		t.Fatalf("default settings = (%+v, %v), want 0/0", def, err)
+	}
+	if _, err := client.ReplaceMatchSettings(callerCtx(gTenantA, rbac.RoleAdmin),
+		&procurementv1.ReplaceMatchSettingsRequest{QtyPct: -1}); status.Code(err) != codes.InvalidArgument ||
+		status.Convert(err).Message() != "match_qty_pct_invalid" {
+		t.Fatalf("bad qty pct: got (%v, %q)", status.Code(err), status.Convert(err).Message())
+	}
+	if _, err := client.ReplaceMatchSettings(callerCtx(gTenantA, rbac.RoleAdmin),
+		&procurementv1.ReplaceMatchSettingsRequest{QtyPct: 0, PricePct: 101}); status.Code(err) != codes.InvalidArgument ||
+		status.Convert(err).Message() != "match_price_pct_invalid" {
+		t.Fatalf("bad price pct: got (%v, %q)", status.Code(err), status.Convert(err).Message())
+	}
+	stored, err := client.ReplaceMatchSettings(callerCtx(gTenantA, rbac.RoleAdmin),
+		&procurementv1.ReplaceMatchSettingsRequest{QtyPct: 5, PricePct: 2})
+	if err != nil || stored.GetQtyPct() != 5 || stored.GetPricePct() != 2 {
+		t.Fatalf("replace = (%+v, %v)", stored, err)
+	}
+	again, err := client.GetMatchSettings(callerCtx(gTenantA, rbac.RoleAdmin), &procurementv1.GetMatchSettingsRequest{})
+	if err != nil || again.GetQtyPct() != 5 || again.GetPricePct() != 2 {
+		t.Fatalf("get after replace = (%+v, %v)", again, err)
+	}
+
+	// Anonymous: Unauthenticated before any store hit.
+	if _, err := client.MatchInvoice(context.Background(),
+		&procurementv1.MatchInvoiceRequest{Id: created.GetId()}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("anonymous match: code = %v, want Unauthenticated", status.Code(err))
+	}
+	if _, err := client.GetMatchSettings(context.Background(),
+		&procurementv1.GetMatchSettingsRequest{}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("anonymous settings: code = %v, want Unauthenticated", status.Code(err))
+	}
+}
+
+// The #40 settings error mapping as a pure unit test (no database).
+func TestMapMatchError(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err  error
+		code codes.Code
+		msg  string
+	}{
+		"qty pct invalid":   {match.ErrQtyPctInvalid, codes.InvalidArgument, "match_qty_pct_invalid"},
+		"price pct invalid": {match.ErrPricePctInvalid, codes.InvalidArgument, "match_price_pct_invalid"},
+		"unknown internal":  {errors.New("boom"), codes.Internal, "internal error"},
+	} {
+		got := mapMatchError(tc.err)
 		if status.Code(got) != tc.code || status.Convert(got).Message() != tc.msg {
 			t.Errorf("%s: got (%v, %q), want (%v, %q)",
 				name, status.Code(got), status.Convert(got).Message(), tc.code, tc.msg)

@@ -25,6 +25,7 @@ func registerInvoiceRoutes(app *fiber.App, verifier *token.Verifier, client Proc
 
 	invoices.Post("/", RequirePermission(rbac.InvoiceWrite), createInvoice(client))
 	invoices.Get("/:id", RequirePermission(rbac.InvoiceRead), getInvoice(client, documents))
+	invoices.Post("/:id/match", RequirePermission(rbac.InvoiceWrite), matchInvoice(client))
 	if documents != nil {
 		registerInvoiceAttachmentRoutes(invoices, verifier, client, documents)
 	}
@@ -107,6 +108,29 @@ func getInvoice(client ProcurementClient, documents DocumentsClient) fiber.Handl
 	}
 }
 
+// matchInvoice serves POST /api/v1/invoices/:id/match (PRD §15, #40): the
+// three-way match run on one invoice of the caller's tenant — the same
+// invoice:write gate as creating one (finance/admin per the finance
+// reviewer persona; no separate permission for the act of matching). The
+// response is the updated invoice: status matched/discrepancy and
+// match_result_json filled. A re-run on matched answers 409
+// inv_already_matched; pending/discrepancy may be re-matched.
+func matchInvoice(client ProcurementClient) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		claims, ok := claimsOf(c)
+		if !ok {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "missing bearer token"})
+		}
+		inv, err := client.MatchInvoice(forwardContext(c, claims), &procurementv1.MatchInvoiceRequest{
+			Id: c.Params("id"),
+		})
+		if err != nil {
+			return invoiceError(c, err)
+		}
+		return c.JSON(invoiceJSON(inv))
+	}
+}
+
 // invoiceError renders the invoice routes' failures. The over-billing
 // answer is this family's one procurement error whose gRPC message carries
 // detail beyond the machine code ("inv_over_bill: po_number=…
@@ -146,6 +170,7 @@ var invoiceMessages = map[string]string{
 	"inv_id_invalid":         "invoice id must be a UUID",
 	"inv_number_duplicate":   "this vendor already has an invoice with this number",
 	"inv_not_found":          "invoice not found",
+	"inv_already_matched":    "this invoice is already matched; matching is final",
 	"po_id_invalid":          "purchase order id must be a UUID",
 	"po_not_found":           "purchase order not found",
 	"po_illegal_transition":  "only acknowledged, partially received, or received purchase orders can be invoiced",
