@@ -166,6 +166,20 @@ func TestRun(t *testing.T) {
 			}}},
 		},
 		{
+			name: "both guards tripped on one line: both flags set, reason keeps the first rule",
+			in: Input{
+				POItems:  []POItem{poItem("po-1", 10, 5, 1000)},
+				Lines:    []Line{invLine("po-1", 10, 1200, 10)}, // invoiced 10 > received 5 at 0%, price +20% > 10%
+				Settings: Settings{0, 10},
+			},
+			want: Result{Matched: false, Lines: []ResultLine{{
+				POItemID: "po-1", QtyOrdered: 10, QtyReceived: 5, QtyInvoiced: 10,
+				POUnitPriceCents: 1000, InvoiceUnitPriceCents: 1200,
+				QtyBreach: true, PriceBreach: true,
+				Reason: "inv_over_bill_qty: po_item=po-1 invoiced=10 received=5 pct=0",
+			}}},
+		},
+		{
 			name: "price boundary exactly at tolerance is within (110 == 1000 x 11%)",
 			in: Input{
 				POItems:  []POItem{poItem("po-1", 10, 10, 1000)},

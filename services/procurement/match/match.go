@@ -178,13 +178,16 @@ func Run(in Input) (Result, error) {
 			POUnitPriceCents:      po.UnitPriceCents,
 			InvoiceUnitPriceCents: line.UnitPriceCents,
 		}
+		out.QtyBreach = qtyBreach(line.QtyInvoicedCum, po.QtyReceived, in.Settings.QtyPct)
+		out.PriceBreach = priceBreach(po.UnitPriceCents, line.UnitPriceCents, in.Settings.PricePct)
+		// The guards are independent: a line can trip both at once, so both
+		// flags persist in the match_result. Reason keeps the first violated
+		// rule only (qty before price).
 		switch {
-		case qtyBreach(line.QtyInvoicedCum, po.QtyReceived, in.Settings.QtyPct):
-			out.QtyBreach = true
+		case out.QtyBreach:
 			out.Reason = fmt.Sprintf("inv_over_bill_qty: po_item=%s invoiced=%d received=%d pct=%d",
 				po.ID, line.QtyInvoicedCum, po.QtyReceived, in.Settings.QtyPct)
-		case priceBreach(po.UnitPriceCents, line.UnitPriceCents, in.Settings.PricePct):
-			out.PriceBreach = true
+		case out.PriceBreach:
 			out.Reason = fmt.Sprintf("inv_over_bill_price: po_item=%s po_price=%d invoice_price=%d pct=%d",
 				po.ID, po.UnitPriceCents, line.UnitPriceCents, in.Settings.PricePct)
 		}
