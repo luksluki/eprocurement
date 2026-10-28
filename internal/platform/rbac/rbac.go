@@ -36,6 +36,7 @@ const (
 	ExportRun         = "export:run"
 	AuditRead         = "audit:read"
 	UsersManage       = "users:manage"
+	DLQManage         = "dlq:manage"
 )
 
 // AllPermissions returns every permission in the matrix (tests and docs).
@@ -75,6 +76,9 @@ var matrix = []entry{
 	{ExportRun, []string{RoleFinance}},
 	{AuditRead, []string{RoleViewer}},
 	{UsersManage, nil},
+	// Admin-only by design (#48: the tenant admin operates the DLQ —
+	// poison messages are an operational, not business-role, surface).
+	{DLQManage, nil},
 }
 
 var granted map[string]map[string]bool

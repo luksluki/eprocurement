@@ -353,6 +353,57 @@ broker that already carries it.
   `procurement.dlx`, and the `#`-bound `procurement.dlq` is the final,
   admin-visible destination (§14.5 "after max attempts → DLQ").
 
+### DLQ monitor (#48)
+
+PRD §16 names two deliverables — the "hourly summary metric" and the
+"admin endpoint". Both read the same queue and declare the same
+DLX/DLQ/bootstrap triple argument-identically to `topology.Declare`
+(dial-per-use, never at boot):
+
+- **Admin endpoint (gateway).** `GET /api/v1/dlq?limit=` (default 50, max
+  500) and `POST /api/v1/dlq/replay {"message_id": …}` — Bearer +
+  admin-only `dlq:manage` (`docs/rbac.md`; the route follows the
+  match-settings precedent, no `/admin` prefix — maintainer decision
+  2026-10-28). The gateway holds its own small AMQP client
+  (`services/gateway/dlq`; maintainer option A) importing the topology
+  constants from `services/worker/topology` — the same cross-service
+  import inside the Go module as worker → `procurement/outbox` above.
+  The list answers `{depth, scanned, messages}`:
+  - `depth` is the ready count read from the `QueueDeclare` return
+    **before** the drain — messages held unacknowledged do not count as
+    ready, so reading after the drain would report 0;
+  - `scanned` is the drain size, hard-capped at 1000 (the tool is
+    O(depth): it holds every message unacked, inspects, and requeues all
+    at the end);
+  - decoded entries are filtered to the caller's tenant; **undecodable
+    entries appear cross-tenant as metadata only** (`decode_error: true`,
+    no payload, no tenant — the body does not decode, so the tenant
+    cannot be known; visibility of poison messages outweighs the secrecy
+    of their existence, and the leak is existence-only).
+- **Replay.** `message_id` is the publisher's `event_id` (it rides the
+  AMQP `MessageId` property, surviving a broken body). The message is
+  republished to its original work queue (from `x-death`) via the
+  default exchange with `x-retry-count` reset to 0 (fresh ladder —
+  maintainer decision 2026-10-28) and the stale `x-death` dropped;
+  body/MessageId/ContentType are preserved. The DLQ copy is acked only
+  after the publish succeeded (the consumer's `publishRetry` ack/nack
+  pattern); consumers dedupe by `event_id`, so a crash between publish
+  and ack at worst replays a duplicate. Another tenant's message →
+  `404 dlq_message_not_found` (cross-tenant opacity); an undecodable
+  message → `409 dlq_message_not_replayable` (permanent failure — replay
+  would bounce it straight back; removal is broker tooling per the
+  runbook).
+- **Hourly summary (worker).** `services/worker/dlqmonitor` is the third
+  component of the worker binary: one short-lived connection per tick
+  (`DLQ_SUMMARY_INTERVAL`, default 1 h) logging the structured depth
+  line — `INFO` at 0, `WARN` above. The structured log is the interim
+  metric surface; the Prometheus/OTel export of the same depth lands with
+  the observability stack (#54, PRD §18).
+
+Operational runbook (inspection, replay, purge, alert thresholds, the
+1000-cap cost, and the cross-replica admin-tool race):
+[`docs/ops/dlq-monitor.md`](../ops/dlq-monitor.md).
+
 ## Migration 0007 — `procurement.purchase_orders` / `po_items` / `po_counters` (#35)
 
 The storage mirror of the `purchaseorder` domain package: the draft PO that
@@ -989,6 +1040,7 @@ missing (404 `requisition_not_found`).
 - #31: idempotent decide + outbox audit/notification events (done — `procurement.outbox` + `decision_idempotency` in 0006, decide replay/conflict contract, `pr.*` decide events with actor + trace, gateway `x-trace-id` propagation). **Re-sequenced with #45** by an agent decision: the outbox table + writer moved from #45's scope into #31 (see dev-note 031's provenance block); #45 keeps the publisher loop only.
 - #45: transactional outbox publisher (done — worker publisher loop: poll 2 s / batch 50, §14.5 envelope to the durable topic exchange `procurement.events` with confirm-mode persistent publishes, `published_at` marking, non-fatal poll/publish errors, `pr.submitted` written by the Submit transaction; the PROVISIONAL DLX bootstrap is superseded by #46's full topology). AMQP consumers, retry queues, and DLQ handling remain with the consumer issues; observability (spans, AMQP trace headers, outbox lag metric) is #54. (M2–M3)
 - #46: RabbitMQ topology with DLX and TTL retry queues (done — durable `procurement.events`/`procurement.dlx` exchanges, `documents.history`/`notifications`/`exports` queues with DLX arguments, per-queue retry ladders 5 s → 30 s → 5 min returning to their own queue, `procurement.dlq` bound `#`; consumers arrive with #47). (M2–M3)
+- #48: DLQ monitor, metrics, and admin endpoint (done — gateway `GET /api/v1/dlq` list + `POST /api/v1/dlq/replay` behind the new admin-only `dlq:manage`, the gateway's own AMQP client over `procurement.dlq` with per-tenant filtering and cross-tenant `decode_error` metadata entries; the worker's third component `dlqmonitor` logging the hourly depth summary, `DLQ_SUMMARY_INTERVAL` default 1 h; Prometheus/OTel export of the depth is #54. See the [DLQ monitor](#dlq-monitor-48) section and `docs/ops/dlq-monitor.md`). (M3)
 - #35: PO creation from an approved requisition (done — 0007 tables, draft PO with copied lines, per-tenant gap-free `PO-%06d` numbering, conversion replay contract, tx-scoped active-vendor gate `ForUseTx`, guarded `approved → closed`, one `po.created` outbox event). Goods receipts (#37) and the missing `pr.converted` requisition-side event are follow-ups.
 - #36: PO lifecycle state machine (done — ten legal edges over the seven statuses, receipt-guarded cancel, `issued_at` on issue, guarded tenant-scoped transitions serialized on the PO row lock, one outbox event per transition, gRPC + REST issue/acknowledge/cancel/close at `po:write`). Goods receipts (#37) drive the receipt edges.
 - #37: goods receipts with partial receipt rules (done — 0008 tables, `GRN-%06d` gap-free per tenant, `purchaseorder.ApplyReceipt` three-branch status selection with the same-status branch, cumulative over-receipt guard with the pinned `grn_over_receipt: …` detail line and the dedicated REST renderer, one `grn.posted` outbox row per receipt typed to the PO, gRPC + REST at `grn:post`). See the [Goods receipts](#goods-receipts-37) section.

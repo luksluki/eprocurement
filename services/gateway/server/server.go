@@ -1,7 +1,9 @@
 // Package server wires the gateway's GoFiber app: health, the public JWKS
-// endpoint, Bearer-token verification against the identity JWKS cache, and a
-// minimal authenticated endpoint (/api/v1/me) that demonstrates verification.
-// Business REST routes arrive with the later service issues.
+// endpoint, Bearer-token verification against the identity JWKS cache, a
+// minimal authenticated endpoint (/api/v1/me) that demonstrates
+// verification, the proxied business REST routes, and the admin DLQ
+// inspection/replay routes (/api/v1/dlq — the gateway's one direct
+// broker-backed surface).
 package server
 
 import (
@@ -56,6 +58,7 @@ type gatewayOptions struct {
 	documents   DocumentsClient
 	identity    IdentityClient
 	loginLimit  *loginLimiter
+	dlq         DLQAdmin
 }
 
 // WithProcurement proxies the procurement API under /api/v1/vendors,
@@ -82,6 +85,14 @@ func WithIdentity(client IdentityClient, loginRatePerMin int) Option {
 		o.identity = client
 		o.loginLimit = newLoginLimiter(loginRatePerMin)
 	}
+}
+
+// WithDLQ adds the admin DLQ surface under /api/v1/dlq (#48): GET lists
+// the poison messages for the caller's tenant and POST /replay returns
+// one to its work queue. admin is the gateway's own AMQP client over
+// procurement.dlq (services/gateway/dlq), not a proxied gRPC service.
+func WithDLQ(admin DLQAdmin) Option {
+	return func(o *gatewayOptions) { o.dlq = admin }
 }
 
 // New builds the fiber app.
@@ -129,6 +140,9 @@ func New(log *slog.Logger, verifier *token.Verifier, opts ...Option) *fiber.App 
 	}
 	if o.documents != nil {
 		registerEventRoutes(app, verifier, o.documents)
+	}
+	if o.dlq != nil {
+		registerDLQRoutes(app, verifier, o.dlq)
 	}
 
 	return app

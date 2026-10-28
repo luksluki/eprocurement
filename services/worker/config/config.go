@@ -1,11 +1,13 @@
 // Package config loads worker service configuration from the environment.
 //
-// The one worker binary runs both background halves (dev-note 047): the
-// transactional outbox publisher (#45; DATABASE_URL + the poll knobs below)
-// and the Mongo projection consumers (#47; MONGO_URI/MONGO_DB). RABBITMQ_URL
-// is shared. PollInterval and BatchSize are pinned by the PRD (§16: poll
-// every 2 s, batch 50); the env overrides exist so tests can tick fast and so
-// operators can tune a demo — production keeps the defaults.
+// The one worker binary runs all three background halves (dev-notes
+// 045/047/048): the transactional outbox publisher (#45; DATABASE_URL +
+// the poll knobs below), the Mongo projection consumers (#47;
+// MONGO_URI/MONGO_DB), and the DLQ depth monitor (#48;
+// DLQ_SUMMARY_INTERVAL). RABBITMQ_URL is shared. PollInterval and
+// BatchSize are pinned by the PRD (§16: poll every 2 s, batch 50); the env
+// overrides exist so tests can tick fast and so operators can tune a demo
+// — production keeps the defaults.
 package config
 
 import (
@@ -31,6 +33,9 @@ type Config struct {
 	// Consumers (#47): Mongo projections (documents.history + notifications).
 	MongoURI string // MONGO_URI — MongoDB (projections)
 	MongoDB  string // MONGO_DB — database name (default "eprocurement")
+
+	// DLQ monitor (#48): hourly depth summary log (PRD §16).
+	DLQSummaryInterval time.Duration // DLQ_SUMMARY_INTERVAL (default 1h)
 }
 
 // Load reads the configuration from the environment with local-development
@@ -38,15 +43,16 @@ type Config struct {
 // values fall back to the pinned default rather than failing boot.
 func Load() Config {
 	return Config{
-		Env:            envOr("APP_ENV", "local"),
-		LogLevel:       envOr("LOG_LEVEL", "info"),
-		DatabaseURL:    envOr("DATABASE_URL", "postgres://eprocurement:eprocurement@localhost:5432/eprocurement?sslmode=disable"),
-		PollInterval:   durationOr("WORKER_POLL_INTERVAL", 2*time.Second),
-		BatchSize:      intOr("WORKER_BATCH_SIZE", 50),
-		ConfirmTimeout: durationOr("WORKER_CONFIRM_TIMEOUT", 5*time.Second),
-		RabbitMQURL:    envOr("RABBITMQ_URL", "amqp://eprocurement:eprocurement@localhost:5672/"),
-		MongoURI:       envOr("MONGO_URI", "mongodb://eprocurement:eprocurement@localhost:27017/?authSource=admin"),
-		MongoDB:        envOr("MONGO_DB", "eprocurement"),
+		Env:                envOr("APP_ENV", "local"),
+		LogLevel:           envOr("LOG_LEVEL", "info"),
+		DatabaseURL:        envOr("DATABASE_URL", "postgres://eprocurement:eprocurement@localhost:5432/eprocurement?sslmode=disable"),
+		PollInterval:       durationOr("WORKER_POLL_INTERVAL", 2*time.Second),
+		BatchSize:          intOr("WORKER_BATCH_SIZE", 50),
+		ConfirmTimeout:     durationOr("WORKER_CONFIRM_TIMEOUT", 5*time.Second),
+		RabbitMQURL:        envOr("RABBITMQ_URL", "amqp://eprocurement:eprocurement@localhost:5672/"),
+		MongoURI:           envOr("MONGO_URI", "mongodb://eprocurement:eprocurement@localhost:27017/?authSource=admin"),
+		MongoDB:            envOr("MONGO_DB", "eprocurement"),
+		DLQSummaryInterval: durationOr("DLQ_SUMMARY_INTERVAL", time.Hour),
 	}
 }
 

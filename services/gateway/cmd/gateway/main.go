@@ -1,7 +1,10 @@
 // Command gateway runs the REST edge/BFF: it terminates HTTP, verifies
 // Bearer access tokens against the identity service's JWKS (cached), and
-// serves the public key set for other verifiers. Business routes arrive with
-// the later service issues.
+// serves the public key set for other verifiers. It also hosts the admin
+// DLQ inspection/replay routes (#48) backed by its own small AMQP client —
+// the gateway's one direct broker dependency (maintainer option A,
+// 2026-10-28), dialed per request so a down broker costs only those
+// requests (503), never boot.
 package main
 
 import (
@@ -20,8 +23,10 @@ import (
 	procurementv1 "github.com/luksluki/eprocurement/gen/go/procurement/v1"
 	"github.com/luksluki/eprocurement/internal/platform/logger"
 	gatewayconfig "github.com/luksluki/eprocurement/services/gateway/config"
+	"github.com/luksluki/eprocurement/services/gateway/dlq"
 	"github.com/luksluki/eprocurement/services/gateway/server"
 	"github.com/luksluki/eprocurement/services/gateway/token"
+	"github.com/luksluki/eprocurement/services/worker/topology"
 )
 
 func main() {
@@ -67,7 +72,12 @@ func run() error {
 	app := server.New(log, verifier,
 		server.WithIdentity(identityv1.NewIdentityClient(conn), cfg.LoginRatePerMin),
 		server.WithProcurement(procurementv1.NewProcurementClient(procurementConn)),
-		server.WithDocuments(documentsv1.NewDocumentsClient(documentsConn)))
+		server.WithDocuments(documentsv1.NewDocumentsClient(documentsConn)),
+		// The admin DLQ surface (#48): the gateway's own small AMQP client
+		// over procurement.dlq (maintainer option A, 2026-10-28). It dials
+		// per request; a broker that is down fails those requests with 503
+		// and nothing else — no boot-time dependency.
+		server.WithDLQ(dlq.New(cfg.RabbitMQURL, topology.Default)))
 	log.Info("starting gateway", "port", cfg.Port,
 		"identity_addr", cfg.IdentityAddr, "procurement_addr", cfg.ProcurementAddr,
 		"documents_addr", cfg.DocumentsAddr, "login_rate_per_min", cfg.LoginRatePerMin)

@@ -20,6 +20,7 @@ var wantPermission = map[string][]string{
 	ExportRun:         {RoleFinance},
 	AuditRead:         {RoleViewer},
 	UsersManage:       {},
+	DLQManage:         {},
 }
 
 // TestMatrixCoversEveryPermission guards against a permission that exists in

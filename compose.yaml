@@ -228,6 +228,9 @@ services:
       IDENTITY_ADDR: identity:8081
       PROCUREMENT_ADDR: procurement:8082
       DOCUMENTS_ADDR: documents:8083
+      # admin DLQ surface (#48): the gateway's small AMQP client dials the
+      # broker per request (maintainer option A, 2026-10-28).
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-eprocurement}:${RABBITMQ_PASSWORD:-eprocurement}@rabbitmq:5672/
     ports:
       - "${GATEWAY_PORT:-8080}:8080"
     depends_on:
@@ -236,6 +239,8 @@ services:
       procurement:
         condition: service_healthy
       documents:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null 2>&1 || exit 1"]
