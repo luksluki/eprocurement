@@ -1,15 +1,17 @@
 // Package config loads worker service configuration from the environment.
 //
-// The one worker binary runs the background halves (dev-note 047): the
-// transactional outbox publisher (#45; DATABASE_URL + the poll knobs below),
-// the Mongo projection consumers (#47; MONGO_URI/MONGO_DB), and the nightly
-// export scheduler (#49; REDIS_URL + the EXPORT_* knobs + the S3_* object
-// store). RABBITMQ_URL is shared. PollInterval and BatchSize are pinned by
-// the PRD (§16: poll every 2 s, batch 50); the env overrides exist so tests
-// can tick fast and so operators can tune a demo — production keeps the
-// defaults. The export schedule knobs are raw strings/durations here; the
-// scheduler constructor validates them fail-fast at boot (EXPORT_LOCK_TTL
-// must strictly exceed EXPORT_JOB_BUDGET).
+// The one worker binary runs all four background halves (dev-notes
+// 045/047/048/049): the transactional outbox publisher (#45; DATABASE_URL +
+// the poll knobs below), the Mongo projection consumers (#47;
+// MONGO_URI/MONGO_DB), the DLQ depth monitor (#48; DLQ_SUMMARY_INTERVAL),
+// and the nightly export scheduler (#49; REDIS_URL + the EXPORT_* knobs +
+// the S3_* object store). RABBITMQ_URL is shared. PollInterval and
+// BatchSize are pinned by the PRD (§16: poll every 2 s, batch 50); the env
+// overrides exist so tests can tick fast and so operators can tune a demo
+// — production keeps the defaults. The export schedule knobs are raw
+// strings/durations here; the scheduler constructor validates them
+// fail-fast at boot (EXPORT_LOCK_TTL must strictly exceed
+// EXPORT_JOB_BUDGET).
 package config
 
 import (
@@ -36,6 +38,9 @@ type Config struct {
 	MongoURI string // MONGO_URI — MongoDB (projections)
 	MongoDB  string // MONGO_DB — database name (default "eprocurement")
 
+	// DLQ monitor (#48): hourly depth summary log (PRD §16).
+	DLQSummaryInterval time.Duration // DLQ_SUMMARY_INTERVAL (default 1h)
+
 	// Nightly export (#49): Redis lock + heartbeat, schedule, MinIO writer.
 	RedisURL        string        // REDIS_URL — distributed lock + heartbeat
 	ExportSchedule  string        // EXPORT_SCHEDULE (default "01:00")
@@ -54,25 +59,26 @@ type Config struct {
 // values fall back to the pinned default rather than failing boot.
 func Load() Config {
 	return Config{
-		Env:             envOr("APP_ENV", "local"),
-		LogLevel:        envOr("LOG_LEVEL", "info"),
-		DatabaseURL:     envOr("DATABASE_URL", "postgres://eprocurement:eprocurement@localhost:5432/eprocurement?sslmode=disable"),
-		PollInterval:    durationOr("WORKER_POLL_INTERVAL", 2*time.Second),
-		BatchSize:       intOr("WORKER_BATCH_SIZE", 50),
-		ConfirmTimeout:  durationOr("WORKER_CONFIRM_TIMEOUT", 5*time.Second),
-		RabbitMQURL:     envOr("RABBITMQ_URL", "amqp://eprocurement:eprocurement@localhost:5672/"),
-		MongoURI:        envOr("MONGO_URI", "mongodb://eprocurement:eprocurement@localhost:27017/?authSource=admin"),
-		MongoDB:         envOr("MONGO_DB", "eprocurement"),
-		RedisURL:        envOr("REDIS_URL", "redis://localhost:6379/0"),
-		ExportSchedule:  envOr("EXPORT_SCHEDULE", "01:00"),
-		ExportTZ:        envOr("EXPORT_TZ", "UTC"),
-		ExportLockTTL:   durationOr("EXPORT_LOCK_TTL", 15*time.Minute),
-		ExportJobBudget: durationOr("EXPORT_JOB_BUDGET", 10*time.Minute),
-		S3Endpoint:      envOr("S3_ENDPOINT", "localhost:9000"),
-		S3AccessKey:     envOr("S3_ACCESS_KEY", "eprocurement"),
-		S3SecretKey:     envOr("S3_SECRET_KEY", "eprocurement"),
-		S3Bucket:        envOr("S3_BUCKET", "attachments"),
-		S3UseSSL:        envBool("S3_USE_SSL", false),
+		Env:                envOr("APP_ENV", "local"),
+		LogLevel:           envOr("LOG_LEVEL", "info"),
+		DatabaseURL:        envOr("DATABASE_URL", "postgres://eprocurement:eprocurement@localhost:5432/eprocurement?sslmode=disable"),
+		PollInterval:       durationOr("WORKER_POLL_INTERVAL", 2*time.Second),
+		BatchSize:          intOr("WORKER_BATCH_SIZE", 50),
+		ConfirmTimeout:     durationOr("WORKER_CONFIRM_TIMEOUT", 5*time.Second),
+		RabbitMQURL:        envOr("RABBITMQ_URL", "amqp://eprocurement:eprocurement@localhost:5672/"),
+		MongoURI:           envOr("MONGO_URI", "mongodb://eprocurement:eprocurement@localhost:27017/?authSource=admin"),
+		MongoDB:            envOr("MONGO_DB", "eprocurement"),
+		DLQSummaryInterval: durationOr("DLQ_SUMMARY_INTERVAL", time.Hour),
+		RedisURL:           envOr("REDIS_URL", "redis://localhost:6379/0"),
+		ExportSchedule:     envOr("EXPORT_SCHEDULE", "01:00"),
+		ExportTZ:           envOr("EXPORT_TZ", "UTC"),
+		ExportLockTTL:      durationOr("EXPORT_LOCK_TTL", 15*time.Minute),
+		ExportJobBudget:    durationOr("EXPORT_JOB_BUDGET", 10*time.Minute),
+		S3Endpoint:         envOr("S3_ENDPOINT", "localhost:9000"),
+		S3AccessKey:        envOr("S3_ACCESS_KEY", "eprocurement"),
+		S3SecretKey:        envOr("S3_SECRET_KEY", "eprocurement"),
+		S3Bucket:           envOr("S3_BUCKET", "attachments"),
+		S3UseSSL:           envBool("S3_USE_SSL", false),
 	}
 }
 
