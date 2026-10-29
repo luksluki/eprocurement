@@ -2535,12 +2535,17 @@ func TestMapMatchError(t *testing.T) {
 func TestPurchaseOrderGRPCListAndGet(t *testing.T) {
 	client, db, cleanup := startProcurement(t)
 	defer cleanup()
-	grpcCleanupRequisition(t, db)
-	grpcCleanupPOVendor(t, db)
-	t.Cleanup(func() {
+	// The final wipe is a defer registered AFTER `defer cleanup()`, so LIFO
+	// runs it BEFORE the pool closes (the file's usual t.Cleanup wipes run
+	// after `cleanup()` has closed the pool and fail silently — the
+	// pre-existing leak pattern other tests absorb via their leading wipes;
+	// this test is the file's last, so nothing after it absorbs its residue).
+	defer func() {
 		grpcCleanupRequisition(t, db)
 		grpcCleanupPOVendor(t, db)
-	})
+	}()
+	grpcCleanupRequisition(t, db)
+	grpcCleanupPOVendor(t, db)
 
 	// Rules + a vendor, then three POs in tenant A (PO-000001..3); the oldest
 	// is issued so the status shape has a value.

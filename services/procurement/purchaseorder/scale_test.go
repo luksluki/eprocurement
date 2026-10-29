@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/luksluki/eprocurement/internal/platform/tenant"
 )
@@ -27,6 +28,47 @@ const (
 // same number as the vendor (#27) and requisition (#32) lists.
 const listBudgetMs = 300
 
+// scaleLockKey is the advisory-lock key shared by the three 100k budget
+// fixtures (vendor #27, requisition #32, purchaseorder #38). `go test ./...`
+// runs their packages concurrently against one database, and their combined
+// bulk-load/IO spikes pushed neighbouring timed loops over the p95 budget
+// (CI run 40797112295: the vendor unfiltered shape measured p95 322 ms —
+// median 209 ms vs ~73 ms solo — while all three fixtures bulk-loaded at
+// once). Every heavy unit (a seed batch, the VACUUM/CHECKPOINT hygiene, one
+// measurement shape) takes and releases the lock, so at most one such unit
+// runs at a time without serializing whole tests — a whole-test lock would
+// exceed the go test timeout, since the solo fixtures run 150–450 s.
+const scaleLockKey = 9138271001
+
+// scaleGuard holds the one dedicated connection advisory locks live on
+// (pool connections rotate per query; advisory locks are session-scoped).
+type scaleGuard struct {
+	conn *pgxpool.Conn
+}
+
+func newScaleGuard(t *testing.T, db *pgxpool.Pool) *scaleGuard {
+	t.Helper()
+	conn, err := db.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("scale guard connection: %v", err)
+	}
+	t.Cleanup(conn.Release)
+	return &scaleGuard{conn: conn}
+}
+
+// lock takes the shared fixture lock; call unlock when the heavy unit ends
+// (defer right after).
+func (g *scaleGuard) lock(t *testing.T) {
+	t.Helper()
+	if _, err := g.conn.Exec(context.Background(), `SELECT pg_advisory_lock($1)`, scaleLockKey); err != nil {
+		t.Fatalf("advisory lock: %v", err)
+	}
+}
+
+func (g *scaleGuard) unlock() {
+	_, _ = g.conn.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, scaleLockKey)
+}
+
 // TestStoreListScale100k proves the #38 list stays under the PRD §19 budget
 // at 100k purchase orders in one tenant, across the four filter shapes the
 // #27/#32 conventions pin (unfiltered / status / number prefix / combined).
@@ -43,9 +85,10 @@ const listBudgetMs = 300
 func TestStoreListScale100k(t *testing.T) {
 	db := openTestDB(t)
 	s := NewStore(db)
+	guard := newScaleGuard(t, db)
 
 	cleanupScale(t, s)
-	if err := seedScale(t, s, 100_000); err != nil {
+	if err := seedScale(t, s, guard, 100_000); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	t.Cleanup(func() { cleanupScale(t, s) })
@@ -55,13 +98,21 @@ func TestStoreListScale100k(t *testing.T) {
 	// load (without it the count arm's index-only scan degrades to heap
 	// fetches), and CHECKPOINT flushes the fixture's dirty buffers so the
 	// background checkpointer does not compete with the timing loop. Both
-	// need superuser, so they run on the pool directly.
-	for _, table := range []string{"procurement.purchase_orders", "procurement.requisitions"} {
-		if _, err := s.db.Exec(t.Context(), fmt.Sprintf(`VACUUM (ANALYZE) %s`, table)); err != nil {
+	// need superuser, so they run on the pool directly — and under the
+	// shared fixture lock (see scaleLockKey): a global CHECKPOINT flushes
+	// every database's buffers at once.
+	for _, table := range []string{"procurement.purchase_orders"} {
+		guard.lock(t)
+		_, err := s.db.Exec(t.Context(), fmt.Sprintf(`VACUUM (ANALYZE) %s`, table))
+		guard.unlock()
+		if err != nil {
 			t.Fatalf("vacuum analyze %s: %v", table, err)
 		}
 	}
-	if _, err := s.db.Exec(t.Context(), `CHECKPOINT`); err != nil {
+	guard.lock(t)
+	_, err := s.db.Exec(t.Context(), `CHECKPOINT`)
+	guard.unlock()
+	if err != nil {
 		t.Fatalf("checkpoint: %v", err)
 	}
 
@@ -81,6 +132,11 @@ func TestStoreListScale100k(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ValidateList: %v", err)
 			}
+			// The timed loop is a heavy unit too: hold the shared fixture
+			// lock so no other package's seed batch or CHECKPOINT can spike
+			// the middle of the budget measurement.
+			guard.lock(t)
+			defer guard.unlock()
 			// Warm-ups (fill caches; the budget is steady-state).
 			for range 3 {
 				if _, _, err := s.List(t.Context(), scaleTenant, f); err != nil {
@@ -125,71 +181,92 @@ func scaleReqID(i int) string {
 // short prefix selects a known ~1k slice; statuses split 80% draft / 10%
 // issued / 10% acknowledged. Each PO names its own requisition (the UNIQUE
 // (tenant_id, requisition_id) "one PO per requisition" rule) and the shared
-// scaleVendor.
-func seedScale(t *testing.T, s *Store, n int) error {
+// scaleVendor. Batches commit one transaction each under the shared fixture
+// lock (see scaleLockKey) so no batch's IO spike lands inside another
+// package's budget measurement.
+func seedScale(t *testing.T, s *Store, guard *scaleGuard, n int) error {
 	t.Helper()
 	const batchSize = 500
+	if err := func() error {
+		guard.lock(t)
+		defer guard.unlock()
+		return tenant.WithBypass(t.Context(), s.db, func(tx pgx.Tx) error {
+			ctx := t.Context()
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO procurement.vendors (id, tenant_id, code, name, status, created_by)
+				VALUES ($1, $2, 'SCALE-38', 'Scale Vendor 38', 'active', $3)
+				ON CONFLICT DO NOTHING`, scaleVendor, scaleTenant, scaleUser); err != nil {
+				return fmt.Errorf("vendor: %w", err)
+			}
+			return nil
+		})
+	}(); err != nil {
+		return err
+	}
+	for start := 1; start <= n; start += batchSize {
+		end := min(start+batchSize-1, n)
+		var (
+			sb     strings.Builder
+			args   = make([]any, 0, batchSize*4)
+			rowNum int
+		)
+		sb.WriteString(`INSERT INTO procurement.requisitions (id, tenant_id, number, requester_id, status, currency, total_cents) VALUES `)
+		for i := start; i <= end; i++ {
+			rowNum++
+			if rowNum > 1 {
+				sb.WriteByte(',')
+			}
+			// $n = id, $n+1 = tenant, $n+2 = number, $n+3 = requester.
+			fmt.Fprintf(&sb, "($%d,$%d,$%d,$%d,'closed','IDR',1000000)",
+				rowNum*4-3, rowNum*4-2, rowNum*4-1, rowNum*4)
+			args = append(args, scaleReqID(i), scaleTenant, fmt.Sprintf("PR-38%05d", i), scaleUser)
+		}
+		if err := commitBatch(t, s, guard, sb.String(), args); err != nil {
+			return fmt.Errorf("requisitions %d-%d: %w", start, end, err)
+		}
+	}
+	for start := 1; start <= n; start += batchSize {
+		end := min(start+batchSize-1, n)
+		var (
+			sb     strings.Builder
+			args   = make([]any, 0, batchSize*3)
+			rowNum int
+		)
+		sb.WriteString(`INSERT INTO procurement.purchase_orders (tenant_id, number, requisition_id, vendor_id, status, currency, total_cents) VALUES `)
+		for i := start; i <= end; i++ {
+			rowNum++
+			status := StatusDraft
+			switch {
+			case i%10 == 3:
+				status = StatusAcknowledged
+			case i%10 == 7:
+				status = StatusIssued
+			}
+			if rowNum > 1 {
+				sb.WriteByte(',')
+			}
+			// $n = number, $n+1 = requisition_id, $n+2 = status; the
+			// tenant and the shared vendor are constants.
+			fmt.Fprintf(&sb, "('%s', $%d, $%d, '%s', $%d, 'IDR', 1000000)",
+				scaleTenant, rowNum*3-2, rowNum*3-1, scaleVendor, rowNum*3)
+			args = append(args, fmt.Sprintf("PO-38%05d", i), scaleReqID(i), status)
+		}
+		if err := commitBatch(t, s, guard, sb.String(), args); err != nil {
+			return fmt.Errorf("purchase orders %d-%d: %w", start, end, err)
+		}
+	}
+	return nil
+}
+
+// commitBatch runs one batched INSERT in its own bypass transaction under
+// the shared fixture lock.
+func commitBatch(t *testing.T, s *Store, guard *scaleGuard, query string, args []any) error {
+	t.Helper()
+	guard.lock(t)
+	defer guard.unlock()
 	return tenant.WithBypass(t.Context(), s.db, func(tx pgx.Tx) error {
-		ctx := t.Context()
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO procurement.vendors (id, tenant_id, code, name, status, created_by)
-			VALUES ($1, $2, 'SCALE-38', 'Scale Vendor 38', 'active', $3)
-			ON CONFLICT DO NOTHING`, scaleVendor, scaleTenant, scaleUser); err != nil {
-			return fmt.Errorf("vendor: %w", err)
-		}
-		for start := 1; start <= n; start += batchSize {
-			end := min(start+batchSize-1, n)
-			var (
-				sb     strings.Builder
-				args   = make([]any, 0, batchSize*4)
-				rowNum int
-			)
-			sb.WriteString(`INSERT INTO procurement.requisitions (id, tenant_id, number, requester_id, status, currency, total_cents) VALUES `)
-			for i := start; i <= end; i++ {
-				rowNum++
-				if rowNum > 1 {
-					sb.WriteByte(',')
-				}
-				// $n = id, $n+1 = tenant, $n+2 = number, $n+3 = requester.
-				fmt.Fprintf(&sb, "($%d,$%d,$%d,$%d,'closed','IDR',1000000)",
-					rowNum*4-3, rowNum*4-2, rowNum*4-1, rowNum*4)
-				args = append(args, scaleReqID(i), scaleTenant, fmt.Sprintf("PR-38%05d", i), scaleUser)
-			}
-			if _, err := tx.Exec(ctx, sb.String(), args...); err != nil {
-				return fmt.Errorf("requisitions %d-%d: %w", start, end, err)
-			}
-		}
-		for start := 1; start <= n; start += batchSize {
-			end := min(start+batchSize-1, n)
-			var (
-				sb     strings.Builder
-				args   = make([]any, 0, batchSize*3)
-				rowNum int
-			)
-			sb.WriteString(`INSERT INTO procurement.purchase_orders (tenant_id, number, requisition_id, vendor_id, status, currency, total_cents) VALUES `)
-			for i := start; i <= end; i++ {
-				rowNum++
-				status := StatusDraft
-				switch {
-				case i%10 == 3:
-					status = StatusAcknowledged
-				case i%10 == 7:
-					status = StatusIssued
-				}
-				if rowNum > 1 {
-					sb.WriteByte(',')
-				}
-				// $n = number, $n+1 = requisition_id, $n+2 = status; the
-				// tenant and the shared vendor are constants.
-				fmt.Fprintf(&sb, "('%s', $%d, $%d, '%s', $%d, 'IDR', 1000000)",
-					scaleTenant, rowNum*3-2, rowNum*3-1, scaleVendor, rowNum*3)
-				args = append(args, fmt.Sprintf("PO-38%05d", i), scaleReqID(i), status)
-			}
-			if _, err := tx.Exec(ctx, sb.String(), args...); err != nil {
-				return fmt.Errorf("purchase orders %d-%d: %w", start, end, err)
-			}
-		}
-		return nil
+		_, err := tx.Exec(t.Context(), query, args...)
+		return err
 	})
 }
 

@@ -282,11 +282,29 @@ DB-gated runs):
   requester/approver pair, PR-000019 (approved), PO-000001 (received,
   GRN-000001/000002) — useful for the invoice issues; wipe with a reset if
   unwanted.
-- The gRPC list test's vendor fixture rides the shared `G-PO35-*`
-  code family so `grpcCleanupPOVendor` covers it (a first draft used
-  `G-PO38-*` and a repeat run hit `vendor_duplicate_code` — the vendor
-  delete silently fails while leftover PO rows pin the FK, the documented
-  pre-existing leak pattern).
+- **CI round 1 (run 40797112295) failed in the Go job — root cause fixed
+  before the retry:** the *vendor* package's pre-existing
+  `TestStoreListScale100k` (#27) measured p95 322 ms (median 209 ms vs ~73
+  ms solo) and bust its 300 ms budget, because `go test ./...` runs the
+  three 100k budget fixtures (vendor #27, requisition #32, and this issue's)
+  **concurrently** against one database and their bulk-load/IO spikes landed
+  inside vendor's first timed shape (this PR added the third fixture — the
+  pre-existing pair fit). Fix: the three scale tests now coordinate through
+  a shared PostgreSQL advisory lock taken **per heavy unit** — every seed
+  batch (seeds now commit one transaction per batch), the ANALYZE/VACUUM/
+  CHECKPOINT hygiene, and each measurement shape — so at most one such unit
+  runs at a time without serializing whole tests (a whole-test lock would
+  exceed the 10 m go-test budget: the solo fixtures run 150–450 s). Verified
+  with the CI topology — the three packages run concurrently: vendor
+  459.7 s, requisition 464.9 s, purchaseorder 246.7 s, all green.
+- The gRPC list test's vendor fixture rides the shared `G-PO35-*` code
+  family so `grpcCleanupPOVendor` covers it (a first draft used `G-PO38-*`
+  and a repeat run hit `vendor_duplicate_code`). Its final wipe is a defer
+  ordered BEFORE the pool closes: the file's usual `t.Cleanup` wipes run
+  after `defer cleanup()` has closed the pool and fail silently (the
+  documented pre-existing leak; other tests absorb it via their leading
+  wipes, but this test is the file's last) — verified: zero vendors/POs
+  residue after a solo run.
 - `grn.posted` remains outside the worker's notification routing keys
   (dev-note 037 decision 4) — unchanged here.
 - Pre-existing, unchanged (dev-notes 029/030/031/035/036/037): the

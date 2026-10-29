@@ -1177,7 +1177,11 @@ trade-off.
 ### Measured plans at 100k rows (the #38 budget test)
 
 `TestStoreListScale100k` (services/procurement/purchaseorder) seeds **one
-vendor, 100k requisitions, and 100k purchase orders** in one tenant — the
+vendor, 100k requisitions, and 100k purchase orders** in one tenant (the
+three 100k budget fixtures — vendor #27, requisition #32, this one —
+coordinate through a shared advisory lock taken per heavy unit: seed batch,
+VACUUM/CHECKPOINT, measurement shape, since `go test ./...` runs their
+packages concurrently against one database) — the
 fixture must satisfy the 0007 FKs: `requisition_id → requisitions` with
 `UNIQUE (tenant_id, requisition_id)` (one PO per requisition) and
 `vendor_id → vendors` — via batched multi-row INSERTs under the bypass

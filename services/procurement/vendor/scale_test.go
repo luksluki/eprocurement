@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/luksluki/eprocurement/internal/platform/tenant"
 )
@@ -21,6 +22,47 @@ const scaleTenant = "cccccccc-0027-0000-0000-000000000027"
 // dashboard reads; the vendor list is held to the same bar).
 const listBudgetMs = 300
 
+// scaleLockKey is the advisory-lock key shared by the three 100k budget
+// fixtures (vendor #27, requisition #32, purchaseorder #38). `go test ./...`
+// runs their packages concurrently against one database, and their combined
+// bulk-load/IO spikes pushed neighbouring timed loops over the p95 budget
+// (CI run 40797112295: this test's unfiltered shape measured p95 322 ms —
+// median 209 ms vs ~73 ms solo — while all three fixtures bulk-loaded at
+// once). Every heavy unit (a seed batch, the ANALYZE hygiene, one
+// measurement shape) takes and releases the lock, so at most one such unit
+// runs at a time without serializing whole tests — a whole-test lock would
+// exceed the go test timeout, since the solo fixtures run 150–450 s.
+const scaleLockKey = 9138271001
+
+// scaleGuard holds the one dedicated connection advisory locks live on
+// (pool connections rotate per query; advisory locks are session-scoped).
+type scaleGuard struct {
+	conn *pgxpool.Conn
+}
+
+func newScaleGuard(t *testing.T, db *pgxpool.Pool) *scaleGuard {
+	t.Helper()
+	conn, err := db.Acquire(context.Background())
+	if err != nil {
+		t.Fatalf("scale guard connection: %v", err)
+	}
+	t.Cleanup(conn.Release)
+	return &scaleGuard{conn: conn}
+}
+
+// lock takes the shared fixture lock; call unlock when the heavy unit ends
+// (defer right after).
+func (g *scaleGuard) lock(t *testing.T) {
+	t.Helper()
+	if _, err := g.conn.Exec(context.Background(), `SELECT pg_advisory_lock($1)`, scaleLockKey); err != nil {
+		t.Fatalf("advisory lock: %v", err)
+	}
+}
+
+func (g *scaleGuard) unlock() {
+	_, _ = g.conn.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, scaleLockKey)
+}
+
 // TestStoreListScale100k proves the #27 acceptance criteria: with 100k
 // vendor rows in one tenant every list shape — unfiltered, status, code
 // prefix, name substring, combined — stays under budget, and the EXPLAIN
@@ -28,19 +70,23 @@ const listBudgetMs = 300
 // indexes carrying the work instead of sequential scans.
 func TestStoreListScale100k(t *testing.T) {
 	s := testStore(t)
+	guard := newScaleGuard(t, s.db)
 
-	if err := seedScale(t, s, 100_000); err != nil {
+	if err := seedScale(t, s, guard, 100_000); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	t.Cleanup(func() { cleanupScale(t, s) })
 
 	// Fresh statistics, as autovacuum would keep them in production — the
 	// bulk load just happened, so without this the planner would run on
-	// empty-table stats.
-	if err := tenant.WithBypass(t.Context(), s.db, func(tx pgx.Tx) error {
+	// empty-table stats. Under the shared fixture lock (see scaleLockKey).
+	guard.lock(t)
+	err := tenant.WithBypass(t.Context(), s.db, func(tx pgx.Tx) error {
 		_, err := tx.Exec(t.Context(), `ANALYZE procurement.vendors`)
 		return err
-	}); err != nil {
+	})
+	guard.unlock()
+	if err != nil {
 		t.Fatalf("analyze: %v", err)
 	}
 
@@ -61,6 +107,11 @@ func TestStoreListScale100k(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ValidateList: %v", err)
 			}
+			// The timed loop is a heavy unit too: hold the shared fixture
+			// lock so no other package's seed batch or CHECKPOINT can spike
+			// the middle of the budget measurement.
+			guard.lock(t)
+			defer guard.unlock()
 			// One warm-up (fills caches; the budget is steady-state).
 			if _, _, err := s.List(t.Context(), scaleTenant, f); err != nil {
 				t.Fatalf("list: %v", err)
@@ -89,48 +140,51 @@ func TestStoreListScale100k(t *testing.T) {
 	}
 }
 
-// seedScale bulk-loads n vendors for scaleTenant via COPY (bypassing RLS —
-// the fixture is not the behavior under test).
 // seedScale bulk-loads n vendors for scaleTenant via batched multi-row
 // INSERTs (bypassing RLS — the fixture is not the behavior under test).
 // COPY FROM is not an option: PostgreSQL rejects it on RLS-enabled tables
-// regardless of the bypass setting.
-func seedScale(t *testing.T, s *Store, n int) error {
+// regardless of the bypass setting. Batches commit one transaction each
+// under the shared fixture lock (see scaleLockKey) so no batch's IO spike
+// lands inside another package's budget measurement.
+func seedScale(t *testing.T, s *Store, guard *scaleGuard, n int) error {
 	t.Helper()
 	const batchSize = 500
-	err := tenant.WithBypass(t.Context(), s.db, func(tx pgx.Tx) error {
-		for start := 1; start <= n; start += batchSize {
-			end := min(start+batchSize-1, n)
-			var (
-				sb     strings.Builder
-				args   = make([]any, 0, batchSize*4)
-				rowNum int
-			)
-			sb.WriteString(`INSERT INTO procurement.vendors (tenant_id, code, name, status) VALUES `)
-			for i := start; i <= end; i++ {
-				rowNum++
-				code := fmt.Sprintf("S27-V%06d", i)
-				name := fmt.Sprintf("PT Vendor %06d", i)
-				if i%10 == 0 {
-					name += " Nusantara"
-				}
-				status := StatusActive
-				if i%10 == 7 { // 10% deactivated
-					status = StatusDeactivated
-				}
-				if rowNum > 1 {
-					sb.WriteByte(',')
-				}
-				fmt.Fprintf(&sb, "($%d,$%d,$%d,$%d)", rowNum*4-3, rowNum*4-2, rowNum*4-1, rowNum*4)
-				args = append(args, scaleTenant, code, name, status)
+	for start := 1; start <= n; start += batchSize {
+		end := min(start+batchSize-1, n)
+		var (
+			sb     strings.Builder
+			args   = make([]any, 0, batchSize*4)
+			rowNum int
+		)
+		sb.WriteString(`INSERT INTO procurement.vendors (tenant_id, code, name, status) VALUES `)
+		for i := start; i <= end; i++ {
+			rowNum++
+			code := fmt.Sprintf("S27-V%06d", i)
+			name := fmt.Sprintf("PT Vendor %06d", i)
+			if i%10 == 0 {
+				name += " Nusantara"
 			}
-			if _, err := tx.Exec(t.Context(), sb.String(), args...); err != nil {
-				return err
+			status := StatusActive
+			if i%10 == 7 { // 10% deactivated
+				status = StatusDeactivated
 			}
+			if rowNum > 1 {
+				sb.WriteByte(',')
+			}
+			fmt.Fprintf(&sb, "($%d,$%d,$%d,$%d)", rowNum*4-3, rowNum*4-2, rowNum*4-1, rowNum*4)
+			args = append(args, scaleTenant, code, name, status)
 		}
-		return nil
-	})
-	return err
+		guard.lock(t)
+		err := tenant.WithBypass(t.Context(), s.db, func(tx pgx.Tx) error {
+			_, err := tx.Exec(t.Context(), sb.String(), args...)
+			return err
+		})
+		guard.unlock()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func cleanupScale(t *testing.T, s *Store) {
