@@ -11,6 +11,7 @@ import (
 	"github.com/luksluki/eprocurement/internal/platform/grpcserver"
 	"github.com/luksluki/eprocurement/internal/platform/rbac"
 	"github.com/luksluki/eprocurement/services/documents/attachment"
+	"github.com/luksluki/eprocurement/services/documents/export"
 	"github.com/luksluki/eprocurement/services/documents/history"
 )
 
@@ -23,7 +24,8 @@ const ServiceName = "documents"
 // entities today are requisitions, and requisition:read is held by every
 // tenant role (rbac matrix), so the whole tenant can read its timeline
 // while a method missing from this map would pass through unprotected
-// (see rbac.UnaryInterceptor).
+// (see rbac.UnaryInterceptor). The export methods map to export:run
+// (#49) — finance/admin only, the permission's first real consumer.
 //
 // The attachment methods are deliberately NOT in this map: their permission
 // depends on the attachment's entity type (vendor:read/write vs
@@ -32,20 +34,22 @@ const ServiceName = "documents"
 // right after the entity type is known — the same defense-in-depth depth,
 // one level deeper.
 var methodPermissions = rbac.MethodPermissions{
-	"/documents.v1.Documents/ListEvents": rbac.RequisitionRead,
+	"/documents.v1.Documents/ListEvents":           rbac.RequisitionRead,
+	"/documents.v1.Documents/ListExportRuns":       rbac.ExportRun,
+	"/documents.v1.Documents/GetExportDownloadUrl": rbac.ExportRun,
 }
 
 // New returns a grpcserver.Server with the documents API registered.
 func New(log *slog.Logger, pinger grpcserver.Pinger, store *attachment.Store,
 	storage attachment.Storage, limits attachment.Limits, events *history.Store,
-	opts ...grpcserver.Option) *grpcserver.Server {
+	exports *export.Store, opts ...grpcserver.Option) *grpcserver.Server {
 	srv := grpcserver.New(log, pinger, append([]grpcserver.Option{
 		grpcserver.WithServiceName(ServiceName),
 		grpcserver.WithUnary(rbac.UnaryInterceptor(methodPermissions)),
 	}, opts...)...)
 	documentsv1.RegisterDocumentsServer(srv.GRPC(), &api{
 		store: store, storage: storage, limits: limits, now: time.Now, log: log,
-		events: events,
+		events: events, exports: exports,
 	})
 	return srv
 }

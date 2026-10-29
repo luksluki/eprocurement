@@ -10,8 +10,11 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -22,6 +25,7 @@ import (
 	documentsv1 "github.com/luksluki/eprocurement/gen/go/documents/v1"
 	"github.com/luksluki/eprocurement/internal/platform/rbac"
 	"github.com/luksluki/eprocurement/services/documents/attachment"
+	"github.com/luksluki/eprocurement/services/documents/export"
 	"github.com/luksluki/eprocurement/services/documents/history"
 	"github.com/luksluki/eprocurement/services/documents/internal/testenv"
 	"github.com/luksluki/eprocurement/services/documents/objectstore"
@@ -62,9 +66,13 @@ func startDocuments(t *testing.T) (documentsv1.DocumentsClient, func()) {
 	if err := events.EnsureIndexes(t.Context()); err != nil {
 		t.Fatalf("EnsureIndexes history: %v", err)
 	}
+	exports := export.NewStore(db)
+	if err := exports.EnsureIndexes(t.Context()); err != nil {
+		t.Fatalf("EnsureIndexes export: %v", err)
+	}
 
 	log := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
-	srv := New(log, okPinger{}, store, storage, attachment.Limits{MaxSizeBytes: 1 << 20}, events)
+	srv := New(log, okPinger{}, store, storage, attachment.Limits{MaxSizeBytes: 1 << 20}, events, exports)
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -351,9 +359,9 @@ func TestAttachmentRequisitionEntity(t *testing.T) {
 
 	// The same requester cannot declare a vendor attachment (vendor:write).
 	_, err = client.CreateUpload(requesterCtx, &documentsv1.CreateUploadRequest{
-		EntityType:     attachment.EntityTypeVendor,
-		EntityId:       gVendor,
-		Filename:       "a.pdf", MimeType: "application/pdf",
+		EntityType: attachment.EntityTypeVendor,
+		EntityId:   gVendor,
+		Filename:   "a.pdf", MimeType: "application/pdf",
 		SizeBytes: 4, ChecksumSha256: sha256Hex([]byte("x")),
 	})
 	if st, _ := status.FromError(err); st.Code() != codes.PermissionDenied ||
@@ -444,9 +452,9 @@ func TestAttachmentInvoiceEntity(t *testing.T) {
 	// A buyer cannot declare an invoice attachment (invoice:write is
 	// finance/admin only).
 	_, err = client.CreateUpload(buyerCtx(), &documentsv1.CreateUploadRequest{
-		EntityType:     attachment.EntityTypeInvoice,
-		EntityId:       gInvoice,
-		Filename:       "a.pdf", MimeType: "application/pdf",
+		EntityType: attachment.EntityTypeInvoice,
+		EntityId:   gInvoice,
+		Filename:   "a.pdf", MimeType: "application/pdf",
 		SizeBytes: 4, ChecksumSha256: sha256Hex([]byte("x")),
 	})
 	if st, _ := status.FromError(err); st.Code() != codes.PermissionDenied ||
@@ -495,7 +503,7 @@ func startDocumentsEvents(t *testing.T) (documentsv1.DocumentsClient, *history.S
 		t.Fatalf("EnsureIndexes history: %v", err)
 	}
 	log := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
-	srv := New(log, okPinger{}, attachment.NewStore(db), nil, attachment.Limits{}, events)
+	srv := New(log, okPinger{}, attachment.NewStore(db), nil, attachment.Limits{}, events, export.NewStore(db))
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -689,5 +697,171 @@ func TestListEventsRBAC(t *testing.T) {
 	// A least-privileged matrix role (viewer) reads fine.
 	if _, err := client.ListEvents(viewerCtx(), &documentsv1.ListEventsRequest{Limit: 1}); err != nil {
 		t.Fatalf("viewer ListEvents: %v", err)
+	}
+}
+
+// startDocumentsExports boots the full wiring for the export run API (#49)
+// — real MongoDB + MinIO — and hands the test the export store for seeding
+// and the storage adapter for writing the CSV object a successful run
+// points at.
+func startDocumentsExports(t *testing.T) (documentsv1.DocumentsClient, *export.Store, *objectstore.MinIO, func()) {
+	t.Helper()
+	db := testenv.Mongo(t)
+	endpoint, accessKey, secretKey, bucket := testenv.MinIOEnv(t)
+	storage, err := objectstore.New(endpoint, "", accessKey, secretKey, bucket, false)
+	if err != nil {
+		t.Fatalf("connect object store: %v", err)
+	}
+	if err := storage.EnsureBucket(t.Context()); err != nil {
+		t.Fatalf("ensure bucket: %v", err)
+	}
+	exports := export.NewStore(db)
+	if err := exports.EnsureIndexes(t.Context()); err != nil {
+		t.Fatalf("EnsureIndexes export: %v", err)
+	}
+	log := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
+	srv := New(log, okPinger{}, attachment.NewStore(db), storage, attachment.Limits{}, history.NewStore(db), exports)
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() { _ = srv.Serve(context.Background(), lis) }()
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	return documentsv1.NewDocumentsClient(conn), exports, storage, func() {
+		_ = conn.Close()
+		_ = lis.Close()
+	}
+}
+
+func exportRun(tenantID string, slot time.Time, status string) export.Run {
+	run := export.Run{
+		RunID:        uuid.NewString(),
+		TenantID:     tenantID,
+		ScheduledFor: slot,
+		Status:       status,
+		RowCount:     2,
+		StartedAt:    slot.Add(time.Minute),
+		FinishedAt:   slot.Add(2 * time.Minute),
+	}
+	if status == export.StatusSuccess {
+		run.ObjectKey = "exports/" + tenantID + "/" + slot.Format("2006-01-02") + "/purchase-orders.csv"
+	} else {
+		run.ErrorMessage = "object store unreachable"
+	}
+	return run
+}
+
+// TestExportRunsListAndDownload pins the export run API (#49): finance
+// (export:run) lists the tenant's runs newest-first with the missed flag
+// surfacing, downloads a successful run's CSV through the presigned URL,
+// cannot download a failed run, and never sees another tenant's run ids.
+func TestExportRunsListAndDownload(t *testing.T) {
+	client, store, storage, stop := startDocumentsExports(t)
+	defer stop()
+	financeCtx := callerCtx(gTenantA, rbac.RoleFinance)
+
+	slot1 := time.Date(2026, 10, 25, 1, 0, 0, 0, time.UTC)
+	slot2 := time.Date(2026, 10, 26, 1, 0, 0, 0, time.UTC)
+	failed := exportRun(gTenantA, slot1, export.StatusFailed)
+	success := exportRun(gTenantA, slot2, export.StatusSuccess)
+	success.MissedPrevious = true // detection flagged the slot1 failure
+	if err := store.UpsertRun(t.Context(), failed); err != nil {
+		t.Fatalf("seed failed run: %v", err)
+	}
+	if err := store.UpsertRun(t.Context(), success); err != nil {
+		t.Fatalf("seed success run: %v", err)
+	}
+	// Tenant B has a successful run of its own.
+	otherSuccess := exportRun(gTenantB, slot2, export.StatusSuccess)
+	if err := store.UpsertRun(t.Context(), otherSuccess); err != nil {
+		t.Fatalf("seed tenant B run: %v", err)
+	}
+	// Write the CSV object the successful run points at.
+	csv := "po_number,vendor_code\nPO-1,V-1\n"
+	if err := storage.Put(t.Context(), success.ObjectKey, strings.NewReader(csv), int64(len(csv)), "text/csv; charset=utf-8"); err != nil {
+		t.Fatalf("put csv: %v", err)
+	}
+
+	// List: newest first, both fields surfaced, tenant-scoped.
+	list, err := client.ListExportRuns(financeCtx, &documentsv1.ListExportRunsRequest{})
+	if err != nil {
+		t.Fatalf("ListExportRuns: %v", err)
+	}
+	if len(list.GetRuns()) != 2 {
+		t.Fatalf("runs = %d, want 2", len(list.GetRuns()))
+	}
+	newest := list.GetRuns()[0]
+	if newest.GetRunId() != success.RunID || newest.GetStatus() != export.StatusSuccess ||
+		!newest.GetMissedPrevious() || newest.GetRowCount() != 2 || newest.GetScheduledFor() == "" {
+		t.Fatalf("newest run = %+v", newest)
+	}
+	oldest := list.GetRuns()[1]
+	if oldest.GetRunId() != failed.RunID || oldest.GetErrorMessage() == "" {
+		t.Fatalf("oldest run = %+v, want the failed run with its error", oldest)
+	}
+
+	// Download a successful run: presigned URL serves the exact CSV bytes.
+	dl, err := client.GetExportDownloadUrl(financeCtx, &documentsv1.GetExportDownloadUrlRequest{RunId: success.RunID})
+	if err != nil {
+		t.Fatalf("GetExportDownloadUrl: %v", err)
+	}
+	if dl.GetDownloadUrl() == "" || dl.GetExpiresAt() == "" || dl.GetRun().GetRunId() != success.RunID {
+		t.Fatalf("download response = %+v", dl)
+	}
+	httpResp, err := http.Get(dl.GetDownloadUrl())
+	if err != nil {
+		t.Fatalf("GET csv: %v", err)
+	}
+	defer httpResp.Body.Close()
+	got, _ := io.ReadAll(httpResp.Body)
+	if string(got) != csv {
+		t.Fatalf("csv bytes = %q, want %q", got, csv)
+	}
+
+	// A failed run has no object: FailedPrecondition with the machine code.
+	_, err = client.GetExportDownloadUrl(financeCtx, &documentsv1.GetExportDownloadUrlRequest{RunId: failed.RunID})
+	if st, _ := status.FromError(err); st.Code() != codes.FailedPrecondition || st.Message() != "export_not_succeeded" {
+		t.Fatalf("failed-run download error = %v", err)
+	}
+
+	// Cross-tenant denial: tenant B's finance cannot resolve tenant A's run
+	// id — indistinguishable from missing.
+	_, err = client.GetExportDownloadUrl(callerCtx(gTenantB, rbac.RoleFinance),
+		&documentsv1.GetExportDownloadUrlRequest{RunId: success.RunID})
+	if st, _ := status.FromError(err); st.Code() != codes.NotFound || st.Message() != export.ErrRunNotFound.Error() {
+		t.Fatalf("cross-tenant download error = %v", err)
+	}
+
+	// Malformed id: the typed invalid code.
+	_, err = client.GetExportDownloadUrl(financeCtx, &documentsv1.GetExportDownloadUrlRequest{RunId: "not-a-uuid"})
+	if st, _ := status.FromError(err); st.Code() != codes.InvalidArgument || st.Message() != export.ErrRunIDInvalid.Error() {
+		t.Fatalf("malformed id error = %v", err)
+	}
+}
+
+// TestExportRunsRBAC pins the interceptor mapping: export:run is held by
+// finance/admin only — a buyer is denied; a caller without metadata is
+// Unauthenticated. Methods missing from the map pass through unprotected,
+// so the mapping itself is the protection (the ListEvents precedent).
+func TestExportRunsRBAC(t *testing.T) {
+	client, _, _, stop := startDocumentsExports(t)
+	defer stop()
+
+	_, err := client.ListExportRuns(buyerCtx(), &documentsv1.ListExportRunsRequest{})
+	if st, _ := status.FromError(err); st.Code() != codes.PermissionDenied ||
+		st.Message() != "permission_denied: requires export:run" {
+		t.Fatalf("buyer ListExportRuns error = %v, want PermissionDenied requires export:run", err)
+	}
+	_, err = client.GetExportDownloadUrl(buyerCtx(), &documentsv1.GetExportDownloadUrlRequest{RunId: uuid.NewString()})
+	if st, _ := status.FromError(err); st.Code() != codes.PermissionDenied {
+		t.Fatalf("buyer GetExportDownloadUrl error = %v, want PermissionDenied", err)
+	}
+	_, err = client.ListExportRuns(context.Background(), &documentsv1.ListExportRunsRequest{})
+	if st, _ := status.FromError(err); st.Code() != codes.Unauthenticated {
+		t.Fatalf("anonymous error = %v, want Unauthenticated", err)
 	}
 }

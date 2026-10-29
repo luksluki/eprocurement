@@ -104,6 +104,16 @@ func (m *MinIO) Remove(ctx context.Context, key string) error {
 	return m.client.RemoveObject(ctx, m.bucket, key, minio.RemoveObjectOptions{})
 }
 
+// Put stores an object with the given size and content type. The nightly
+// export writer (#49) uses it for the CSV artifacts under exports/; a
+// same-key put overwrites, which is the export's per-date idempotency.
+func (m *MinIO) Put(ctx context.Context, key string, reader io.Reader, size int64, contentType string) error {
+	_, err := m.client.PutObject(ctx, m.bucket, key, reader, size, minio.PutObjectOptions{
+		ContentType: contentType,
+	})
+	return err
+}
+
 // isNoSuchKey maps MinIO's "NoSuchKey" error response to the domain
 // sentinel's condition.
 func isNoSuchKey(err error) bool {

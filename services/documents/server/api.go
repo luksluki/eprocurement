@@ -17,6 +17,7 @@ import (
 	documentsv1 "github.com/luksluki/eprocurement/gen/go/documents/v1"
 	"github.com/luksluki/eprocurement/internal/platform/rbac"
 	"github.com/luksluki/eprocurement/services/documents/attachment"
+	"github.com/luksluki/eprocurement/services/documents/export"
 	"github.com/luksluki/eprocurement/services/documents/history"
 )
 
@@ -77,6 +78,7 @@ type api struct {
 	storage attachment.Storage
 	limits  attachment.Limits
 	events  *history.Store
+	exports *export.Store
 	now     func() time.Time
 	log     *slog.Logger
 }
@@ -257,6 +259,83 @@ func (a *api) ListEvents(ctx context.Context, req *documentsv1.ListEventsRequest
 		out.Events = append(out.Events, eventPB(ev))
 	}
 	return out, nil
+}
+
+// ListExportRuns returns the caller tenant's nightly-export run history,
+// newest first (#49, FR-10). The interceptor map already enforced
+// export:run; the store scopes every query by the caller's tenant.
+func (a *api) ListExportRuns(ctx context.Context, req *documentsv1.ListExportRunsRequest) (*documentsv1.ListExportRunsResponse, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	runs, err := a.exports.List(ctx, auth.TenantID, int(req.GetLimit()))
+	if err != nil {
+		return nil, status.Error(codes.Internal, "internal error")
+	}
+	out := &documentsv1.ListExportRunsResponse{}
+	for _, r := range runs {
+		out.Runs = append(out.Runs, runPB(r))
+	}
+	return out, nil
+}
+
+// GetExportDownloadUrl returns a presigned GET URL for one successful
+// run's CSV (#49). Failed runs have no object (FailedPrecondition
+// export_not_succeeded — the basis of #53's error display); a run id of
+// another tenant is indistinguishable from a missing one.
+func (a *api) GetExportDownloadUrl(ctx context.Context, req *documentsv1.GetExportDownloadUrlRequest) (*documentsv1.GetExportDownloadUrlResponse, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	run, err := a.exports.Get(ctx, auth.TenantID, req.GetRunId())
+	if err != nil {
+		return nil, mapExportError(err)
+	}
+	if run.Status != export.StatusSuccess || run.ObjectKey == "" {
+		return nil, status.Error(codes.FailedPrecondition, "export_not_succeeded")
+	}
+	downloadURL, expiresAt, err := a.storage.PresignGet(ctx, run.ObjectKey, presignTTL)
+	if err != nil {
+		a.log.Error("presign export download failed", "error", err)
+		return nil, status.Error(codes.Internal, "internal error")
+	}
+	return &documentsv1.GetExportDownloadUrlResponse{
+		Run:         runPB(*run),
+		DownloadUrl: downloadURL,
+		ExpiresAt:   expiresAt.UTC().Format(time.RFC3339),
+	}, nil
+}
+
+// mapExportError keeps the machine code intact: malformed id →
+// InvalidArgument, missing/cross-tenant → NotFound.
+func mapExportError(err error) error {
+	switch {
+	case errors.Is(err, export.ErrRunIDInvalid):
+		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, export.ErrRunNotFound):
+		return status.Error(codes.NotFound, err.Error())
+	default:
+		return status.Error(codes.Internal, "internal error")
+	}
+}
+
+// runPB maps a stored run record to the wire message. Timestamps are
+// RFC 3339; object_key never crosses the wire (the presigned URL is the
+// only download path, the attachment convention).
+func runPB(r export.Run) *documentsv1.ExportRun {
+	return &documentsv1.ExportRun{
+		RunId:          r.RunID,
+		TenantId:       r.TenantID,
+		ScheduledFor:   r.ScheduledFor.UTC().Format(time.RFC3339),
+		Status:         r.Status,
+		RowCount:       int32(r.RowCount),
+		MissedPrevious: r.MissedPrevious,
+		ErrorMessage:   r.ErrorMessage,
+		StartedAt:      r.StartedAt.UTC().Format(time.RFC3339),
+		FinishedAt:     r.FinishedAt.UTC().Format(time.RFC3339),
+	}
 }
 
 // mapHistoryError keeps the machine code (the gRPC message) intact:

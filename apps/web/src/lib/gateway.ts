@@ -449,3 +449,44 @@ export async function listEvents(accessToken: string, query: string): Promise<Ev
     return { ok: false, status: 502 };
   }
 }
+
+// ExportRunEntry is one nightly-export run record as served by
+// GET /api/v1/exports/runs (issue #49, FR-10). status is "success" |
+// "failed"; a failed run carries error_message (the basis of #53's error
+// display) and no file; missed_previous flags a slot the detection found
+// without a successful run.
+export type ExportRunEntry = {
+  run_id: string;
+  tenant_id: string;
+  scheduled_for: string;
+  status: string;
+  row_count: number;
+  missed_previous: boolean;
+  error_message: string;
+  started_at: string;
+  finished_at: string;
+};
+
+// ExportRunsPage is the GET /api/v1/exports/runs envelope, newest first.
+export type ExportRunsPage = {
+  runs: ExportRunEntry[];
+};
+
+// listExportRuns loads the tenant's export run history (issue #49).
+export function listExportRuns(accessToken: string): Promise<GatewayResult<ExportRunsPage>> {
+  return callGateway(accessToken, "/api/v1/exports/runs");
+}
+
+// ExportDownload is the GET /api/v1/exports/runs/{id}/download-url shape:
+// the run's fields plus the download envelope (the attachment convention —
+// flat, with the presigned URL nested under "download").
+export type ExportDownload = ExportRunEntry & {
+  download: { url: string; expires_at: string };
+};
+
+// getExportDownloadUrl mints a short-lived presigned GET for one
+// successful run's CSV (issue #49). Failed runs answer 412
+// export_not_succeeded; another tenant's run id answers 404.
+export function getExportDownloadUrl(accessToken: string, runId: string): Promise<GatewayResult<ExportDownload>> {
+  return callGateway(accessToken, `/api/v1/exports/runs/${encodeURIComponent(runId)}/download-url`);
+}

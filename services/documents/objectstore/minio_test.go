@@ -120,3 +120,48 @@ func sha256Hex(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
+
+// TestMinIOPutAndOverwrite pins the export writer's contract (#49): Put
+// stores an object with its content type under the exports/ key family, and
+// a second Put to the same key overwrites it — the per-date idempotency the
+// nightly export relies on. The presigned GET then serves the latest bytes.
+func TestMinIOPutAndOverwrite(t *testing.T) {
+	endpoint, accessKey, secretKey, bucket := testenv.MinIOEnv(t)
+	storage, err := New(endpoint, "", accessKey, secretKey, bucket, false)
+	if err != nil {
+		t.Fatalf("connect object store: %v", err)
+	}
+	if err := storage.EnsureBucket(t.Context()); err != nil {
+		t.Fatalf("ensure bucket: %v", err)
+	}
+	ctx := t.Context()
+	key := "exports/t-put/2026-10-27/purchase-orders.csv"
+
+	first := []byte("po_number,vendor_code\nPO-1,V-1\n")
+	if err := storage.Put(ctx, key, bytes.NewReader(first), int64(len(first)), "text/csv; charset=utf-8"); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	info, err := storage.Stat(ctx, key)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if info.Size != int64(len(first)) || info.ContentType != "text/csv; charset=utf-8" {
+		t.Fatalf("Stat info = %+v", info)
+	}
+
+	second := []byte("po_number,vendor_code\nPO-1,V-1\nPO-2,V-2\n")
+	if err := storage.Put(ctx, key, bytes.NewReader(second), int64(len(second)), "text/csv; charset=utf-8"); err != nil {
+		t.Fatalf("overwrite Put: %v", err)
+	}
+	getURL, _, err := storage.PresignGet(ctx, key, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("PresignGet: %v", err)
+	}
+	if got := getViaPresignedURL(t, getURL); !bytes.Equal(got, second) {
+		t.Fatalf("GET after overwrite = %q, want %q", got, second)
+	}
+
+	if err := storage.Remove(ctx, key); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+}
