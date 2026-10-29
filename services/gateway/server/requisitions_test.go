@@ -99,6 +99,16 @@ func (f *fakeRequisitionClient) CreatePurchaseOrder(ctx context.Context, in *pro
 	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
 }
 
+// The #38 PO read methods satisfy the widened ProcurementClient interface;
+// the PO tests use their own fake with recording.
+func (f *fakeRequisitionClient) ListPurchaseOrders(ctx context.Context, in *procurementv1.ListPurchaseOrdersRequest, opts ...grpc.CallOption) (*procurementv1.ListPurchaseOrdersResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
+}
+
+func (f *fakeRequisitionClient) GetPurchaseOrder(ctx context.Context, in *procurementv1.GetPurchaseOrderRequest, opts ...grpc.CallOption) (*procurementv1.PurchaseOrder, error) {
+	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
+}
+
 func (f *fakeRequisitionClient) IssuePurchaseOrder(ctx context.Context, in *procurementv1.IssuePurchaseOrderRequest, opts ...grpc.CallOption) (*procurementv1.PurchaseOrder, error) {
 	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
 }

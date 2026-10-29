@@ -499,7 +499,8 @@ func rulesPB(rules []approval.Rule) *procurementv1.ApprovalRulesResponse {
 // their machine code verbatim in the gRPC message. The requisition and vendor
 // gate sentinels ride along bare (the conversion crosses those domains); the
 // #36 lifecycle guards (illegal transition, receipts pin the PO) map to
-// Aborted, which the gateway renders as HTTP 409 (FR-06).
+// Aborted, which the gateway renders as HTTP 409 (FR-06); the #38 list
+// sentinels (unknown status, absurd page) map to InvalidArgument/400.
 func mapPurchaseOrderError(err error) error {
 	switch {
 	case errors.Is(err, purchaseorder.ErrVendorIDInvalid),
@@ -509,6 +510,8 @@ func mapPurchaseOrderError(err error) error {
 		errors.Is(err, purchaseorder.ErrQtyInvalid),
 		errors.Is(err, purchaseorder.ErrUnitPriceInvalid),
 		errors.Is(err, purchaseorder.ErrIDInvalid),
+		errors.Is(err, purchaseorder.ErrStatusInvalid),
+		errors.Is(err, purchaseorder.ErrPageInvalid),
 		errors.Is(err, requisition.ErrIDInvalid):
 		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, purchaseorder.ErrRequisitionNotApproved),
@@ -625,6 +628,53 @@ func (a *api) ClosePurchaseOrder(ctx context.Context, req *procurementv1.ClosePu
 		return nil, err
 	}
 	po, err := a.purchaseOrders.Close(ctx, auth.TenantID, strings.TrimSpace(req.GetId()), auth.UserID)
+	if err != nil {
+		return nil, mapPurchaseOrderError(err)
+	}
+	return purchaseOrderPB(po), nil
+}
+
+// ListPurchaseOrders serves the PO list (po:read — every role per
+// docs/rbac.md): filters validated in the domain, one header-only page
+// (items are not loaded — the detail read owns them), newest number first.
+// The #32 requisition-list twin: bad status → 400 po_status_invalid, absurd
+// page → 400 po_page_invalid.
+func (a *api) ListPurchaseOrders(ctx context.Context, req *procurementv1.ListPurchaseOrdersRequest) (*procurementv1.ListPurchaseOrdersResponse, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	filter, err := purchaseorder.ValidateList(purchaseorder.ListFilter{
+		Query: req.GetQuery(), Status: req.GetStatus(),
+		Page: req.GetPage(), PageSize: req.GetPageSize(),
+	})
+	if err != nil {
+		return nil, mapPurchaseOrderError(err)
+	}
+	headers, total, err := a.purchaseOrders.List(ctx, auth.TenantID, filter)
+	if err != nil {
+		return nil, mapPurchaseOrderError(err)
+	}
+	out := &procurementv1.ListPurchaseOrdersResponse{
+		Total: int32(total), Page: filter.Page, PageSize: filter.PageSize,
+		PurchaseOrders: make([]*procurementv1.PurchaseOrder, 0, len(headers)),
+	}
+	for _, po := range headers {
+		out.PurchaseOrders = append(out.PurchaseOrders, purchaseOrderPB(po))
+	}
+	return out, nil
+}
+
+// GetPurchaseOrder serves the PO detail read (po:read, tenant-wide — no
+// ownership rule; POs belong to the tenant): header plus items with their
+// ids (receipt lines reference po_item ids since #37), the bodies the list
+// rows never carry. Other tenants' POs are indistinguishable from missing.
+func (a *api) GetPurchaseOrder(ctx context.Context, req *procurementv1.GetPurchaseOrderRequest) (*procurementv1.PurchaseOrder, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	po, err := a.purchaseOrders.Get(ctx, auth.TenantID, strings.TrimSpace(req.GetId()))
 	if err != nil {
 		return nil, mapPurchaseOrderError(err)
 	}

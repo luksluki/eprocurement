@@ -913,3 +913,200 @@ func TestStoreNumberingAndConcurrency(t *testing.T) {
 		t.Fatalf("round-trip header = %d/%s/%s", roundTripped.TotalCents, roundTripped.Currency, roundTripped.Status)
 	}
 }
+
+// seedListPOs creates six POs in tenant A (four drafts, one issued, one
+// acknowledged) and one in tenant B (never visible to tenant A), via the
+// real conversion path; every list test calls cleanupPO first so the
+// per-tenant numbering is deterministic (PO-000001..6 for tenant A).
+func seedListPOs(t *testing.T, db *pgxpool.Pool, s *Store) []PurchaseOrder {
+	t.Helper()
+	ctx := context.Background()
+	var created []PurchaseOrder
+	for i := 0; i < 6; i++ {
+		created = append(created, draftPO(t, db, poTenantA))
+	}
+	// The oldest becomes issued, the second-oldest acknowledged — the status
+	// filter shapes need non-draft values.
+	issued, err := s.Issue(ctx, poTenantA, created[0].ID, poBuyer)
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	created[0] = issued
+	ack, err := s.Issue(ctx, poTenantA, created[1].ID, poBuyer)
+	if err != nil {
+		t.Fatalf("issue 2: %v", err)
+	}
+	created[1], err = s.Acknowledge(ctx, poTenantA, ack.ID, poBuyer)
+	if err != nil {
+		t.Fatalf("acknowledge: %v", err)
+	}
+	// Another tenant's row: never visible to tenant A listings.
+	draftPO(t, db, poTenantB)
+	return created
+}
+
+func listPOOK(t *testing.T, s *Store, f ListFilter) ([]PurchaseOrder, int) {
+	t.Helper()
+	filter, err := ValidateList(f)
+	if err != nil {
+		t.Fatalf("ValidateList: %v", err)
+	}
+	rows, total, err := s.List(t.Context(), poTenantA, filter)
+	if err != nil {
+		t.Fatalf("List(%+v): %v", f, err)
+	}
+	return rows, total
+}
+
+// AC (#38): the list filters combine (status equality, number prefix with
+// literal wildcards, both orderings), stays tenant-scoped, orders by number
+// descending, and returns header-only rows.
+func TestStoreListFilters(t *testing.T) {
+	db := openTestDB(t)
+	s := NewStore(db)
+	cleanupPO(t, db)
+	t.Cleanup(func() { cleanupPO(t, db) })
+	created := seedListPOs(t, db, s)
+
+	// No filter: all six of tenant A's rows, newest number first.
+	rows, total := listPOOK(t, s, ListFilter{PageSize: 10})
+	if total != 6 || len(rows) != 6 {
+		t.Fatalf("unfiltered = %d rows (total %d), want 6", len(rows), total)
+	}
+	for i := 1; i < len(rows); i++ {
+		if rows[i-1].Number <= rows[i].Number {
+			t.Fatalf("not descending: %s then %s", rows[i-1].Number, rows[i].Number)
+		}
+	}
+	// Header-only: the list never loads items even for POs that have them.
+	for _, po := range rows {
+		if len(po.Items) != 0 {
+			t.Fatalf("list row carries items: %+v", po)
+		}
+		if po.VendorID == "" || po.RequisitionID == "" || po.TotalCents == 0 {
+			t.Fatalf("header fields missing: %+v", po)
+		}
+	}
+
+	// Status filter: only the issued row (created[0] is PO-000001).
+	rows, total = listPOOK(t, s, ListFilter{Status: StatusIssued, PageSize: 10})
+	if total != 1 || rows[0].ID != created[0].ID || rows[0].IssuedAt == nil {
+		t.Fatalf("issued = %+v (total %d)", rows, total)
+	}
+
+	// Query: number prefix, case-insensitive input — matches exactly one.
+	rows, total = listPOOK(t, s, ListFilter{Query: created[2].Number, PageSize: 10})
+	if total != 1 || rows[0].ID != created[2].ID {
+		t.Fatalf("full number = %v (total %d)", rows, total)
+	}
+	// The common prefix ("PO-0000" at least) matches all six.
+	rows, total = listPOOK(t, s, ListFilter{Query: "po-0000", PageSize: 10})
+	if total != 6 {
+		t.Fatalf("prefix = %v (total %d)", rows, total)
+	}
+	// % is literal, not a wildcard (also exercises the past-the-end COUNT
+	// fallback with zero matches).
+	rows, total = listPOOK(t, s, ListFilter{Query: "%", PageSize: 10})
+	if total != 0 || len(rows) != 0 {
+		t.Fatalf("literal %% = %v (total %d)", rows, total)
+	}
+
+	// Combined: acknowledged + the common prefix → exactly created[1].
+	rows, total = listPOOK(t, s, ListFilter{Query: "PO-0000", Status: StatusAcknowledged, PageSize: 10})
+	if total != 1 || rows[0].ID != created[1].ID {
+		t.Fatalf("combined acknowledged = %v (total %d)", rows, total)
+	}
+
+	// Cross-tenant: tenant A's rows never appear in tenant B's listing, and
+	// tenant B sees exactly its own single row.
+	rowsB, totalB, err := s.List(t.Context(), poTenantB, mustValidatePO(t, ListFilter{Query: "PO-"}))
+	if err != nil {
+		t.Fatalf("tenantB list: %v", err)
+	}
+	if totalB != 1 || len(rowsB) != 1 || rowsB[0].TenantID != poTenantB {
+		t.Fatalf("tenantB sees %d rows (total %d), want its single row", len(rowsB), totalB)
+	}
+}
+
+// Pagination: deep pages land correctly, a page past the end is empty but
+// still reports the true total (the COUNT fallback), and zero values apply
+// the defaults (page 1, page size 20).
+func TestStoreListPagination(t *testing.T) {
+	db := openTestDB(t)
+	s := NewStore(db)
+	cleanupPO(t, db)
+	t.Cleanup(func() { cleanupPO(t, db) })
+	created := seedListPOs(t, db, s)
+
+	// Descending order: PO-000006 (newest) first. Page 2 with size 2 = the
+	// third- and fourth-newest rows.
+	rows, total := listPOOK(t, s, ListFilter{Page: 2, PageSize: 2})
+	if total != 6 || len(rows) != 2 ||
+		rows[0].ID != created[3].ID || rows[1].ID != created[2].ID {
+		t.Fatalf("page 2 = %v (total %d)", rows, total)
+	}
+
+	// Page beyond the end: empty page, total still reported.
+	rows, total = listPOOK(t, s, ListFilter{Page: 5, PageSize: 2})
+	if total != 6 || len(rows) != 0 {
+		t.Fatalf("overflow page = %d rows (total %d)", len(rows), total)
+	}
+
+	// Defaults land on page 1 with page size 20 (the newest row first).
+	rows, _ = listPOOK(t, s, ListFilter{})
+	if len(rows) != 6 || rows[0].ID != created[5].ID {
+		t.Fatalf("defaults = %v", rows)
+	}
+}
+
+// AC (#38): Get returns the full aggregate with item ids; cross-tenant ids
+// are indistinguishable from missing (ErrNotFound, the RLS answer) and
+// non-UUID ids fail fast.
+func TestStoreGet(t *testing.T) {
+	db := openTestDB(t)
+	s := NewStore(db)
+	cleanupPO(t, db)
+	t.Cleanup(func() { cleanupPO(t, db) })
+	created := seedListPOs(t, db, s)
+
+	got, err := s.Get(context.Background(), poTenantA, created[1].ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.ID != created[1].ID || got.Status != StatusAcknowledged || got.Number != created[1].Number {
+		t.Fatalf("get = %+v", got)
+	}
+	// The detail read owns the bodies: items load with their ids (receipt
+	// lines reference po_item ids) and copied quantities.
+	if len(got.Items) != len(poBasket) {
+		t.Fatalf("items not loaded: %+v", got.Items)
+	}
+	qtyByDesc := map[string]Item{}
+	for _, it := range got.Items {
+		if it.ID == "" {
+			t.Fatalf("item id missing: %+v", it)
+		}
+		qtyByDesc[it.Description] = it
+	}
+	if qtyByDesc["Laptop"].Qty != 2 || qtyByDesc["Mouse"].Qty != 3 {
+		t.Fatalf("items not copied verbatim: %+v", got.Items)
+	}
+
+	// Cross-tenant read is indistinguishable from missing.
+	if _, err := s.Get(context.Background(), poTenantB, created[1].ID); !errors.Is(err, ErrNotFound) || err != ErrNotFound {
+		t.Fatalf("cross-tenant err = %v, want ErrNotFound", err)
+	}
+	// Non-UUID id fails fast.
+	if _, err := s.Get(context.Background(), poTenantA, "not-a-uuid"); !errors.Is(err, ErrIDInvalid) || err != ErrIDInvalid {
+		t.Fatalf("bad id err = %v, want ErrIDInvalid", err)
+	}
+}
+
+func mustValidatePO(t *testing.T, f ListFilter) ListFilter {
+	t.Helper()
+	filter, err := ValidateList(f)
+	if err != nil {
+		t.Fatalf("ValidateList: %v", err)
+	}
+	return filter
+}

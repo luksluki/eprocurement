@@ -33,9 +33,11 @@ const ServiceName = "procurement"
 // rules is admin-only (approval:configure has no non-admin role).
 // Converting a requisition to a PO and every PO lifecycle action
 // (issue/acknowledge/cancel/close) are buyer/admin; the source-status and
-// receipt guards are domain checks inside the transitions. Posting a goods
-// receipt is buyer/admin too (grn:post; docs/rbac.md) — the cumulative and
-// status guards are domain checks inside the posting transaction. Creating
+// receipt guards are domain checks inside the transitions. The PO read pair
+// (#38 list/detail) is the broad po:read — every role, tenant-wide. Posting
+// a goods receipt is buyer/admin too (grn:post; docs/rbac.md) — the
+// cumulative and status guards are domain checks inside the posting
+// transaction. Creating
 // an invoice is finance/admin (invoice:write — the money-records gate) and
 // the detail read is the broad invoice:read; the over-billing, duplicate,
 // and PO-status guards are domain checks inside the creation transaction.
@@ -59,6 +61,8 @@ var methodPermissions = rbac.MethodPermissions{
 	"/procurement.v1.Procurement/GetApprovalRules":         rbac.ApprovalConfigure,
 	"/procurement.v1.Procurement/ReplaceApprovalRules":     rbac.ApprovalConfigure,
 	"/procurement.v1.Procurement/CreatePurchaseOrder":      rbac.POWrite,
+	"/procurement.v1.Procurement/ListPurchaseOrders":       rbac.PORead,
+	"/procurement.v1.Procurement/GetPurchaseOrder":         rbac.PORead,
 	"/procurement.v1.Procurement/IssuePurchaseOrder":       rbac.POWrite,
 	"/procurement.v1.Procurement/AcknowledgePurchaseOrder": rbac.POWrite,
 	"/procurement.v1.Procurement/CancelPurchaseOrder":      rbac.POWrite,

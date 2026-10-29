@@ -2524,3 +2524,199 @@ func TestMapMatchError(t *testing.T) {
 		}
 	}
 }
+
+// The #38 read pair through the full gRPC wiring: the list serves
+// header-only rows newest-first with the filter contract (po:read — every
+// role; a requester may list where the writes are buyer-only), the detail
+// owns the item bodies with their ids, cross-tenant ids are
+// po_not_found/NotFound, bad filter values answer the po_status_invalid /
+// po_page_invalid machine codes, and metadata-less calls are rejected by the
+// interceptor's re-check (the methods must stay in methodPermissions).
+func TestPurchaseOrderGRPCListAndGet(t *testing.T) {
+	client, db, cleanup := startProcurement(t)
+	defer cleanup()
+	// The final wipe is a defer registered AFTER `defer cleanup()`, so LIFO
+	// runs it BEFORE the pool closes (the file's usual t.Cleanup wipes run
+	// after `cleanup()` has closed the pool and fail silently — the
+	// pre-existing leak pattern other tests absorb via their leading wipes;
+	// this test is the file's last, so nothing after it absorbs its residue).
+	defer func() {
+		grpcCleanupRequisition(t, db)
+		grpcCleanupPOVendor(t, db)
+	}()
+	grpcCleanupRequisition(t, db)
+	grpcCleanupPOVendor(t, db)
+
+	// Rules + a vendor, then three POs in tenant A (PO-000001..3); the oldest
+	// is issued so the status shape has a value.
+	if _, err := client.ReplaceApprovalRules(callerCtx(gTenantA, rbac.RoleAdmin),
+		&procurementv1.ReplaceApprovalRulesRequest{Rules: testRules()[:1]}); err != nil {
+		t.Fatalf("configure rules: %v", err)
+	}
+	vendorA, err := client.CreateVendor(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.CreateVendorRequest{Code: "G-PO35-38A", Name: "PT PO38"})
+	if err != nil {
+		t.Fatalf("create vendor: %v", err)
+	}
+	convert := func(t *testing.T, tenant string) *procurementv1.PurchaseOrder {
+		wrapped, err := client.CreatePurchaseOrder(callerCtx(tenant, rbac.RoleBuyer),
+			&procurementv1.CreatePurchaseOrderRequest{RequisitionId: newApprovedID(t, client), VendorId: vendorA.GetId()})
+		if err != nil {
+			t.Fatalf("convert %s: %v", tenant, err)
+		}
+		return wrapped.GetPurchaseOrder()
+	}
+	first := convert(t, gTenantA)
+	second := convert(t, gTenantA)
+	third := convert(t, gTenantA)
+	// Tenant B needs its own vendor (vendor FK) and rule set — the
+	// cross-tenant listing row.
+	if _, err := client.ReplaceApprovalRules(callerCtx(gTenantB, rbac.RoleAdmin),
+		&procurementv1.ReplaceApprovalRulesRequest{Rules: testRules()[:1]}); err != nil {
+		t.Fatalf("configure rules B: %v", err)
+	}
+	vendorB, err := client.CreateVendor(callerCtx(gTenantB, rbac.RoleBuyer),
+		&procurementv1.CreateVendorRequest{Code: "G-PO35-38B", Name: "PT PO38 B"})
+	if err != nil {
+		t.Fatalf("create vendor B: %v", err)
+	}
+	prB, err := client.CreateRequisition(callerCtx(gTenantB, rbac.RoleRequester),
+		&procurementv1.CreateRequisitionRequest{Currency: "IDR", Items: testItems()})
+	if err != nil {
+		t.Fatalf("create B: %v", err)
+	}
+	submittedB, err := client.SubmitRequisition(callerCtx(gTenantB, rbac.RoleRequester),
+		&procurementv1.SubmitRequisitionRequest{Id: prB.GetId()})
+	if err != nil {
+		t.Fatalf("submit B: %v", err)
+	}
+	if _, err := client.DecideApproval(callerCtxAs(gUserB, gTenantB, rbac.RoleApprover),
+		&procurementv1.DecideApprovalRequest{StepId: submittedB.GetApprovalSteps()[0].GetId(), Decision: "approve"}); err != nil {
+		t.Fatalf("decide B: %v", err)
+	}
+	wrappedB, err := client.CreatePurchaseOrder(callerCtx(gTenantB, rbac.RoleBuyer),
+		&procurementv1.CreatePurchaseOrderRequest{RequisitionId: prB.GetId(), VendorId: vendorB.GetId()})
+	if err != nil {
+		t.Fatalf("convert B: %v", err)
+	}
+	poB := wrappedB.GetPurchaseOrder()
+	if poB.GetTenantId() != gTenantB {
+		t.Fatalf("tenant B PO = %+v", poB)
+	}
+	if _, err := client.IssuePurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.IssuePurchaseOrderRequest{Id: first.GetId()}); err != nil {
+		t.Fatalf("issue first: %v", err)
+	}
+
+	// Defaults: page 1, page size 20, tenant A's three rows newest first —
+	// listed by a requester (po:read is broad; the writes are buyer-only).
+	resp, err := client.ListPurchaseOrders(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.ListPurchaseOrdersRequest{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if resp.GetPage() != 1 || resp.GetPageSize() != 20 || resp.GetTotal() != 3 || len(resp.GetPurchaseOrders()) != 3 {
+		t.Fatalf("defaults: page=%d size=%d total=%d rows=%d",
+			resp.GetPage(), resp.GetPageSize(), resp.GetTotal(), len(resp.GetPurchaseOrders()))
+	}
+	rows := resp.GetPurchaseOrders()
+	if rows[0].GetNumber() != third.GetNumber() || rows[2].GetNumber() != first.GetNumber() {
+		t.Fatalf("not newest-first: %s...%s", rows[0].GetNumber(), rows[2].GetNumber())
+	}
+	// Header-only: items are never populated on list rows; headers carry the
+	// linkage fields the UI needs.
+	for _, po := range rows {
+		if len(po.GetItems()) != 0 {
+			t.Fatalf("list row carries items: %+v", po)
+		}
+		if po.GetId() == "" || po.GetTenantId() != gTenantA || po.GetVendorId() == "" || po.GetRequisitionId() == "" {
+			t.Fatalf("header fields missing: %+v", po)
+		}
+	}
+
+	// Status filter: only the issued row (first).
+	resp, err = client.ListPurchaseOrders(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.ListPurchaseOrdersRequest{Status: "issued", PageSize: 10})
+	if err != nil || resp.GetTotal() != 1 || resp.GetPurchaseOrders()[0].GetId() != first.GetId() {
+		t.Fatalf("status filter = (%+v, %v)", resp, err)
+	}
+	// Number-prefix query, case-insensitive input: matches second only.
+	resp, err = client.ListPurchaseOrders(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.ListPurchaseOrdersRequest{Query: strings.ToLower(second.GetNumber())})
+	if err != nil || resp.GetTotal() != 1 || resp.GetPurchaseOrders()[0].GetId() != second.GetId() {
+		t.Fatalf("prefix query = (%+v, %v)", resp, err)
+	}
+	// Combined: the common prefix + draft → second and third, newest first.
+	resp, err = client.ListPurchaseOrders(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.ListPurchaseOrdersRequest{Query: "PO-", Status: "draft", Page: 1, PageSize: 1})
+	if err != nil || resp.GetTotal() != 2 || len(resp.GetPurchaseOrders()) != 1 ||
+		resp.GetPurchaseOrders()[0].GetId() != third.GetId() {
+		t.Fatalf("combined = (%+v, %v)", resp, err)
+	}
+	// Past-the-end page: empty rows, true total via the COUNT fallback.
+	resp, err = client.ListPurchaseOrders(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.ListPurchaseOrdersRequest{Page: 9, PageSize: 2})
+	if err != nil || len(resp.GetPurchaseOrders()) != 0 || resp.GetTotal() != 3 {
+		t.Fatalf("past-the-end = (%+v, %v)", resp, err)
+	}
+	// Cross-tenant listing: tenant B sees only its own row.
+	resp, err = client.ListPurchaseOrders(callerCtx(gTenantB, rbac.RoleRequester),
+		&procurementv1.ListPurchaseOrdersRequest{})
+	if err != nil || resp.GetTotal() != 1 || resp.GetPurchaseOrders()[0].GetTenantId() != gTenantB {
+		t.Fatalf("tenantB sees (%+v, %v)", resp, err)
+	}
+
+	// Validation: unknown status and absurd page answer the #38 machine
+	// codes as InvalidArgument.
+	_, err = client.ListPurchaseOrders(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.ListPurchaseOrdersRequest{Status: "paused"})
+	if status.Code(err) != codes.InvalidArgument || status.Convert(err).Message() != "po_status_invalid" {
+		t.Fatalf("bad status: got (%v, %q), want InvalidArgument po_status_invalid", status.Code(err), status.Convert(err).Message())
+	}
+	_, err = client.ListPurchaseOrders(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.ListPurchaseOrdersRequest{Page: 2000000})
+	if status.Code(err) != codes.InvalidArgument || status.Convert(err).Message() != "po_page_invalid" {
+		t.Fatalf("bad page: got (%v, %q), want InvalidArgument po_page_invalid", status.Code(err), status.Convert(err).Message())
+	}
+
+	// The detail read owns the bodies: items with their ids (#37 exposed
+	// them for receipt lines), read by another same-tenant role.
+	got, err := client.GetPurchaseOrder(callerCtx(gTenantA, rbac.RoleFinance),
+		&procurementv1.GetPurchaseOrderRequest{Id: second.GetId()})
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.GetId() != second.GetId() || got.GetStatus() != "draft" || got.GetTotalCents() != 15450000 {
+		t.Fatalf("detail = %+v", got)
+	}
+	if len(got.GetItems()) != 2 {
+		t.Fatalf("items not loaded: %+v", got.GetItems())
+	}
+	for _, it := range got.GetItems() {
+		if it.GetId() == "" {
+			t.Fatalf("item id missing: %+v", it)
+		}
+	}
+
+	// Cross-tenant read is indistinguishable from missing; non-UUID fails
+	// fast; metadata-less calls are rejected by the interceptor's re-check
+	// (the methods must stay in methodPermissions).
+	if _, err := client.GetPurchaseOrder(callerCtx(gTenantB, rbac.RoleRequester),
+		&procurementv1.GetPurchaseOrderRequest{Id: second.GetId()}); status.Code(err) != codes.NotFound ||
+		status.Convert(err).Message() != "po_not_found" {
+		t.Fatalf("cross-tenant get: (%v, %q), want NotFound po_not_found", status.Code(err), status.Convert(err).Message())
+	}
+	if _, err := client.GetPurchaseOrder(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.GetPurchaseOrderRequest{Id: "not-a-uuid"}); status.Code(err) != codes.InvalidArgument ||
+		status.Convert(err).Message() != "po_id_invalid" {
+		t.Fatalf("bad id: (%v, %q), want InvalidArgument po_id_invalid", status.Code(err), status.Convert(err).Message())
+	}
+	if _, err := client.GetPurchaseOrder(context.Background(),
+		&procurementv1.GetPurchaseOrderRequest{Id: second.GetId()}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("anonymous get: code = %v, want Unauthenticated", status.Code(err))
+	}
+	if _, err := client.ListPurchaseOrders(context.Background(),
+		&procurementv1.ListPurchaseOrdersRequest{}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("anonymous list: code = %v, want Unauthenticated", status.Code(err))
+	}
+}

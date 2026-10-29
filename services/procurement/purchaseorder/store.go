@@ -356,6 +356,118 @@ func LoadForUpdate(ctx context.Context, tx pgx.Tx, id string) (PurchaseOrder, er
 	return po, nil
 }
 
+// Get returns one PO of tenantID (header plus items) without locking — the
+// detail read behind #38's list/detail UI (the requisition Get precedent:
+// cross-tenant reads are indistinguishable from missing via RLS). Non-UUID
+// ids fail fast with ErrIDInvalid instead of a database cast error.
+func (s *Store) Get(ctx context.Context, tenantID, id string) (PurchaseOrder, error) {
+	if _, err := uuid.Parse(id); err != nil {
+		return PurchaseOrder{}, ErrIDInvalid
+	}
+	var out PurchaseOrder
+	err := tenant.WithTenant(ctx, s.db, tenantID, func(tx pgx.Tx) error {
+		if err := scanPO(tx.QueryRow(ctx, `
+			SELECT `+poColumns+` FROM procurement.purchase_orders
+			WHERE id = $1`, id), &out); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
+		}
+		items, err := loadItems(ctx, tx, out.ID)
+		if err != nil {
+			return err
+		}
+		out.Items = items
+		return nil
+	})
+	if err != nil {
+		return PurchaseOrder{}, wrap("get", err)
+	}
+	return out, nil
+}
+
+// listPredicates is the shared WHERE clause of the list's page subquery and
+// its count arm (#38, the #32 requisition-list contract).
+const listPredicates = `WHERE ($1::text = '' OR status = $1::text)
+			  AND ($2::text = '' OR number LIKE $2::text || '%')`
+
+// List returns one page of PO headers ordered by number descending (newest
+// first — numbers are sequential per tenant) plus the total number of
+// matching rows (across pages). Filters: status equality and a number-prefix
+// query — escaped so user input with % or _ is literal. The filter must come
+// from ValidateList. Rows are header-only: Items are not loaded (the detail
+// read owns them).
+//
+// The total rides the same single statement as the page: an exact COUNT as
+// an uncorrelated scalar subquery (an executor InitPlan — evaluated exactly
+// once), attached to the LIMIT/OFFSET page subquery. This is the #32 shape,
+// adopted on its measured evidence: the #27 `count(*) OVER()` window
+// tuplestore spilled to temp files at 100k rows under the default work_mem,
+// and a CROSS JOIN count arm was re-executed per page row by the planner —
+// the scalar subquery has neither problem. The page arm sorts with
+// `number COLLATE "C" DESC`: every storable PO number is canonical
+// server-generated ASCII (PO-%06d), so C ordering equals the default
+// collation for this data while comparisons stay memcmp-cheap. An empty page
+// (past the end) emits no rows, so an explicit COUNT fallback recovers the
+// true total — the same contract as the requisition list.
+func (s *Store) List(ctx context.Context, tenantID string, f ListFilter) ([]PurchaseOrder, int, error) {
+	var (
+		pos   []PurchaseOrder
+		total int
+	)
+	err := tenant.WithTenant(ctx, s.db, tenantID, func(tx pgx.Tx) error {
+		offset := (int(f.Page) - 1) * int(f.PageSize)
+		rows, err := tx.Query(ctx, `
+			SELECT c.id, c.tenant_id, c.number, c.requisition_id, c.vendor_id, c.status, c.currency,
+			       c.total_cents, c.issued_at, c.created_at, c.created_by, c.updated_at, c.updated_by,
+			       (SELECT count(*) FROM procurement.purchase_orders `+listPredicates+`) AS total_count
+			FROM (SELECT `+poColumns+`
+			      FROM procurement.purchase_orders
+			      `+listPredicates+`
+			      ORDER BY number COLLATE "C" DESC
+			      LIMIT $3 OFFSET $4) c
+			ORDER BY c.number DESC`,
+			f.Status, f.Query, f.PageSize, offset)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				po                   PurchaseOrder
+				createdBy, updatedBy *string
+			)
+			if err := rows.Scan(&po.ID, &po.TenantID, &po.Number, &po.RequisitionID,
+				&po.VendorID, &po.Status, &po.Currency, &po.TotalCents, &po.IssuedAt,
+				&po.CreatedAt, &createdBy, &po.UpdatedAt, &updatedBy, &total); err != nil {
+				return err
+			}
+			if createdBy != nil {
+				po.CreatedBy = *createdBy
+			}
+			if updatedBy != nil {
+				po.UpdatedBy = *updatedBy
+			}
+			pos = append(pos, po)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if len(pos) == 0 {
+			// Past-the-end page: the join's left side is empty; count matches
+			// explicitly so callers still see the real total.
+			return tx.QueryRow(ctx,
+				`SELECT count(*) FROM procurement.purchase_orders `+listPredicates, f.Status, f.Query).Scan(&total)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, 0, fmt.Errorf("purchaseorder: list: %w", err)
+	}
+	return pos, total, nil
+}
+
 // nextNumber allocates the next PO-%06d number for tenantID inside tx, the
 // same counter pattern as requisition numbers (0004): the row is initialized
 // lazily from the tenant's highest existing number (INSERT … ON CONFLICT DO

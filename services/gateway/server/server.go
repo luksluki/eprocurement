@@ -27,9 +27,9 @@ type Option func(*gatewayOptions)
 
 // ProcurementClient is the full procurement surface the gateway proxies: the
 // vendor API, the requisition create/edit/submit/read API, the approval
-// decide/rules API, the PO conversion API, the PO lifecycle actions, and the
-// goods-receipt posting API. The generated gRPC client satisfies it; tests
-// substitute a fake.
+// decide/rules API, the PO conversion API, the PO lifecycle actions, the
+// goods-receipt posting API, and the PO read pair (#38 list/detail). The
+// generated gRPC client satisfies it; tests substitute a fake.
 type ProcurementClient interface {
 	VendorClient
 	CreateRequisition(ctx context.Context, in *procurementv1.CreateRequisitionRequest, opts ...grpc.CallOption) (*procurementv1.Requisition, error)
@@ -41,6 +41,8 @@ type ProcurementClient interface {
 	GetApprovalRules(ctx context.Context, in *procurementv1.GetApprovalRulesRequest, opts ...grpc.CallOption) (*procurementv1.ApprovalRulesResponse, error)
 	ReplaceApprovalRules(ctx context.Context, in *procurementv1.ReplaceApprovalRulesRequest, opts ...grpc.CallOption) (*procurementv1.ApprovalRulesResponse, error)
 	CreatePurchaseOrder(ctx context.Context, in *procurementv1.CreatePurchaseOrderRequest, opts ...grpc.CallOption) (*procurementv1.CreatePurchaseOrderResponse, error)
+	ListPurchaseOrders(ctx context.Context, in *procurementv1.ListPurchaseOrdersRequest, opts ...grpc.CallOption) (*procurementv1.ListPurchaseOrdersResponse, error)
+	GetPurchaseOrder(ctx context.Context, in *procurementv1.GetPurchaseOrderRequest, opts ...grpc.CallOption) (*procurementv1.PurchaseOrder, error)
 	IssuePurchaseOrder(ctx context.Context, in *procurementv1.IssuePurchaseOrderRequest, opts ...grpc.CallOption) (*procurementv1.PurchaseOrder, error)
 	AcknowledgePurchaseOrder(ctx context.Context, in *procurementv1.AcknowledgePurchaseOrderRequest, opts ...grpc.CallOption) (*procurementv1.PurchaseOrder, error)
 	CancelPurchaseOrder(ctx context.Context, in *procurementv1.CancelPurchaseOrderRequest, opts ...grpc.CallOption) (*procurementv1.PurchaseOrder, error)

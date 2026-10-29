@@ -118,7 +118,73 @@ var (
 	// shape validation owns the pre-transaction twins).
 	ErrReceiptItemUnknown   = errors.New("grn_po_item_unknown")
 	ErrReceiptItemDuplicate = errors.New("grn_po_item_duplicate")
+	// ErrStatusInvalid / ErrPageInvalid are the list-filter sentinels (#38,
+	// the requisition ValidateList precedent requisition.go): an unknown
+	// status value or an absurd page number.
+	ErrStatusInvalid = errors.New("po_status_invalid")
+	ErrPageInvalid   = errors.New("po_page_invalid")
 )
+
+// ListStatuses is the status whitelist for the PO list filter: all seven
+// FR-06 lifecycle statuses (the empty filter means "all") — the same set the
+// 0007 CHECK enforces.
+var listStatuses = map[string]bool{
+	StatusDraft: true, StatusIssued: true, StatusAcknowledged: true,
+	StatusPartiallyReceived: true, StatusReceived: true,
+	StatusClosed: true, StatusCancelled: true,
+}
+
+// List bounds for pagination (same contract as the vendor/requisition lists,
+// #27/#32).
+const (
+	DefaultPageSize = 20
+	MaxPageSize     = 100
+	MaxPage         = 1000000
+)
+
+// ListFilter is the purchase-order-list query (#38): a free-text
+// number-prefix match, an optional status, and server-side pagination. Zero
+// values fall back to the defaults; ordering is fixed by number descending
+// (newest PO first — numbers are sequential per tenant, so number order is
+// creation order; the #32 requisition-list contract).
+type ListFilter struct {
+	Query    string
+	Status   string
+	Page     int32
+	PageSize int32
+}
+
+// ValidateList normalizes and validates the filter: status must be a known
+// lifecycle value (or empty), page/page_size are clamped into range, and the
+// query is trimmed and uppercased (numbers are stored uppercase) with LIKE
+// wildcards escaped so user input matches literally.
+func ValidateList(f ListFilter) (ListFilter, error) {
+	f.Status = strings.TrimSpace(f.Status)
+	if f.Status != "" && !listStatuses[f.Status] {
+		return f, ErrStatusInvalid
+	}
+	if f.Page < 1 {
+		f.Page = 1
+	}
+	if f.Page > MaxPage {
+		return f, ErrPageInvalid
+	}
+	if f.PageSize < 1 {
+		f.PageSize = DefaultPageSize
+	}
+	if f.PageSize > MaxPageSize {
+		f.PageSize = MaxPageSize
+	}
+	f.Query = escapeLike(strings.ToUpper(strings.TrimSpace(f.Query)))
+	return f, nil
+}
+
+// escapeLike neutralizes LIKE wildcards so a query containing %, _, or \
+// matches those literal characters (same helper contract as the lists).
+func escapeLike(s string) string {
+	r := strings.NewReplacer(`\`, `\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
+}
 
 // OverReceiptError names the first line whose cumulative received quantity
 // would exceed its ordered quantity. Error() is the wire format pinned in

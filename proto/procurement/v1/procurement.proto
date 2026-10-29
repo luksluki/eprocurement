@@ -108,6 +108,18 @@ service Procurement {
   // PO to closed. Any other source status is po_illegal_transition; exactly
   // one po.closed outbox event commits with the transition.
   rpc ClosePurchaseOrder(ClosePurchaseOrderRequest) returns (PurchaseOrder);
+  // ListPurchaseOrders returns one page of the caller tenant's purchase
+  // orders ordered by number descending (newest first). query matches a number
+  // prefix (case-insensitive); status is one of the seven lifecycle values or
+  // empty; the two combine. total is the number of matching rows across all
+  // pages. Rows are header-only: items are always empty here — the detail
+  // read owns them.
+  rpc ListPurchaseOrders(ListPurchaseOrdersRequest) returns (ListPurchaseOrdersResponse);
+  // GetPurchaseOrder returns one purchase order of the caller's tenant — the
+  // detail read that owns the lines the list rows never carry, with each
+  // line's id (receipt lines reference po_item ids since #37). Other tenants'
+  // purchase orders are indistinguishable from missing ones.
+  rpc GetPurchaseOrder(GetPurchaseOrderRequest) returns (PurchaseOrder);
   // PostGoodsReceipt records one goods receipt against an acknowledged or
   // partially_received PO (FR-07): each line advances the PO line's
   // cumulative qty_received, over-receipts are rejected with the
@@ -407,6 +419,33 @@ message CancelPurchaseOrderRequest {
 // ClosePurchaseOrderRequest names the PO to close (partially_received or
 // received).
 message ClosePurchaseOrderRequest {
+  string id = 1;
+}
+
+// ListPurchaseOrdersRequest is the list filter set (#38): a free-text number
+// prefix, an optional status, and server-side pagination.
+message ListPurchaseOrdersRequest {
+  // Free-text match: purchase order number prefix, case-insensitive. Empty
+  // means no text filter. LIKE wildcards in the input are literal.
+  string query = 1;
+  // draft | issued | acknowledged | partially_received | received | closed |
+  // cancelled | "" (all).
+  string status = 2;
+  int32 page = 3;      // 1-based; default 1
+  int32 page_size = 4; // default 20, max 100
+}
+
+// ListPurchaseOrdersResponse is the list envelope. Rows are header-only:
+// items are always empty (the detail read owns the bodies).
+message ListPurchaseOrdersResponse {
+  repeated PurchaseOrder purchase_orders = 1;
+  int32 total = 2;      // matching rows across all pages
+  int32 page = 3;       // normalized values actually applied
+  int32 page_size = 4;
+}
+
+// GetPurchaseOrderRequest names the purchase order to read.
+message GetPurchaseOrderRequest {
   string id = 1;
 }
 

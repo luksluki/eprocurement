@@ -194,6 +194,72 @@ export type Dictionary = {
       errorMessages: Record<string, string>;
     };
   };
+  purchaseOrders: {
+    title: string;
+    description: string;
+    caption: string;
+    unavailable: string;
+    empty: string;
+    emptyHint: string;
+    columns: { number: string; status: string; vendor: string; currency: string; total: string; issued: string; created: string };
+    filters: { numberLabel: string; numberPlaceholder: string; statusLabel: string; statusAll: string; pageSizeLabel: string; apply: string };
+    pagination: {
+      nav: string;
+      previous: string;
+      next: string;
+      summary: (range: { from: number; to: number; total: number; page: number; pageCount: number }) => string;
+    };
+  };
+  purchaseOrderDetail: {
+    backToList: string;
+    notFound: string;
+    loadFailed: string;
+    fields: {
+      vendor: string;
+      currency: string;
+      total: string;
+      issued: string;
+      created: string;
+      requisition: string;
+    };
+    items: {
+      heading: string;
+      description: string;
+      qtyOrdered: string;
+      qtyReceived: string;
+      remaining: string;
+      unitPrice: string;
+      lineTotal: string;
+    };
+    actions: {
+      issue: string;
+      acknowledge: string;
+      submitting: string;
+      genericError: string;
+      sessionExpired: string;
+      errorMessages: Record<string, string>;
+    };
+    receipt: {
+      heading: string;
+      hint: string;
+      qtyLabel: string;
+      notesLabel: string;
+      notesPlaceholder: string;
+      submit: string;
+      submitting: string;
+      qtyInvalid: string;
+      // Template strings with {placeholders} — the client component
+      // interpolates (functions cannot cross the server→client boundary).
+      qtyOver: string;
+      minOneLine: string;
+      notesTooLong: string;
+      successTitle: string;
+      sessionExpired: string;
+      genericError: string;
+      errorMessages: Record<string, string>;
+      overReceipt: string;
+    };
+  };
   pages: {
     requisitions: PageCopy;
     approvals: PageCopy;
@@ -412,6 +478,104 @@ const id: Dictionary = {
         approval_idempotency_key_conflict: "Kunci idempotensi sudah dipakai untuk langkah lain.",
         gateway_unavailable: "Gateway tidak terjangkau.",
       },
+    },
+  },
+  purchaseOrders: {
+    title: "Pesanan Pembelian",
+    description:
+      "Daftar PO tenant Anda, terbaru dulu. Filter dan paginasi hidup di URL dan disajikan satu halaman per permintaan.",
+    caption: "Satu halaman pesanan pembelian",
+    unavailable: "Daftar pesanan pembelian tidak tersedia saat ini.",
+    empty: "Belum ada pesanan pembelian.",
+    emptyHint:
+      "PO dibuat dari permintaan yang disetujui (POST /api/v1/purchase-orders/from-requisition/{id} sebagai buyer).",
+    columns: {
+      number: "Nomor",
+      status: "Status",
+      vendor: "Pemasok",
+      currency: "Mata uang",
+      total: "Total",
+      issued: "Diterbitkan",
+      created: "Dibuat",
+    },
+    filters: {
+      numberLabel: "Cari nomor",
+      numberPlaceholder: "PO-000123",
+      statusLabel: "Status",
+      statusAll: "Semua status",
+      pageSizeLabel: "Ukuran halaman",
+      apply: "Terapkan",
+    },
+    pagination: {
+      nav: "Navigasi halaman pesanan pembelian",
+      previous: "Sebelumnya",
+      next: "Berikutnya",
+      summary: ({ from, to, total }) => `Menampilkan ${from}–${to} dari ${total.toLocaleString("id-ID")} pesanan pembelian`,
+    },
+  },
+  purchaseOrderDetail: {
+    backToList: "Kembali ke daftar pesanan pembelian",
+    notFound: "Pesanan pembelian tidak ditemukan (atau milik tenant lain).",
+    loadFailed: "Gagal memuat pesanan pembelian.",
+    fields: {
+      vendor: "Pemasok",
+      currency: "Mata uang",
+      total: "Total",
+      issued: "Diterbitkan",
+      created: "Dibuat",
+      requisition: "Permintaan asal",
+    },
+    items: {
+      heading: "Item",
+      description: "Deskripsi",
+      qtyOrdered: "Dipesan",
+      qtyReceived: "Diterima",
+      remaining: "Sisa",
+      unitPrice: "Harga satuan",
+      lineTotal: "Total baris",
+    },
+    actions: {
+      issue: "Terbitkan",
+      acknowledge: "Konfirmasi pemasok",
+      submitting: "Memproses…",
+      genericError: "Gagal memproses — coba lagi.",
+      sessionExpired: "Sesi berakhir — mengalihkan ke halaman masuk…",
+      errorMessages: {
+        po_illegal_transition: "PO tidak bisa berpindah ke status itu dari status sekarang.",
+        po_has_receipts: "Barang sudah diterima; tutup PO alih-alih membatalkannya.",
+        po_not_found: "Pesanan pembelian tidak ditemukan.",
+        po_id_invalid: "Id pesanan pembelian harus UUID.",
+        gateway_unavailable: "Gateway tidak terjangkau.",
+      },
+    },
+    receipt: {
+      heading: "Catat penerimaan barang (GRN)",
+      hint: "Isi jumlah yang diterima per baris — lebih dari 0 dan tidak melebihi sisa. Penerimaan parsial diperbolehkan.",
+      qtyLabel: "Diterima sekarang",
+      notesLabel: "Catatan (opsional, maks 1000 karakter)",
+      notesPlaceholder: "Catatan penerimaan…",
+      submit: "Catat penerimaan",
+      submitting: "Mencatat…",
+      qtyInvalid: "Jumlah harus bilangan bulat lebih dari 0.",
+      qtyOver: "Jumlah melebihi sisa baris ini (sisa {remaining}).",
+      minOneLine: "Isi minimal satu baris dengan jumlah lebih dari 0.",
+      notesTooLong: "Catatan maksimal 1000 karakter.",
+      successTitle: "Penerimaan tercatat",
+      sessionExpired: "Sesi berakhir — mengalihkan ke halaman masuk…",
+      genericError: "Gagal mencatat penerimaan — coba lagi.",
+      errorMessages: {
+        grn_items_empty: "Penerimaan barang memerlukan minimal satu baris item.",
+        grn_qty_invalid: "Setiap jumlah diterima harus lebih dari 0.",
+        grn_po_item_duplicate: "Satu baris PO hanya boleh muncul sekali per penerimaan.",
+        grn_notes_invalid: "Catatan maksimal 1000 karakter.",
+        grn_po_item_unknown: "po_item_id bukan baris dari PO ini.",
+        po_id_invalid: "Id pesanan pembelian harus UUID.",
+        po_not_found: "Pesanan pembelian tidak ditemukan.",
+        po_illegal_transition: "Barang hanya bisa diterima pada PO berstatus acknowledged atau partially_received.",
+        gateway_unavailable: "Gateway tidak terjangkau.",
+      },
+      overReceipt:
+        "Kelebihan penerimaan: baris ini sudah diterima {received} dan diminta {requested} lagi, padahal dipesan {ordered}.",
     },
   },
   pages: {
@@ -660,6 +824,104 @@ const en: Dictionary = {
         approval_idempotency_key_conflict: "The idempotency key was already used for another step.",
         gateway_unavailable: "The gateway is unreachable.",
       },
+    },
+  },
+  purchaseOrders: {
+    title: "Purchase Orders",
+    description:
+      "Your tenant's purchase orders, newest first. Filters and pagination live in the URL and are served one page at a time.",
+    caption: "One page of purchase orders",
+    unavailable: "The purchase order list is unavailable right now.",
+    empty: "No purchase orders yet.",
+    emptyHint:
+      "POs are created from approved requisitions (POST /api/v1/purchase-orders/from-requisition/{id} as a buyer).",
+    columns: {
+      number: "Number",
+      status: "Status",
+      vendor: "Vendor",
+      currency: "Currency",
+      total: "Total",
+      issued: "Issued",
+      created: "Created",
+    },
+    filters: {
+      numberLabel: "Search number",
+      numberPlaceholder: "PO-000123",
+      statusLabel: "Status",
+      statusAll: "All statuses",
+      pageSizeLabel: "Page size",
+      apply: "Apply",
+    },
+    pagination: {
+      nav: "Purchase order page navigation",
+      previous: "Previous",
+      next: "Next",
+      summary: ({ from, to, total }) => `Showing ${from}–${to} of ${total.toLocaleString("en-US")} purchase orders`,
+    },
+  },
+  purchaseOrderDetail: {
+    backToList: "Back to the purchase order list",
+    notFound: "Purchase order not found (or it belongs to another tenant).",
+    loadFailed: "Failed to load the purchase order.",
+    fields: {
+      vendor: "Vendor",
+      currency: "Currency",
+      total: "Total",
+      issued: "Issued",
+      created: "Created",
+      requisition: "Source requisition",
+    },
+    items: {
+      heading: "Items",
+      description: "Description",
+      qtyOrdered: "Ordered",
+      qtyReceived: "Received",
+      remaining: "Remaining",
+      unitPrice: "Unit price",
+      lineTotal: "Line total",
+    },
+    actions: {
+      issue: "Issue",
+      acknowledge: "Acknowledge vendor",
+      submitting: "Working…",
+      genericError: "Failed — try again.",
+      sessionExpired: "Session expired — redirecting to sign-in…",
+      errorMessages: {
+        po_illegal_transition: "The purchase order cannot move that way from its current status.",
+        po_has_receipts: "Goods were already received; close the purchase order instead of cancelling it.",
+        po_not_found: "Purchase order not found.",
+        po_id_invalid: "Purchase order id must be a UUID.",
+        gateway_unavailable: "The gateway is unreachable.",
+      },
+    },
+    receipt: {
+      heading: "Record a goods receipt (GRN)",
+      hint: "Enter what actually arrived per line — more than 0 and never above the remaining quantity. Partial receipts are allowed.",
+      qtyLabel: "Received now",
+      notesLabel: "Notes (optional, max 1000 characters)",
+      notesPlaceholder: "Receiving notes…",
+      submit: "Record receipt",
+      submitting: "Recording…",
+      qtyInvalid: "Quantity must be a whole number greater than 0.",
+      qtyOver: "Quantity exceeds this line's remaining {remaining}.",
+      minOneLine: "Fill at least one line with a quantity greater than 0.",
+      notesTooLong: "Notes are limited to 1000 characters.",
+      successTitle: "Receipt recorded",
+      sessionExpired: "Session expired — redirecting to sign-in…",
+      genericError: "Failed to record the receipt — try again.",
+      errorMessages: {
+        grn_items_empty: "A goods receipt needs at least one item line.",
+        grn_qty_invalid: "Each received quantity must be greater than zero.",
+        grn_po_item_duplicate: "Each purchase order line may appear once per goods receipt.",
+        grn_notes_invalid: "Notes are limited to 1000 characters.",
+        grn_po_item_unknown: "po_item_id does not name a line of this purchase order.",
+        po_id_invalid: "Purchase order id must be a UUID.",
+        po_not_found: "Purchase order not found.",
+        po_illegal_transition: "Goods can only be received on an acknowledged or partially received purchase order.",
+        gateway_unavailable: "The gateway is unreachable.",
+      },
+      overReceipt:
+        "Over-receipt: this line has already received {received} and requests {requested} more, but only {ordered} were ordered.",
     },
   },
   pages: {

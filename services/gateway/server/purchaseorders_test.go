@@ -36,6 +36,16 @@ type fakePOClient struct {
 	grnRes *procurementv1.PostGoodsReceiptResponse
 	grnErr error
 	grnCtx context.Context
+
+	listReq *procurementv1.ListPurchaseOrdersRequest
+	listRes *procurementv1.ListPurchaseOrdersResponse
+	listErr error
+	listCtx context.Context
+
+	getReq *procurementv1.GetPurchaseOrderRequest
+	getRes *procurementv1.PurchaseOrder
+	getErr error
+	getCtx context.Context
 }
 
 func (f *fakePOClient) CreatePurchaseOrder(ctx context.Context, in *procurementv1.CreatePurchaseOrderRequest, opts ...grpc.CallOption) (*procurementv1.CreatePurchaseOrderResponse, error) {
@@ -490,5 +500,158 @@ func TestGoodsReceiptRouteErrors(t *testing.T) {
 	}
 	if fake.grnReq != nil {
 		t.Fatalf("procurement called on a malformed body")
+	}
+}
+
+// The #38 read methods on the PO fake: recording like the conversion/lifecycle
+// arms above.
+func (f *fakePOClient) ListPurchaseOrders(ctx context.Context, in *procurementv1.ListPurchaseOrdersRequest, opts ...grpc.CallOption) (*procurementv1.ListPurchaseOrdersResponse, error) {
+	f.listCtx, f.listReq = ctx, in
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.listRes, nil
+}
+
+func (f *fakePOClient) GetPurchaseOrder(ctx context.Context, in *procurementv1.GetPurchaseOrderRequest, opts ...grpc.CallOption) (*procurementv1.PurchaseOrder, error) {
+	f.getCtx, f.getReq = ctx, in
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	return f.getRes, nil
+}
+
+// AC (#38): the read routes are wired through server.New with
+// WithProcurement behind RequirePermission(rbac.PORead) — the broad read
+// permission a viewer holds. The list forwards the query params and renders
+// the {purchase_orders, total, page, page_size} envelope with header-only
+// rows; the detail returns the aggregate with item ids; the claims ride
+// along as gRPC metadata.
+func TestPurchaseOrderReadRoutesThroughServerNew(t *testing.T) {
+	fake := &fakePOClient{
+		fakeRequisitionClient: &fakeRequisitionClient{fakeVendorClient: &fakeVendorClient{}},
+		listRes: &procurementv1.ListPurchaseOrdersResponse{
+			PurchaseOrders: []*procurementv1.PurchaseOrder{
+				{Id: "po-2", TenantId: "tenant-29", Number: "PO-000002", Status: "issued", Currency: "IDR", TotalCents: 1000},
+				{Id: "po-1", TenantId: "tenant-29", Number: "PO-000001", Status: "draft", Currency: "IDR"},
+			},
+			Total: 42, Page: 2, PageSize: 2,
+		},
+	}
+	_, verifier, priv, kid := newTestApp(t)
+	app := New(slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil)), verifier, WithProcurement(fake))
+	t.Cleanup(func() { _ = app.Shutdown() })
+	token := reqTokenFor(t, priv, kid, rbac.RoleViewer) // viewer holds po:read
+
+	resp, body := reqDo(t, app, "GET", "/api/v1/purchase-orders?q=po-0001&status=draft&page=2&page_size=2", token, "", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list status = %d, body = %v", resp.StatusCode, body)
+	}
+	if body["total"] != float64(42) || body["page"] != float64(2) || body["page_size"] != float64(2) {
+		t.Fatalf("envelope = %v", body)
+	}
+	rows, _ := body["purchase_orders"].([]any)
+	if len(rows) != 2 {
+		t.Fatalf("purchase_orders = %v", body["purchase_orders"])
+	}
+	first, _ := rows[0].(map[string]any)
+	if first["number"] != "PO-000002" || first["status"] != "issued" {
+		t.Fatalf("row JSON = %v", first)
+	}
+	if items, _ := first["items"].([]any); len(items) != 0 {
+		t.Fatalf("list row carries items: %v", first["items"])
+	}
+	// Query params forwarded; claims rode along as metadata.
+	if fake.listReq.GetQuery() != "po-0001" || fake.listReq.GetStatus() != "draft" ||
+		fake.listReq.GetPage() != 2 || fake.listReq.GetPageSize() != 2 {
+		t.Fatalf("forwarded list = %+v", fake.listReq)
+	}
+	md := metadataOf(t, fake.listCtx)
+	if md["x-tenant-id"] != "tenant-29" || md["x-user-id"] != "user-29" {
+		t.Fatalf("propagated metadata = %v", md)
+	}
+
+	// Detail: the aggregate with item ids (receipt lines reference them).
+	detail := samplePO()
+	detail.Items[0].Id = "po-item-1"
+	fake.getRes = detail
+	resp, body = reqDo(t, app, "GET", "/api/v1/purchase-orders/po-1", token, "", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("detail status = %d, body = %v", resp.StatusCode, body)
+	}
+	if body["number"] != "PO-000001" || body["status"] != "draft" || body["requisition_id"] != "pr-1" {
+		t.Fatalf("detail body = %v", body)
+	}
+	items, _ := body["items"].([]any)
+	item0, _ := items[0].(map[string]any)
+	if item0["id"] != "po-item-1" || item0["qty_ordered"] != float64(2) {
+		t.Fatalf("detail items = %v", items)
+	}
+	if fake.getReq.GetId() != "po-1" {
+		t.Fatalf("forwarded get = %+v", fake.getReq)
+	}
+	md = metadataOf(t, fake.getCtx)
+	if md["x-tenant-id"] != "tenant-29" || md["x-user-id"] != "user-29" {
+		t.Fatalf("get metadata = %v", md)
+	}
+}
+
+// Anonymous access: both read routes answer 401 before any procurement call
+// (the bearerAuth middleware runs before the permission gate).
+func TestPurchaseOrderReadRoutesRequireBearer(t *testing.T) {
+	fake := &fakePOClient{fakeRequisitionClient: &fakeRequisitionClient{fakeVendorClient: &fakeVendorClient{}}}
+	app, verifier, _, _ := newTestApp(t)
+	registerPurchaseOrderRoutes(app, verifier, fake)
+
+	for _, path := range []string{"/api/v1/purchase-orders", "/api/v1/purchase-orders/po-1"} {
+		resp, body := reqDo(t, app, "GET", path, "", "", nil)
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("%s anonymous: status = %d, body = %v, want 401", path, resp.StatusCode, body)
+		}
+	}
+	if fake.listReq != nil || fake.getReq != nil {
+		t.Fatal("procurement was called without a bearer token")
+	}
+}
+
+// The read routes' error slice of the shared mapping: the #38 filter codes
+// answer 400 with machine code + human sentence, missing/cross-tenant
+// answers 404 po_not_found.
+func TestPurchaseOrderReadRouteErrors(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err  error
+		want int
+	}{
+		"bad status":   {status.Error(codes.InvalidArgument, "po_status_invalid"), http.StatusBadRequest},
+		"bad page":     {status.Error(codes.InvalidArgument, "po_page_invalid"), http.StatusBadRequest},
+		"po not found": {status.Error(codes.NotFound, "po_not_found"), http.StatusNotFound},
+	} {
+		fake := &fakePOClient{
+			fakeRequisitionClient: &fakeRequisitionClient{fakeVendorClient: &fakeVendorClient{}},
+			listErr:               tc.err,
+			getErr:                tc.err,
+		}
+		app, verifier, priv, kid := newTestApp(t)
+		registerPurchaseOrderRoutes(app, verifier, fake)
+		token := reqTokenFor(t, priv, kid, rbac.RoleViewer)
+
+		resp, body := reqDo(t, app, "GET", "/api/v1/purchase-orders?status=paused", token, "", nil)
+		if resp.StatusCode != tc.want {
+			t.Fatalf("%s: list status = %d, want %d", name, resp.StatusCode, tc.want)
+		}
+		if body["code"] != status.Convert(tc.err).Message() {
+			t.Fatalf("%s: list body %v lost the machine code", name, body)
+		}
+		if human, ok := body["error"].(string); !ok || strings.TrimSpace(human) == "" {
+			t.Fatalf("%s: list body %v lost the human sentence", name, body)
+		}
+
+		resp, body = reqDo(t, app, "GET", "/api/v1/purchase-orders/po-9", token, "", nil)
+		if resp.StatusCode != tc.want {
+			t.Fatalf("%s: detail status = %d, want %d", name, resp.StatusCode, tc.want)
+		}
+		if body["code"] != status.Convert(tc.err).Message() {
+			t.Fatalf("%s: detail body %v lost the machine code", name, body)
+		}
 	}
 }
