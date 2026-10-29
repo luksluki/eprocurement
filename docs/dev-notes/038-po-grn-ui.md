@@ -282,21 +282,30 @@ DB-gated runs):
   requester/approver pair, PR-000019 (approved), PO-000001 (received,
   GRN-000001/000002) — useful for the invoice issues; wipe with a reset if
   unwanted.
-- **CI round 1 (run 40797112295) failed in the Go job — root cause fixed
-  before the retry:** the *vendor* package's pre-existing
-  `TestStoreListScale100k` (#27) measured p95 322 ms (median 209 ms vs ~73
-  ms solo) and bust its 300 ms budget, because `go test ./...` runs the
-  three 100k budget fixtures (vendor #27, requisition #32, and this issue's)
-  **concurrently** against one database and their bulk-load/IO spikes landed
-  inside vendor's first timed shape (this PR added the third fixture — the
-  pre-existing pair fit). Fix: the three scale tests now coordinate through
-  a shared PostgreSQL advisory lock taken **per heavy unit** — every seed
-  batch (seeds now commit one transaction per batch), the ANALYZE/VACUUM/
-  CHECKPOINT hygiene, and each measurement shape — so at most one such unit
-  runs at a time without serializing whole tests (a whole-test lock would
-  exceed the 10 m go-test budget: the solo fixtures run 150–450 s). Verified
-  with the CI topology — the three packages run concurrently: vendor
-  459.7 s, requisition 464.9 s, purchaseorder 246.7 s, all green.
+- **CI failures on the scale fixtures — two rounds, root cause fixed:**
+  `go test ./...` runs the three 100k budget fixtures (vendor #27,
+  requisition #32, and #38's) **concurrently** against one CI database, and
+  the combined bulk-load/IO spikes landed inside timed loops.
+  - *Round 1 (run 40797112295):* the vendor package's pre-existing
+    `TestStoreListScale100k` measured p95 322 ms (median 209 ms vs ~73 ms
+    solo) and bust its 300 ms budget during its first shape, while all
+    three fixtures bulk-loaded at once (this PR added the third fixture —
+    the pre-existing pair fit; vendor's other four shapes passed seconds
+    later, so the interference was a transient).
+  - *Round 2 (run 40802115456):* a first fix serialized the fixtures'
+    heavy units through a shared advisory lock — green locally (vendor
+    459.7 s, requisition 464.9 s, purchaseorder 246.7 s, concurrently) but
+    on CI the lock waits pushed vendor's `TestStoreListScale100k` into the
+    **10 m go-test timeout** (requisition finished at 596 s, 4 s spare):
+    the three fixtures' total heavy work (~15 m on CI) cannot fit inside
+    any single package's 10 m budget when it must wait for the others.
+  - *Final fix:* no cross-package coupling — each budget shape that busts
+    its p95 retries after a 5 s cooldown (≤ 3 attempts, only the final
+    attempt decisive), matching the budget's steady-state semantics; the
+    seeds keep their per-batch commits (one transaction per 500-row batch,
+    spreading IO instead of one giant commit). Verified with the CI
+    topology (three packages concurrently + the full `go vet/build/test
+    ./...` sweep): all green.
 - The gRPC list test's vendor fixture rides the shared `G-PO35-*` code
   family so `grpcCleanupPOVendor` covers it (a first draft used `G-PO38-*`
   and a repeat run hit `vendor_duplicate_code`). Its final wipe is a defer
