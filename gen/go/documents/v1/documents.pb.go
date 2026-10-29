@@ -796,6 +796,309 @@ func (x *ListEventsResponse) GetNextCursor() string {
 	return ""
 }
 
+// ExportRun is one nightly-export run record as stored in MongoDB
+// export_runs (#49, FR-10). object_key stays internal — clients download
+// through the presigned URL, never the raw key (the attachment convention).
+type ExportRun struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	RunId          string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	TenantId       string                 `protobuf:"bytes,2,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
+	ScheduledFor   string                 `protobuf:"bytes,3,opt,name=scheduled_for,json=scheduledFor,proto3" json:"scheduled_for,omitempty"`        // RFC 3339 — the slot this run belongs to
+	Status         string                 `protobuf:"bytes,4,opt,name=status,proto3" json:"status,omitempty"`                                        // "success" | "failed"
+	RowCount       int32                  `protobuf:"varint,5,opt,name=row_count,json=rowCount,proto3" json:"row_count,omitempty"`                   // PO rows written to the CSV
+	MissedPrevious bool                   `protobuf:"varint,6,opt,name=missed_previous,json=missedPrevious,proto3" json:"missed_previous,omitempty"` // detection found no successful run in the previous slot
+	ErrorMessage   string                 `protobuf:"bytes,7,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`        // failure detail; empty on success
+	StartedAt      string                 `protobuf:"bytes,8,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`                 // RFC 3339
+	FinishedAt     string                 `protobuf:"bytes,9,opt,name=finished_at,json=finishedAt,proto3" json:"finished_at,omitempty"`              // RFC 3339
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *ExportRun) Reset() {
+	*x = ExportRun{}
+	mi := &file_documents_v1_documents_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExportRun) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExportRun) ProtoMessage() {}
+
+func (x *ExportRun) ProtoReflect() protoreflect.Message {
+	mi := &file_documents_v1_documents_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExportRun.ProtoReflect.Descriptor instead.
+func (*ExportRun) Descriptor() ([]byte, []int) {
+	return file_documents_v1_documents_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *ExportRun) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *ExportRun) GetTenantId() string {
+	if x != nil {
+		return x.TenantId
+	}
+	return ""
+}
+
+func (x *ExportRun) GetScheduledFor() string {
+	if x != nil {
+		return x.ScheduledFor
+	}
+	return ""
+}
+
+func (x *ExportRun) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *ExportRun) GetRowCount() int32 {
+	if x != nil {
+		return x.RowCount
+	}
+	return 0
+}
+
+func (x *ExportRun) GetMissedPrevious() bool {
+	if x != nil {
+		return x.MissedPrevious
+	}
+	return false
+}
+
+func (x *ExportRun) GetErrorMessage() string {
+	if x != nil {
+		return x.ErrorMessage
+	}
+	return ""
+}
+
+func (x *ExportRun) GetStartedAt() string {
+	if x != nil {
+		return x.StartedAt
+	}
+	return ""
+}
+
+func (x *ExportRun) GetFinishedAt() string {
+	if x != nil {
+		return x.FinishedAt
+	}
+	return ""
+}
+
+type ListExportRunsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Limit         int32                  `protobuf:"varint,1,opt,name=limit,proto3" json:"limit,omitempty"` // default 20, max 100 (clamped)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListExportRunsRequest) Reset() {
+	*x = ListExportRunsRequest{}
+	mi := &file_documents_v1_documents_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListExportRunsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListExportRunsRequest) ProtoMessage() {}
+
+func (x *ListExportRunsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_documents_v1_documents_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListExportRunsRequest.ProtoReflect.Descriptor instead.
+func (*ListExportRunsRequest) Descriptor() ([]byte, []int) {
+	return file_documents_v1_documents_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *ListExportRunsRequest) GetLimit() int32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+type ListExportRunsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Runs          []*ExportRun           `protobuf:"bytes,1,rep,name=runs,proto3" json:"runs,omitempty"` // newest first
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListExportRunsResponse) Reset() {
+	*x = ListExportRunsResponse{}
+	mi := &file_documents_v1_documents_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListExportRunsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListExportRunsResponse) ProtoMessage() {}
+
+func (x *ListExportRunsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_documents_v1_documents_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListExportRunsResponse.ProtoReflect.Descriptor instead.
+func (*ListExportRunsResponse) Descriptor() ([]byte, []int) {
+	return file_documents_v1_documents_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *ListExportRunsResponse) GetRuns() []*ExportRun {
+	if x != nil {
+		return x.Runs
+	}
+	return nil
+}
+
+type GetExportDownloadUrlRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RunId         string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetExportDownloadUrlRequest) Reset() {
+	*x = GetExportDownloadUrlRequest{}
+	mi := &file_documents_v1_documents_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetExportDownloadUrlRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetExportDownloadUrlRequest) ProtoMessage() {}
+
+func (x *GetExportDownloadUrlRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_documents_v1_documents_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetExportDownloadUrlRequest.ProtoReflect.Descriptor instead.
+func (*GetExportDownloadUrlRequest) Descriptor() ([]byte, []int) {
+	return file_documents_v1_documents_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *GetExportDownloadUrlRequest) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+type GetExportDownloadUrlResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Run           *ExportRun             `protobuf:"bytes,1,opt,name=run,proto3" json:"run,omitempty"`
+	DownloadUrl   string                 `protobuf:"bytes,2,opt,name=download_url,json=downloadUrl,proto3" json:"download_url,omitempty"` // presigned GET target on MinIO
+	ExpiresAt     string                 `protobuf:"bytes,3,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`       // RFC 3339
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetExportDownloadUrlResponse) Reset() {
+	*x = GetExportDownloadUrlResponse{}
+	mi := &file_documents_v1_documents_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetExportDownloadUrlResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetExportDownloadUrlResponse) ProtoMessage() {}
+
+func (x *GetExportDownloadUrlResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_documents_v1_documents_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetExportDownloadUrlResponse.ProtoReflect.Descriptor instead.
+func (*GetExportDownloadUrlResponse) Descriptor() ([]byte, []int) {
+	return file_documents_v1_documents_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *GetExportDownloadUrlResponse) GetRun() *ExportRun {
+	if x != nil {
+		return x.Run
+	}
+	return nil
+}
+
+func (x *GetExportDownloadUrlResponse) GetDownloadUrl() string {
+	if x != nil {
+		return x.DownloadUrl
+	}
+	return ""
+}
+
+func (x *GetExportDownloadUrlResponse) GetExpiresAt() string {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return ""
+}
+
 var File_documents_v1_documents_proto protoreflect.FileDescriptor
 
 const file_documents_v1_documents_proto_rawDesc = "" +
@@ -882,14 +1185,39 @@ const file_documents_v1_documents_proto_rawDesc = "" +
 	"\x12ListEventsResponse\x12+\n" +
 	"\x06events\x18\x01 \x03(\v2\x13.documents.v1.EventR\x06events\x12\x1f\n" +
 	"\vnext_cursor\x18\x02 \x01(\tR\n" +
-	"nextCursor2\xc1\x03\n" +
+	"nextCursor\"\xa7\x02\n" +
+	"\tExportRun\x12\x15\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
+	"\ttenant_id\x18\x02 \x01(\tR\btenantId\x12#\n" +
+	"\rscheduled_for\x18\x03 \x01(\tR\fscheduledFor\x12\x16\n" +
+	"\x06status\x18\x04 \x01(\tR\x06status\x12\x1b\n" +
+	"\trow_count\x18\x05 \x01(\x05R\browCount\x12'\n" +
+	"\x0fmissed_previous\x18\x06 \x01(\bR\x0emissedPrevious\x12#\n" +
+	"\rerror_message\x18\a \x01(\tR\ferrorMessage\x12\x1d\n" +
+	"\n" +
+	"started_at\x18\b \x01(\tR\tstartedAt\x12\x1f\n" +
+	"\vfinished_at\x18\t \x01(\tR\n" +
+	"finishedAt\"-\n" +
+	"\x15ListExportRunsRequest\x12\x14\n" +
+	"\x05limit\x18\x01 \x01(\x05R\x05limit\"E\n" +
+	"\x16ListExportRunsResponse\x12+\n" +
+	"\x04runs\x18\x01 \x03(\v2\x17.documents.v1.ExportRunR\x04runs\"4\n" +
+	"\x1bGetExportDownloadUrlRequest\x12\x15\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\"\x8b\x01\n" +
+	"\x1cGetExportDownloadUrlResponse\x12)\n" +
+	"\x03run\x18\x01 \x01(\v2\x17.documents.v1.ExportRunR\x03run\x12!\n" +
+	"\fdownload_url\x18\x02 \x01(\tR\vdownloadUrl\x12\x1d\n" +
+	"\n" +
+	"expires_at\x18\x03 \x01(\tR\texpiresAt2\x8d\x05\n" +
 	"\tDocuments\x12U\n" +
 	"\fCreateUpload\x12!.documents.v1.CreateUploadRequest\x1a\".documents.v1.CreateUploadResponse\x12O\n" +
 	"\x0eCompleteUpload\x12#.documents.v1.CompleteUploadRequest\x1a\x18.documents.v1.Attachment\x12^\n" +
 	"\x0fListAttachments\x12$.documents.v1.ListAttachmentsRequest\x1a%.documents.v1.ListAttachmentsResponse\x12[\n" +
 	"\x0eGetDownloadUrl\x12#.documents.v1.GetDownloadUrlRequest\x1a$.documents.v1.GetDownloadUrlResponse\x12O\n" +
 	"\n" +
-	"ListEvents\x12\x1f.documents.v1.ListEventsRequest\x1a .documents.v1.ListEventsResponseBBZ@github.com/luksluki/eprocurement/gen/go/documents/v1;documentsv1b\x06proto3"
+	"ListEvents\x12\x1f.documents.v1.ListEventsRequest\x1a .documents.v1.ListEventsResponse\x12[\n" +
+	"\x0eListExportRuns\x12#.documents.v1.ListExportRunsRequest\x1a$.documents.v1.ListExportRunsResponse\x12m\n" +
+	"\x14GetExportDownloadUrl\x12).documents.v1.GetExportDownloadUrlRequest\x1a*.documents.v1.GetExportDownloadUrlResponseBBZ@github.com/luksluki/eprocurement/gen/go/documents/v1;documentsv1b\x06proto3"
 
 var (
 	file_documents_v1_documents_proto_rawDescOnce sync.Once
@@ -903,40 +1231,51 @@ func file_documents_v1_documents_proto_rawDescGZIP() []byte {
 	return file_documents_v1_documents_proto_rawDescData
 }
 
-var file_documents_v1_documents_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_documents_v1_documents_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_documents_v1_documents_proto_goTypes = []any{
-	(*Attachment)(nil),              // 0: documents.v1.Attachment
-	(*CreateUploadRequest)(nil),     // 1: documents.v1.CreateUploadRequest
-	(*CreateUploadResponse)(nil),    // 2: documents.v1.CreateUploadResponse
-	(*CompleteUploadRequest)(nil),   // 3: documents.v1.CompleteUploadRequest
-	(*ListAttachmentsRequest)(nil),  // 4: documents.v1.ListAttachmentsRequest
-	(*ListAttachmentsResponse)(nil), // 5: documents.v1.ListAttachmentsResponse
-	(*GetDownloadUrlRequest)(nil),   // 6: documents.v1.GetDownloadUrlRequest
-	(*GetDownloadUrlResponse)(nil),  // 7: documents.v1.GetDownloadUrlResponse
-	(*Event)(nil),                   // 8: documents.v1.Event
-	(*ListEventsRequest)(nil),       // 9: documents.v1.ListEventsRequest
-	(*ListEventsResponse)(nil),      // 10: documents.v1.ListEventsResponse
+	(*Attachment)(nil),                   // 0: documents.v1.Attachment
+	(*CreateUploadRequest)(nil),          // 1: documents.v1.CreateUploadRequest
+	(*CreateUploadResponse)(nil),         // 2: documents.v1.CreateUploadResponse
+	(*CompleteUploadRequest)(nil),        // 3: documents.v1.CompleteUploadRequest
+	(*ListAttachmentsRequest)(nil),       // 4: documents.v1.ListAttachmentsRequest
+	(*ListAttachmentsResponse)(nil),      // 5: documents.v1.ListAttachmentsResponse
+	(*GetDownloadUrlRequest)(nil),        // 6: documents.v1.GetDownloadUrlRequest
+	(*GetDownloadUrlResponse)(nil),       // 7: documents.v1.GetDownloadUrlResponse
+	(*Event)(nil),                        // 8: documents.v1.Event
+	(*ListEventsRequest)(nil),            // 9: documents.v1.ListEventsRequest
+	(*ListEventsResponse)(nil),           // 10: documents.v1.ListEventsResponse
+	(*ExportRun)(nil),                    // 11: documents.v1.ExportRun
+	(*ListExportRunsRequest)(nil),        // 12: documents.v1.ListExportRunsRequest
+	(*ListExportRunsResponse)(nil),       // 13: documents.v1.ListExportRunsResponse
+	(*GetExportDownloadUrlRequest)(nil),  // 14: documents.v1.GetExportDownloadUrlRequest
+	(*GetExportDownloadUrlResponse)(nil), // 15: documents.v1.GetExportDownloadUrlResponse
 }
 var file_documents_v1_documents_proto_depIdxs = []int32{
 	0,  // 0: documents.v1.CreateUploadResponse.attachment:type_name -> documents.v1.Attachment
 	0,  // 1: documents.v1.ListAttachmentsResponse.attachments:type_name -> documents.v1.Attachment
 	0,  // 2: documents.v1.GetDownloadUrlResponse.attachment:type_name -> documents.v1.Attachment
 	8,  // 3: documents.v1.ListEventsResponse.events:type_name -> documents.v1.Event
-	1,  // 4: documents.v1.Documents.CreateUpload:input_type -> documents.v1.CreateUploadRequest
-	3,  // 5: documents.v1.Documents.CompleteUpload:input_type -> documents.v1.CompleteUploadRequest
-	4,  // 6: documents.v1.Documents.ListAttachments:input_type -> documents.v1.ListAttachmentsRequest
-	6,  // 7: documents.v1.Documents.GetDownloadUrl:input_type -> documents.v1.GetDownloadUrlRequest
-	9,  // 8: documents.v1.Documents.ListEvents:input_type -> documents.v1.ListEventsRequest
-	2,  // 9: documents.v1.Documents.CreateUpload:output_type -> documents.v1.CreateUploadResponse
-	0,  // 10: documents.v1.Documents.CompleteUpload:output_type -> documents.v1.Attachment
-	5,  // 11: documents.v1.Documents.ListAttachments:output_type -> documents.v1.ListAttachmentsResponse
-	7,  // 12: documents.v1.Documents.GetDownloadUrl:output_type -> documents.v1.GetDownloadUrlResponse
-	10, // 13: documents.v1.Documents.ListEvents:output_type -> documents.v1.ListEventsResponse
-	9,  // [9:14] is the sub-list for method output_type
-	4,  // [4:9] is the sub-list for method input_type
-	4,  // [4:4] is the sub-list for extension type_name
-	4,  // [4:4] is the sub-list for extension extendee
-	0,  // [0:4] is the sub-list for field type_name
+	11, // 4: documents.v1.ListExportRunsResponse.runs:type_name -> documents.v1.ExportRun
+	11, // 5: documents.v1.GetExportDownloadUrlResponse.run:type_name -> documents.v1.ExportRun
+	1,  // 6: documents.v1.Documents.CreateUpload:input_type -> documents.v1.CreateUploadRequest
+	3,  // 7: documents.v1.Documents.CompleteUpload:input_type -> documents.v1.CompleteUploadRequest
+	4,  // 8: documents.v1.Documents.ListAttachments:input_type -> documents.v1.ListAttachmentsRequest
+	6,  // 9: documents.v1.Documents.GetDownloadUrl:input_type -> documents.v1.GetDownloadUrlRequest
+	9,  // 10: documents.v1.Documents.ListEvents:input_type -> documents.v1.ListEventsRequest
+	12, // 11: documents.v1.Documents.ListExportRuns:input_type -> documents.v1.ListExportRunsRequest
+	14, // 12: documents.v1.Documents.GetExportDownloadUrl:input_type -> documents.v1.GetExportDownloadUrlRequest
+	2,  // 13: documents.v1.Documents.CreateUpload:output_type -> documents.v1.CreateUploadResponse
+	0,  // 14: documents.v1.Documents.CompleteUpload:output_type -> documents.v1.Attachment
+	5,  // 15: documents.v1.Documents.ListAttachments:output_type -> documents.v1.ListAttachmentsResponse
+	7,  // 16: documents.v1.Documents.GetDownloadUrl:output_type -> documents.v1.GetDownloadUrlResponse
+	10, // 17: documents.v1.Documents.ListEvents:output_type -> documents.v1.ListEventsResponse
+	13, // 18: documents.v1.Documents.ListExportRuns:output_type -> documents.v1.ListExportRunsResponse
+	15, // 19: documents.v1.Documents.GetExportDownloadUrl:output_type -> documents.v1.GetExportDownloadUrlResponse
+	13, // [13:20] is the sub-list for method output_type
+	6,  // [6:13] is the sub-list for method input_type
+	6,  // [6:6] is the sub-list for extension type_name
+	6,  // [6:6] is the sub-list for extension extendee
+	0,  // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_documents_v1_documents_proto_init() }
@@ -950,7 +1289,7 @@ func file_documents_v1_documents_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_documents_v1_documents_proto_rawDesc), len(file_documents_v1_documents_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   11,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

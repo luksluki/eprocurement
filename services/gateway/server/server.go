@@ -140,6 +140,7 @@ func New(log *slog.Logger, verifier *token.Verifier, opts ...Option) *fiber.App 
 	}
 	if o.documents != nil {
 		registerEventRoutes(app, verifier, o.documents)
+		registerExportRoutes(app, verifier, o.documents)
 	}
 	if o.dlq != nil {
 		registerDLQRoutes(app, verifier, o.dlq)

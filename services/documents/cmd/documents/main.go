@@ -19,6 +19,7 @@ import (
 	"github.com/luksluki/eprocurement/internal/platform/logger"
 	"github.com/luksluki/eprocurement/services/documents/attachment"
 	documentsconfig "github.com/luksluki/eprocurement/services/documents/config"
+	exportstore "github.com/luksluki/eprocurement/services/documents/export"
 	"github.com/luksluki/eprocurement/services/documents/history"
 	"github.com/luksluki/eprocurement/services/documents/objectstore"
 	"github.com/luksluki/eprocurement/services/documents/server"
@@ -58,6 +59,7 @@ func run() error {
 	if err := events.EnsureIndexes(ctx); err != nil {
 		return fmt.Errorf("ensure history indexes: %w", err)
 	}
+	exports := exportstore.NewStore(db)
 
 	storage, err := objectstore.New(cfg.S3Endpoint, cfg.S3PresignEndpoint,
 		cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3Bucket, cfg.S3UseSSL)
@@ -81,7 +83,7 @@ func run() error {
 		return fmt.Errorf("listen %s: %w", cfg.Port, err)
 	}
 	srv := server.New(log, pinger{client: mongoClient}, store, storage,
-		attachment.Limits{MaxSizeBytes: int64(cfg.AttachmentMaxSizeMB) << 20}, events)
+		attachment.Limits{MaxSizeBytes: int64(cfg.AttachmentMaxSizeMB) << 20}, events, exports)
 	return srv.Serve(ctx, lis)
 }
 

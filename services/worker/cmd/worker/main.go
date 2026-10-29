@@ -1,20 +1,26 @@
 // Command worker runs the background jobs in ONE binary under ONE signal
-// context (the #45 + #47 + #48 composition, dev-notes 047/048):
+// context (the #45 + #47 + #48 + #49 composition, dev-notes 047/048/049):
 //
 //   - the transactional outbox publisher (#45): poll procurement.outbox,
 //     publish the §14.5 envelopes to RabbitMQ, mark published_at;
 //   - the Mongo projection consumers (#47): consume documents.history and
 //     notifications idempotently (unique event_id dedupe);
 //   - the DLQ depth monitor (#48): log an hourly structured summary of
-//     procurement.dlq's depth (PRD §16).
+//     procurement.dlq's depth (PRD §16);
+//   - the nightly export scheduler (#49): fire EXPORT_SCHEDULE in EXPORT_TZ,
+//     per tenant take the Redis lock, write the PO register CSV to MinIO,
+//     keep the run history in Mongo export_runs, detect missed runs.
 //
 // SIGINT/SIGTERM stops all components gracefully (each Run returns nil); a
 // fatal error in any cancels the siblings and fails the process. Boot
-// connects to RabbitMQ and MongoDB with backoff — a not-yet-ready
-// dependency never crash-loops the process (PRD §14.8 "worker down") — and
-// ensures the projection indexes BEFORE consumption starts, so a fresh
-// database dedupes from the first delivery. The DLQ monitor does not dial
-// at boot at all: a broker that is down costs it one warn per tick.
+// connects to RabbitMQ, MongoDB, Redis, and MinIO with backoff — a
+// not-yet-ready dependency never crash-loops the process (PRD §14.8
+// "worker down") — and ensures the projection + run-history indexes BEFORE
+// consumption starts, so a fresh database dedupes from the first delivery.
+// The DLQ monitor does not dial at boot at all: a broker that is down costs
+// it one warn per tick. The export scheduler itself is constructed
+// fail-fast: an invalid schedule/zone or a lock TTL that does not exceed
+// the job budget stops boot rather than silently overlapping (#49).
 //
 // The worker deliberately runs no database migrations: procurement is the
 // only migration applier (single-writer, no advisory-lock races — dev-note
@@ -33,15 +39,19 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/luksluki/eprocurement/internal/platform/logger"
+	exportstore "github.com/luksluki/eprocurement/services/documents/export"
 	"github.com/luksluki/eprocurement/services/documents/history"
 	"github.com/luksluki/eprocurement/services/documents/notifications"
+	"github.com/luksluki/eprocurement/services/documents/objectstore"
 	"github.com/luksluki/eprocurement/services/worker/config"
 	"github.com/luksluki/eprocurement/services/worker/consumer"
 	"github.com/luksluki/eprocurement/services/worker/dlqmonitor"
+	"github.com/luksluki/eprocurement/services/worker/export"
 	"github.com/luksluki/eprocurement/services/worker/publisher"
 	"github.com/luksluki/eprocurement/services/worker/topology"
 )
@@ -117,14 +127,50 @@ func run() error {
 		Logger:   log,
 	}
 
+	// Export half (#49): Redis (lock + heartbeat), MinIO (the single
+	// S3_BUCKET documents presigns from), the run-history indexes, then
+	// the scheduler — constructed fail-fast on a bad schedule/zone or a
+	// TTL that does not exceed the job budget.
+	rdb, err := connectRedis(ctx, cfg.RedisURL, log)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil // shutdown during boot: not an error
+		}
+		return err
+	}
+	defer rdb.Close()
+	objects, err := objectstore.New(cfg.S3Endpoint, "", cfg.S3AccessKey,
+		cfg.S3SecretKey, cfg.S3Bucket, cfg.S3UseSSL)
+	if err != nil {
+		return fmt.Errorf("connect object store: %w", err)
+	}
+	if err := objects.EnsureBucket(ctx); err != nil {
+		return fmt.Errorf("ensure bucket %s: %w", cfg.S3Bucket, err)
+	}
+	runsStore := exportstore.NewStore(mdb)
+	if err := runsStore.EnsureIndexes(ctx); err != nil {
+		return fmt.Errorf("ensure export runs indexes: %w", err)
+	}
+	scheduler, err := export.NewScheduler(export.SchedulerConfig{
+		Schedule: cfg.ExportSchedule,
+		Timezone: cfg.ExportTZ,
+		LockTTL:  cfg.ExportLockTTL,
+		Budget:   cfg.ExportJobBudget,
+	}, db, objects, export.NewRedisKV(rdb), runsStore, log)
+	if err != nil {
+		return err
+	}
+
 	log.Info("starting worker",
 		"poll_interval", cfg.PollInterval.String(), "batch_size", cfg.BatchSize,
 		"dlq_summary_interval", cfg.DLQSummaryInterval.String(),
-		"queues", []string{topology.DocumentsHistoryQueue, topology.NotificationsQueue})
+		"queues", []string{topology.DocumentsHistoryQueue, topology.NotificationsQueue},
+		"export_schedule", cfg.ExportSchedule, "export_tz", cfg.ExportTZ)
 	return runComponents(ctx, log,
 		component{"publisher", loop.Run},
 		component{"consumers", runner.Run},
 		component{"dlq-monitor", monitor.Run},
+		component{"exports", scheduler.Run},
 	)
 }
 
@@ -216,6 +262,36 @@ func connectMongo(ctx context.Context, uri string, log *slog.Logger) (*mongo.Cli
 		select {
 		case <-ctx.Done():
 			_ = client.Disconnect(context.Background())
+			return nil, ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, 10*time.Second)
+	}
+}
+
+// connectRedis dials and pings Redis with exponential backoff (1 s → 10 s
+// cap) until the server answers or ctx ends (#49: the export lock and
+// heartbeat live there).
+func connectRedis(ctx context.Context, url string, log *slog.Logger) (*redis.Client, error) {
+	opts, err := redis.ParseURL(url)
+	if err != nil {
+		return nil, fmt.Errorf("parse redis url: %w", err)
+	}
+	client := redis.NewClient(opts)
+	backoff := time.Second
+	for {
+		pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err := client.Ping(pingCtx).Err()
+		cancel()
+		if err == nil {
+			return client, nil
+		}
+		if ctx.Err() == nil {
+			log.Warn("redis not ready; retrying", "error", err, "backoff", backoff.String())
+		}
+		select {
+		case <-ctx.Done():
+			_ = client.Close()
 			return nil, ctx.Err()
 		case <-time.After(backoff):
 		}

@@ -33,6 +33,16 @@ service Documents {
   // last page. payload_json is the raw event payload JSON — full fidelity of
   // the procurement outbox JSONB, no restructuring.
   rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
+  // ListExportRuns returns the caller tenant's nightly-export run history,
+  // newest first (scheduled_for DESC). Both export methods re-check
+  // export:run in the service-layer interceptor map (finance/admin only —
+  // the first real consumer of that permission, #49).
+  rpc ListExportRuns(ListExportRunsRequest) returns (ListExportRunsResponse);
+  // GetExportDownloadUrl returns a presigned GET URL for one successful
+  // run's CSV object. A failed run has no object (FailedPrecondition
+  // export_not_succeeded); another tenant's run id is indistinguishable
+  // from a missing one.
+  rpc GetExportDownloadUrl(GetExportDownloadUrlRequest) returns (GetExportDownloadUrlResponse);
 }
 
 message Attachment {
@@ -116,4 +126,37 @@ message ListEventsRequest {
 message ListEventsResponse {
   repeated Event events = 1;
   string next_cursor = 2;  // empty on the last page
+}
+
+// ExportRun is one nightly-export run record as stored in MongoDB
+// export_runs (#49, FR-10). object_key stays internal — clients download
+// through the presigned URL, never the raw key (the attachment convention).
+message ExportRun {
+  string run_id = 1;
+  string tenant_id = 2;
+  string scheduled_for = 3;  // RFC 3339 — the slot this run belongs to
+  string status = 4;         // "success" | "failed"
+  int32 row_count = 5;       // PO rows written to the CSV
+  bool missed_previous = 6;  // detection found no successful run in the previous slot
+  string error_message = 7;  // failure detail; empty on success
+  string started_at = 8;     // RFC 3339
+  string finished_at = 9;    // RFC 3339
+}
+
+message ListExportRunsRequest {
+  int32 limit = 1;  // default 20, max 100 (clamped)
+}
+
+message ListExportRunsResponse {
+  repeated ExportRun runs = 1;  // newest first
+}
+
+message GetExportDownloadUrlRequest {
+  string run_id = 1;
+}
+
+message GetExportDownloadUrlResponse {
+  ExportRun run = 1;
+  string download_url = 2; // presigned GET target on MinIO
+  string expires_at = 3;   // RFC 3339
 }

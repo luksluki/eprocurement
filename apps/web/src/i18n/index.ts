@@ -203,6 +203,18 @@ export type Dictionary = {
     users: PageCopy;
     settings: PageCopy;
   };
+  // ExportRunsTable copy (#49): passed as props by the reports page —
+  // client components never import the dictionaries (the Timeline pattern).
+  reportsTable: {
+    loading: string;
+    error: string;
+    retry: string;
+    sessionExpired: string;
+    empty: string;
+    download: string;
+    downloading: string;
+    downloadFailed: string;
+  };
   localeNames: { id: string; en: string };
 };
 
@@ -442,6 +454,16 @@ const id: Dictionary = {
       milestone: "tonggak konfigurasi persetujuan",
     },
   },
+  reportsTable: {
+    loading: "Memuat riwayat eksekusi…",
+    error: "Gagal memuat riwayat eksekusi — gateway mungkin tidak terjangkau.",
+    retry: "Coba lagi",
+    sessionExpired: "Sesi berakhir — mengarahkan ke halaman masuk…",
+    empty: "Belum ada eksekusi ekspor. Ekspor malam hari pertama berjalan pada jadwal berikutnya.",
+    download: "Unduh CSV",
+    downloading: "Menyiapkan…",
+    downloadFailed: "Gagal menyiapkan tautan unduhan.",
+  },
   localeNames: { id: "Bahasa Indonesia", en: "English" },
 };
 
@@ -678,6 +700,16 @@ const en: Dictionary = {
       description: "Approval rules and tolerances configuration.",
       milestone: "the approval configuration milestone",
     },
+  },
+  reportsTable: {
+    loading: "Loading run history…",
+    error: "Failed to load run history — the gateway may be unreachable.",
+    retry: "Retry",
+    sessionExpired: "Session expired — redirecting to sign-in…",
+    empty: "No export runs yet. The first nightly export runs on the next schedule.",
+    download: "Download CSV",
+    downloading: "Preparing…",
+    downloadFailed: "Failed to prepare the download link.",
   },
   localeNames: { id: "Bahasa Indonesia", en: "English" },
 };
