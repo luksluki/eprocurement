@@ -37,6 +37,8 @@ const (
 	Procurement_AcknowledgePurchaseOrder_FullMethodName = "/procurement.v1.Procurement/AcknowledgePurchaseOrder"
 	Procurement_CancelPurchaseOrder_FullMethodName      = "/procurement.v1.Procurement/CancelPurchaseOrder"
 	Procurement_ClosePurchaseOrder_FullMethodName       = "/procurement.v1.Procurement/ClosePurchaseOrder"
+	Procurement_ListPurchaseOrders_FullMethodName       = "/procurement.v1.Procurement/ListPurchaseOrders"
+	Procurement_GetPurchaseOrder_FullMethodName         = "/procurement.v1.Procurement/GetPurchaseOrder"
 	Procurement_PostGoodsReceipt_FullMethodName         = "/procurement.v1.Procurement/PostGoodsReceipt"
 	Procurement_CreateInvoice_FullMethodName            = "/procurement.v1.Procurement/CreateInvoice"
 	Procurement_GetInvoice_FullMethodName               = "/procurement.v1.Procurement/GetInvoice"
@@ -153,6 +155,18 @@ type ProcurementClient interface {
 	// PO to closed. Any other source status is po_illegal_transition; exactly
 	// one po.closed outbox event commits with the transition.
 	ClosePurchaseOrder(ctx context.Context, in *ClosePurchaseOrderRequest, opts ...grpc.CallOption) (*PurchaseOrder, error)
+	// ListPurchaseOrders returns one page of the caller tenant's purchase
+	// orders ordered by number descending (newest first). query matches a number
+	// prefix (case-insensitive); status is one of the seven lifecycle values or
+	// empty; the two combine. total is the number of matching rows across all
+	// pages. Rows are header-only: items are always empty here — the detail
+	// read owns them.
+	ListPurchaseOrders(ctx context.Context, in *ListPurchaseOrdersRequest, opts ...grpc.CallOption) (*ListPurchaseOrdersResponse, error)
+	// GetPurchaseOrder returns one purchase order of the caller's tenant — the
+	// detail read that owns the lines the list rows never carry, with each
+	// line's id (receipt lines reference po_item ids since #37). Other tenants'
+	// purchase orders are indistinguishable from missing ones.
+	GetPurchaseOrder(ctx context.Context, in *GetPurchaseOrderRequest, opts ...grpc.CallOption) (*PurchaseOrder, error)
 	// PostGoodsReceipt records one goods receipt against an acknowledged or
 	// partially_received PO (FR-07): each line advances the PO line's
 	// cumulative qty_received, over-receipts are rejected with the
@@ -397,6 +411,26 @@ func (c *procurementClient) ClosePurchaseOrder(ctx context.Context, in *ClosePur
 	return out, nil
 }
 
+func (c *procurementClient) ListPurchaseOrders(ctx context.Context, in *ListPurchaseOrdersRequest, opts ...grpc.CallOption) (*ListPurchaseOrdersResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListPurchaseOrdersResponse)
+	err := c.cc.Invoke(ctx, Procurement_ListPurchaseOrders_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *procurementClient) GetPurchaseOrder(ctx context.Context, in *GetPurchaseOrderRequest, opts ...grpc.CallOption) (*PurchaseOrder, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PurchaseOrder)
+	err := c.cc.Invoke(ctx, Procurement_GetPurchaseOrder_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *procurementClient) PostGoodsReceipt(ctx context.Context, in *PostGoodsReceiptRequest, opts ...grpc.CallOption) (*PostGoodsReceiptResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(PostGoodsReceiptResponse)
@@ -565,6 +599,18 @@ type ProcurementServer interface {
 	// PO to closed. Any other source status is po_illegal_transition; exactly
 	// one po.closed outbox event commits with the transition.
 	ClosePurchaseOrder(context.Context, *ClosePurchaseOrderRequest) (*PurchaseOrder, error)
+	// ListPurchaseOrders returns one page of the caller tenant's purchase
+	// orders ordered by number descending (newest first). query matches a number
+	// prefix (case-insensitive); status is one of the seven lifecycle values or
+	// empty; the two combine. total is the number of matching rows across all
+	// pages. Rows are header-only: items are always empty here — the detail
+	// read owns them.
+	ListPurchaseOrders(context.Context, *ListPurchaseOrdersRequest) (*ListPurchaseOrdersResponse, error)
+	// GetPurchaseOrder returns one purchase order of the caller's tenant — the
+	// detail read that owns the lines the list rows never carry, with each
+	// line's id (receipt lines reference po_item ids since #37). Other tenants'
+	// purchase orders are indistinguishable from missing ones.
+	GetPurchaseOrder(context.Context, *GetPurchaseOrderRequest) (*PurchaseOrder, error)
 	// PostGoodsReceipt records one goods receipt against an acknowledged or
 	// partially_received PO (FR-07): each line advances the PO line's
 	// cumulative qty_received, over-receipts are rejected with the
@@ -682,6 +728,12 @@ func (UnimplementedProcurementServer) CancelPurchaseOrder(context.Context, *Canc
 }
 func (UnimplementedProcurementServer) ClosePurchaseOrder(context.Context, *ClosePurchaseOrderRequest) (*PurchaseOrder, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ClosePurchaseOrder not implemented")
+}
+func (UnimplementedProcurementServer) ListPurchaseOrders(context.Context, *ListPurchaseOrdersRequest) (*ListPurchaseOrdersResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListPurchaseOrders not implemented")
+}
+func (UnimplementedProcurementServer) GetPurchaseOrder(context.Context, *GetPurchaseOrderRequest) (*PurchaseOrder, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetPurchaseOrder not implemented")
 }
 func (UnimplementedProcurementServer) PostGoodsReceipt(context.Context, *PostGoodsReceiptRequest) (*PostGoodsReceiptResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method PostGoodsReceipt not implemented")
@@ -1046,6 +1098,42 @@ func _Procurement_ClosePurchaseOrder_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Procurement_ListPurchaseOrders_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListPurchaseOrdersRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProcurementServer).ListPurchaseOrders(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Procurement_ListPurchaseOrders_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProcurementServer).ListPurchaseOrders(ctx, req.(*ListPurchaseOrdersRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Procurement_GetPurchaseOrder_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetPurchaseOrderRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProcurementServer).GetPurchaseOrder(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Procurement_GetPurchaseOrder_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProcurementServer).GetPurchaseOrder(ctx, req.(*GetPurchaseOrderRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Procurement_PostGoodsReceipt_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(PostGoodsReceiptRequest)
 	if err := dec(in); err != nil {
@@ -1232,6 +1320,14 @@ var Procurement_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ClosePurchaseOrder",
 			Handler:    _Procurement_ClosePurchaseOrder_Handler,
+		},
+		{
+			MethodName: "ListPurchaseOrders",
+			Handler:    _Procurement_ListPurchaseOrders_Handler,
+		},
+		{
+			MethodName: "GetPurchaseOrder",
+			Handler:    _Procurement_GetPurchaseOrder_Handler,
 		},
 		{
 			MethodName: "PostGoodsReceipt",

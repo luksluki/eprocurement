@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"strconv"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -15,16 +16,72 @@ import (
 // RBAC, and the verified claims propagated to procurement as gRPC metadata.
 // #35 landed the conversion endpoint; #36 the lifecycle actions (PRD §15
 // issue route plus acknowledge/cancel/close); #37 the goods-receipt posting
-// route (PRD §15, grn:post — buyer/admin; see goodsreceipt.go).
+// route (PRD §15, grn:post — buyer/admin; see goodsreceipt.go); #38 the read
+// pair (list + detail, po:read).
 func registerPurchaseOrderRoutes(app *fiber.App, verifier *token.Verifier, client ProcurementClient) {
 	pos := app.Group("/api/v1/purchase-orders", bearerAuth(verifier))
 
+	pos.Get("/", RequirePermission(rbac.PORead), listPurchaseOrders(client))
+	pos.Get("/:id", RequirePermission(rbac.PORead), getPurchaseOrder(client))
 	pos.Post("/from-requisition/:id", RequirePermission(rbac.POWrite), createPurchaseOrder(client))
 	pos.Post("/:id/issue", RequirePermission(rbac.POWrite), issuePurchaseOrder(client))
 	pos.Post("/:id/acknowledge", RequirePermission(rbac.POWrite), acknowledgePurchaseOrder(client))
 	pos.Post("/:id/cancel", RequirePermission(rbac.POWrite), cancelPurchaseOrder(client))
 	pos.Post("/:id/close", RequirePermission(rbac.POWrite), closePurchaseOrder(client))
 	pos.Post("/:id/goods-receipts", RequirePermission(rbac.GRNPost), postGoodsReceiptRoute(client))
+}
+
+// listPurchaseOrders serves GET /api/v1/purchase-orders (#38): query params q
+// (number prefix), status (one of the seven PO statuses), page, page_size —
+// normalized and validated in procurement. The response envelope is
+// {purchase_orders, total, page, page_size}; rows are header-only (items
+// empty).
+func listPurchaseOrders(client ProcurementClient) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		claims, ok := claimsOf(c)
+		if !ok {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "missing bearer token"})
+		}
+		page, _ := strconv.Atoi(c.Query("page"))
+		pageSize, _ := strconv.Atoi(c.Query("page_size"))
+		resp, err := client.ListPurchaseOrders(forwardContext(c, claims), &procurementv1.ListPurchaseOrdersRequest{
+			Query:    strings.TrimSpace(c.Query("q")),
+			Status:   strings.TrimSpace(c.Query("status")),
+			Page:     int32(page),
+			PageSize: int32(pageSize),
+		})
+		if err != nil {
+			return poError(c, err)
+		}
+		out := make([]fiber.Map, 0, len(resp.GetPurchaseOrders()))
+		for _, po := range resp.GetPurchaseOrders() {
+			out = append(out, purchaseOrderJSON(po))
+		}
+		return c.JSON(fiber.Map{
+			"purchase_orders": out,
+			"total":           resp.GetTotal(),
+			"page":            resp.GetPage(),
+			"page_size":       resp.GetPageSize(),
+		})
+	}
+}
+
+// getPurchaseOrder serves GET /api/v1/purchase-orders/:id (#38): the detail
+// aggregate — header plus items with their ids (the receipt form references
+// po_item ids). Cross-tenant/missing ids answer 404 po_not_found through the
+// shared mapping.
+func getPurchaseOrder(client ProcurementClient) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		claims, ok := claimsOf(c)
+		if !ok {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "missing bearer token"})
+		}
+		po, err := client.GetPurchaseOrder(forwardContext(c, claims), &procurementv1.GetPurchaseOrderRequest{Id: c.Params("id")})
+		if err != nil {
+			return poError(c, err)
+		}
+		return c.JSON(purchaseOrderJSON(po))
+	}
 }
 
 // poBody is the conversion payload. vendor_id is required — the requisition
@@ -67,7 +124,8 @@ func createPurchaseOrder(client ProcurementClient) fiber.Handler {
 
 // poMessages renders each machine code (the gRPC message) as a human
 // sentence; the requisition/vendor gate codes ride along because the
-// conversion crosses those domains, and the lifecycle guards join with #36.
+// conversion crosses those domains, the lifecycle guards joined with #36,
+// and the list-filter codes with #38.
 var poMessages = map[string]string{
 	"po_vendor_id_invalid":        "vendor_id must be the UUID of the vendor to order from",
 	"po_requisition_not_approved": "only an approved requisition can be converted",
@@ -76,6 +134,8 @@ var poMessages = map[string]string{
 	"po_id_invalid":               "purchase order id must be a UUID",
 	"po_illegal_transition":       "the purchase order cannot move that way from its current status",
 	"po_has_receipts":             "goods were already received; close the purchase order instead of cancelling",
+	"po_status_invalid":           "status must be a purchase order status or empty",
+	"po_page_invalid":             "page is out of range",
 	"requisition_not_found":       "requisition not found",
 	"requisition_id_invalid":      "requisition id must be a UUID",
 	"vendor_not_found":            "vendor not found",

@@ -413,6 +413,157 @@ export type EventEntry = {
   payload_json: string;
 };
 
+// ---------------------------------------------------------------------------
+// Purchase orders (#38). The list is a thin proxy (the server component only
+// needs data-or-null); the detail and the actions return the typed
+// GatewayResult so the BFF routes can forward 4xx machine codes verbatim
+// (the wizard/decide convention).
+
+// PurchaseOrderItem is one PO line as the gateway renders it — the item id
+// is included because goods-receipt lines reference po_item ids (#37).
+export type PurchaseOrderItem = {
+  id: string;
+  description: string;
+  qty_ordered: number;
+  qty_received: number;
+  unit_price_cents: number;
+};
+
+// PurchaseOrderHeader is one row of the PO list (issue #38). List rows are
+// header-only: items are always an empty array on the wire (documented in
+// proto/procurement/v1/procurement.proto).
+export type PurchaseOrderHeader = {
+  id: string;
+  tenant_id: string;
+  number: string;
+  requisition_id: string;
+  vendor_id: string;
+  status: string;
+  currency: string;
+  total_cents: number;
+  items: unknown[];
+  issued_at: string;
+  created_at: string;
+  created_by: string;
+  updated_at: string;
+  updated_by: string;
+};
+
+// Envelope of GET /api/v1/purchase-orders: { purchase_orders, total, page,
+// page_size }.
+export type PurchaseOrderListPage = {
+  purchase_orders: PurchaseOrderHeader[];
+  total: number;
+  page: number;
+  page_size: number;
+};
+
+// PurchaseOrderDetail is the GET /api/v1/purchase-orders/:id shape: the full
+// aggregate with typed items.
+export type PurchaseOrderDetail = Omit<PurchaseOrderHeader, "items"> & {
+  items: PurchaseOrderItem[];
+};
+
+// listPurchaseOrders loads one tenant-scoped page of the PO list. Returns
+// null on any failure so the server-rendered list page can show its error
+// state instead of crashing (the listVendors convention).
+export async function listPurchaseOrders(
+  accessToken: string,
+  params: { q: string; status: string; page: number; pageSize: number },
+): Promise<PurchaseOrderListPage | null> {
+  try {
+    const url = new URL(`${gatewayUrl()}/api/v1/purchase-orders`);
+    if (params.q !== "") url.searchParams.set("q", params.q);
+    if (params.status !== "") url.searchParams.set("status", params.status);
+    url.searchParams.set("page", String(params.page));
+    url.searchParams.set("page_size", String(params.pageSize));
+    const res = await fetch(url, {
+      headers: { authorization: `Bearer ${accessToken}` },
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      return null;
+    }
+    const body = (await res.json()) as {
+      purchase_orders?: PurchaseOrderHeader[];
+      total?: number;
+      page?: number;
+      page_size?: number;
+    };
+    if (!Array.isArray(body.purchase_orders)) {
+      return null;
+    }
+    return {
+      purchase_orders: body.purchase_orders,
+      total: body.total ?? body.purchase_orders.length,
+      page: body.page ?? params.page,
+      page_size: body.page_size ?? params.pageSize,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// getPurchaseOrder reads the detail aggregate; 404 (also the cross-tenant
+// answer) is discriminated so the page can render its not-found state.
+export function getPurchaseOrder(accessToken: string, id: string): Promise<GatewayResult<PurchaseOrderDetail>> {
+  return callGateway(accessToken, `/api/v1/purchase-orders/${encodeURIComponent(id)}`);
+}
+
+// issuePurchaseOrder moves a draft PO to issued (po:write — buyer/admin at
+// the gateway; the response is the updated PO).
+export function issuePurchaseOrder(accessToken: string, id: string): Promise<GatewayResult<PurchaseOrderDetail>> {
+  return callGateway(accessToken, `/api/v1/purchase-orders/${encodeURIComponent(id)}/issue`, { method: "POST" });
+}
+
+// acknowledgePurchaseOrder moves an issued PO to acknowledged.
+export function acknowledgePurchaseOrder(
+  accessToken: string,
+  id: string,
+): Promise<GatewayResult<PurchaseOrderDetail>> {
+  return callGateway(accessToken, `/api/v1/purchase-orders/${encodeURIComponent(id)}/acknowledge`, {
+    method: "POST",
+  });
+}
+
+// GoodsReceiptItemWire is one receipt line of the posting body.
+export type GoodsReceiptItemWire = {
+  po_item_id: string;
+  qty_received: number;
+};
+
+// GoodsReceiptPosted is the 201 body of POST goods-receipts: the stored GRN
+// with the updated PO embedded.
+export type GoodsReceiptPosted = {
+  id: string;
+  tenant_id: string;
+  po_id: string;
+  number: string;
+  received_by: string;
+  received_at: string;
+  notes: string;
+  items: GoodsReceiptItemWire[];
+  created_at: string;
+  purchase_order: PurchaseOrderDetail;
+};
+
+// postGoodsReceipt records one (partial or full) receipt against a PO
+// (grn:post — buyer/admin). A 409 grn_over_receipt carries the pinned detail
+// line in `error` ("grn_over_receipt: po_item=… received=… requested=…
+// ordered=…"), which the dedicated gateway renderer preserved verbatim.
+export function postGoodsReceipt(
+  accessToken: string,
+  poId: string,
+  items: GoodsReceiptItemWire[],
+  notes: string,
+): Promise<GatewayResult<GoodsReceiptPosted>> {
+  return callGateway(accessToken, `/api/v1/purchase-orders/${encodeURIComponent(poId)}/goods-receipts`, {
+    method: "POST",
+    body: { items, notes },
+  });
+}
+
+
 // EventsPage is the GET /api/v1/events envelope. Pagination is keyset, not
 // offset: next_cursor is the opaque continuation token and is empty on the
 // last page — a deliberate deviation from the page/total convention

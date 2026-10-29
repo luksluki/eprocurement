@@ -992,6 +992,7 @@ missing (404 `requisition_not_found`).
 - #35: PO creation from an approved requisition (done — 0007 tables, draft PO with copied lines, per-tenant gap-free `PO-%06d` numbering, conversion replay contract, tx-scoped active-vendor gate `ForUseTx`, guarded `approved → closed`, one `po.created` outbox event). Goods receipts (#37) and the missing `pr.converted` requisition-side event are follow-ups.
 - #36: PO lifecycle state machine (done — ten legal edges over the seven statuses, receipt-guarded cancel, `issued_at` on issue, guarded tenant-scoped transitions serialized on the PO row lock, one outbox event per transition, gRPC + REST issue/acknowledge/cancel/close at `po:write`). Goods receipts (#37) drive the receipt edges.
 - #37: goods receipts with partial receipt rules (done — 0008 tables, `GRN-%06d` gap-free per tenant, `purchaseorder.ApplyReceipt` three-branch status selection with the same-status branch, cumulative over-receipt guard with the pinned `grn_over_receipt: …` detail line and the dedicated REST renderer, one `grn.posted` outbox row per receipt typed to the PO, gRPC + REST at `grn:post`). See the [Goods receipts](#goods-receipts-37) section.
+- #38: PO read endpoints + the PO/GRN UI (done — `ListPurchaseOrders`/`GetPurchaseOrder` at `po:read` behind `GET /api/v1/purchase-orders` / `/{id}`, the seven-status `po_status_invalid`/`po_page_invalid` filter contract, 0011's `purchase_orders_tenant_status_idx`, and the `/app/purchase-orders` list/detail screens with issue/acknowledge actions and the goods-receipt form). See the [PO list](#purchase-order-list--filters-pagination-query-plans-38) section below.
 - #39: invoice model and create API (done — 0009 tables, vendor invoice numbers unique per (tenant, vendor), vendor/currency derived server-side from the locked PO, server-recomputed totals, the cumulative strict `inv_over_bill: …` guard with the dedicated REST renderer, `pending|matched|discrepancy` status CHECK with `match_result` reserved for #40, attachment entity + routes + embedded detail read, no outbox row on create). See the [Invoices](#invoices-39) section.
 - #40: three-way match with tolerance (done — 0010 `match_settings` (defaults 0%/0%), the pure integer engine with the cumulative upper-side qty guard and the symmetric price guard, the pinned `match_result` shape with `inv_over_bill_qty`/`inv_over_bill_price` reason lines, the transactional Match under the PO row lock with the `matched` re-run guard and exactly one `invoice.matched`/`invoice.discrepancy` outbox row per run, gRPC `MatchInvoice`/`GetMatchSettings`/`ReplaceMatchSettings`, REST `POST /api/v1/invoices/{id}/match` + admin-only `GET|PUT /api/v1/match-settings` behind `match:configure`, no attachment gate). See the [Three-way match](#three-way-match-40) section.
 - #41: the invoice list endpoint, the `/app/invoices` UI, and the demo-flow enforcement of 'attachment required' — the remaining follow-ups of this model.
@@ -1130,3 +1131,104 @@ Steady-state plans (from the test log's EXPLAIN (ANALYZE)):
 The prefix sort cost is also why the RLS policy's per-row
 `tenant_id::text = current_setting(…)` evaluation matters at this scale —
 same #27 trade-off; a platform-level policy reshaping remains a follow-up.
+
+## Purchase order list — filters, pagination, query plans (#38)
+
+`ListPurchaseOrders` (`po:read` — every role per docs/rbac.md, REST
+`GET /api/v1/purchase-orders?q=&status=&page=&page_size=`) returns one page
+of **header-only** rows (items always empty — the detail read owns them)
+ordered by `number DESC` (newest first — numbers are sequential per tenant,
+the #32 requisition-list contract) plus the total number of matching rows:
+
+- `q` — purchase-order **number prefix**, case-insensitive. LIKE wildcards in
+  the input (`%`, `_`, `\`) are escaped, so they match literally. Numbers are
+  canonical server-generated ASCII (`PO-%06d`).
+- `status` — one of the seven lifecycle values or empty (all); combines with
+  `q`. Unknown values → 400 `po_status_invalid`, absurd pages → 400
+  `po_page_invalid` (the requisition `requisition_status_invalid` /
+  `requisition_page_invalid` precedent).
+- `page` (1-based, default 1) / `page_size` (default 20, max 100). Responses
+  echo the normalized values; `total` counts matches across all pages. A page
+  past the end is empty but still reports the true `total` (an explicit COUNT
+  fallback).
+
+`GetPurchaseOrder` (`po:read`, REST `GET /api/v1/purchase-orders/{id}`) is the
+detail read that owns the bodies: header plus items **with their po_item
+ids** (goods-receipt lines reference them since #37). Cross-tenant reads are
+404 `po_not_found` (RLS), non-UUID ids 400 `po_id_invalid` — read is
+tenant-wide, no ownership rule (POs belong to the tenant; the po:write /
+grn:post actions are buyer/admin).
+
+The query shape is #32's adopted verbatim: one statement, page subquery
+(`ORDER BY number COLLATE "C" DESC LIMIT/OFFSET`) + exact COUNT as an
+uncorrelated scalar subquery (executor InitPlan, evaluated exactly once) +
+the past-the-end COUNT fallback — the measured reasons are recorded in the
+requisition list section above and carry over unchanged.
+
+### Index (migration 0011)
+
+`purchase_orders_tenant_status_idx (tenant_id, status)` — direct parity with
+`requisitions_tenant_status_idx` (0003): carries the status-filter shape's
+selectivity once a tenant's POs reach list scale. There is no superseded
+index to drop (0007 created none on this pair); the prefix shapes keep using
+`purchase_orders_tenant_number_uidx` / heap scans under the #27 RLS-bypass-arm
+trade-off.
+
+### Measured plans at 100k rows (the #38 budget test)
+
+`TestStoreListScale100k` (services/procurement/purchaseorder) seeds **one
+vendor, 100k requisitions, and 100k purchase orders** in one tenant — the
+fixture must satisfy the 0007 FKs: `requisition_id → requisitions` with
+`UNIQUE (tenant_id, requisition_id)` (one PO per requisition) and
+`vendor_id → vendors` — via batched multi-row INSERTs under the bypass
+context, brings the tables to their production steady state (`VACUUM
+(ANALYZE)` + `CHECKPOINT`, the #32 fixture hygiene), then runs 4 shapes × 30
+timed runs under the real RLS context after 3 warm-ups. Budget: **p95 < 300
+ms** per query (PRD §19). The cleanup deletes POs BEFORE requisitions, both
+counters, and the vendor (FK-safe order). Measured on the dev machine
+(3 consecutive suite runs, worst shape p95 per run):
+
+| Shape | median | p95 |
+|---|---|---|
+| unfiltered page 1 | ~100–101 ms | ~104 ms |
+| status = issued (10% of rows) | ~14–16 ms | ~16–19 ms |
+| number prefix (~1k rows) | ~42 ms | ~44 ms |
+| status + number prefix combined | ~54–55 ms | ~57 ms |
+
+Steady-state plans (from the test log's EXPLAIN (ANALYZE, BUFFERS)):
+
+- **Unfiltered**: the count arm runs as `InitPlan 1 → Aggregate → Index Only
+  Scan using purchase_orders_tenant_idx` (100k index entries, `Heap Fetches:
+  0` thanks to the vacuumed visibility map, ~82 buffers); the page arm is a
+  top-N heapsort over a seq scan with the `COLLATE "C"` key — the #32
+  requisition twin.
+- **Status filter**: `Index Only Scan using purchase_orders_tenant_status_idx`
+  (count arm) and `Bitmap Index Scan` on the same 0011 index (page arm) with
+  `Index Cond: (status = 'issued')` and the RLS policy as a filter — the
+  index exists exactly for this shape. ~13–16 ms.
+- **number prefix / combined**: seq scans evaluating the LIKE prefix per row
+  (the #27/#32 finding — the RLS policy's bypass arm keeps tenant-leading
+  index quals unavailable); the LIKE, not the sort, dominates.
+
+## Purchase order / goods-receipt UI (#38)
+
+The PRD §11 `/app/purchase-orders` screens consuming the read pair: the list
+is a server component (DataTable/TablePagination from `@eprocurement/ui`)
+whose filters live in the URL and submit through a plain GET `<form>` — no
+client JavaScript required; the number column links to the detail page. The
+detail page renders the header (number, status badge over the seven
+statuses, vendor, currency, money-formatted total, issued/created), the
+items table with per-line remaining quantities, links back to the list and
+to the source requisition, and — only when the pure eligibility helper
+(`apps/web/src/lib/po-eligibility.ts`, the #34 approval-eligibility pattern)
+says the viewer may act — the issue/acknowledge buttons (buyer/admin on
+draft/issued respectively) and the goods-receipt form (buyer/admin on
+acknowledged/partially_received). The form validates per-field client-side
+(qty a whole number > 0, never above the line's remaining, ≥ 1 filled line,
+notes ≤ 1000 chars) and renders server failures inline by machine code; a
+409 `grn_over_receipt` parses the pinned detail line so the exact
+received/requested/ordered numbers appear in the message. The BFF proxies
+(`POST /api/purchase-orders/[id]/{issue,acknowledge,goods-receipts}`) keep
+the access token server-side, mirror the goods-receipt shape validation, and
+forward gateway 4xx bodies verbatim. The server still enforces every gate —
+the helper only decides rendering.

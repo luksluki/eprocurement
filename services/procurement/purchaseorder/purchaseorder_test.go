@@ -497,3 +497,66 @@ func TestApplyReceiptGuards(t *testing.T) {
 		}
 	})
 }
+
+// ValidateList (#38, table-driven — the requisition TestValidateListErrors
+// twin): every status of the seven-value whitelist passes, unknown statuses
+// and absurd pages answer their machine-code sentinels, and the rest is
+// normalized (defaults applied, query trimmed + uppercased, LIKE wildcards
+// escaped).
+func TestValidateList(t *testing.T) {
+	t.Run("happy path accepts every status and normalizes", func(t *testing.T) {
+		for _, status := range []string{
+			StatusDraft, StatusIssued, StatusAcknowledged, StatusPartiallyReceived,
+			StatusReceived, StatusClosed, StatusCancelled,
+		} {
+			f, err := ValidateList(ListFilter{Status: " " + status + " ", Query: "  po-0001  ", Page: 2, PageSize: 50})
+			if err != nil {
+				t.Fatalf("status %s: err = %v", status, err)
+			}
+			if f.Status != status {
+				t.Fatalf("status %s normalized to %q", status, f.Status)
+			}
+		}
+		f, err := ValidateList(ListFilter{Query: "  po-0001  "})
+		if err != nil || f.Query != "PO-0001" {
+			t.Fatalf("normalized query = %+v (%v)", f, err)
+		}
+		// LIKE wildcards are escaped so they match literally.
+		f, err = ValidateList(ListFilter{Query: "PO-%100_"})
+		if err != nil || f.Query != `PO-\%100\_` {
+			t.Fatalf("escaped query = %q (%v)", f.Query, err)
+		}
+		// Defaults: page 1, page size 20; page_size caps at 100.
+		f, err = ValidateList(ListFilter{PageSize: 500})
+		if err != nil || f.Page != 1 || f.PageSize != MaxPageSize {
+			t.Fatalf("normalized filter = %+v (%v)", f, err)
+		}
+		if f, err := ValidateList(ListFilter{}); err != nil || f.PageSize != DefaultPageSize {
+			t.Fatalf("default page size = %+v (%v)", f, err)
+		}
+		// Page at the boundary passes, one above it fails.
+		if _, err := ValidateList(ListFilter{Page: MaxPage}); err != nil {
+			t.Fatalf("max page: err = %v", err)
+		}
+	})
+	t.Run("failure paths", func(t *testing.T) {
+		cases := map[string]struct {
+			f    ListFilter
+			want error
+		}{
+			"unknown status":     {ListFilter{Status: "paused"}, ErrStatusInvalid},
+			"requisition status": {ListFilter{Status: "submitted"}, ErrStatusInvalid},
+			"page too large":     {ListFilter{Page: MaxPage + 1}, ErrPageInvalid},
+			"negative page":      {ListFilter{Page: -3, PageSize: 5}, nil}, // clamped to 1
+		}
+		for name, tc := range cases {
+			f, err := ValidateList(tc.f)
+			if !errors.Is(err, tc.want) {
+				t.Errorf("%s: err = %v, want %v", name, err, tc.want)
+			}
+			if tc.want == nil && f.Page != 1 {
+				t.Errorf("%s: page = %d, want clamped to 1", name, f.Page)
+			}
+		}
+	})
+}
