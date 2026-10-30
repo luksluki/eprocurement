@@ -560,18 +560,20 @@ func (x *GetDownloadUrlResponse) GetExpiresAt() string {
 // Event is one stored domain event (the PRD §14.5 envelope) as projected
 // into MongoDB by the history consumer.
 type Event struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	EventId       string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
-	TenantId      string                 `protobuf:"bytes,2,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
-	Type          string                 `protobuf:"bytes,3,opt,name=type,proto3" json:"type,omitempty"`                               // catalog name, e.g. "pr.approved"
-	Version       int32                  `protobuf:"varint,4,opt,name=version,proto3" json:"version,omitempty"`                        // payload schema version, 1 today
-	OccurredAt    string                 `protobuf:"bytes,5,opt,name=occurred_at,json=occurredAt,proto3" json:"occurred_at,omitempty"` // RFC 3339
-	ActorId       string                 `protobuf:"bytes,6,opt,name=actor_id,json=actorId,proto3" json:"actor_id,omitempty"`          // user id, empty when unknown
-	ActorIp       string                 `protobuf:"bytes,7,opt,name=actor_ip,json=actorIp,proto3" json:"actor_ip,omitempty"`          // acting client IP (#44 envelope delta), empty on pre-#44 rows
-	TraceId       string                 `protobuf:"bytes,8,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`          // propagated trace, empty when unknown
-	EntityType    string                 `protobuf:"bytes,9,opt,name=entity_type,json=entityType,proto3" json:"entity_type,omitempty"` // aggregate kind, e.g. "requisition"
-	EntityId      string                 `protobuf:"bytes,10,opt,name=entity_id,json=entityId,proto3" json:"entity_id,omitempty"`
-	PayloadJson   string                 `protobuf:"bytes,11,opt,name=payload_json,json=payloadJson,proto3" json:"payload_json,omitempty"` // raw JSON payload, never restructured
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	EventId     string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	TenantId    string                 `protobuf:"bytes,2,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
+	Type        string                 `protobuf:"bytes,3,opt,name=type,proto3" json:"type,omitempty"`                               // catalog name, e.g. "pr.approved"
+	Version     int32                  `protobuf:"varint,4,opt,name=version,proto3" json:"version,omitempty"`                        // payload schema version, 1 today
+	OccurredAt  string                 `protobuf:"bytes,5,opt,name=occurred_at,json=occurredAt,proto3" json:"occurred_at,omitempty"` // RFC 3339
+	ActorId     string                 `protobuf:"bytes,6,opt,name=actor_id,json=actorId,proto3" json:"actor_id,omitempty"`          // user id, empty when unknown
+	TraceId     string                 `protobuf:"bytes,7,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`          // propagated trace, empty when unknown
+	EntityType  string                 `protobuf:"bytes,8,opt,name=entity_type,json=entityType,proto3" json:"entity_type,omitempty"` // aggregate kind, e.g. "requisition"
+	EntityId    string                 `protobuf:"bytes,9,opt,name=entity_id,json=entityId,proto3" json:"entity_id,omitempty"`
+	PayloadJson string                 `protobuf:"bytes,10,opt,name=payload_json,json=payloadJson,proto3" json:"payload_json,omitempty"` // raw JSON payload, never restructured
+	// actor_ip is appended at the NEXT free number (11): renumbering already
+	// released fields breaks wire compatibility for mixed-version deploys.
+	ActorIp       string `protobuf:"bytes,11,opt,name=actor_ip,json=actorIp,proto3" json:"actor_ip,omitempty"` // acting client IP (#44 envelope delta), empty on pre-#44 rows
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -648,13 +650,6 @@ func (x *Event) GetActorId() string {
 	return ""
 }
 
-func (x *Event) GetActorIp() string {
-	if x != nil {
-		return x.ActorIp
-	}
-	return ""
-}
-
 func (x *Event) GetTraceId() string {
 	if x != nil {
 		return x.TraceId
@@ -679,6 +674,13 @@ func (x *Event) GetEntityId() string {
 func (x *Event) GetPayloadJson() string {
 	if x != nil {
 		return x.PayloadJson
+	}
+	return ""
+}
+
+func (x *Event) GetActorIp() string {
+	if x != nil {
+		return x.ActorIp
 	}
 	return ""
 }
@@ -1507,13 +1509,13 @@ const file_documents_v1_documents_proto_rawDesc = "" +
 	"\voccurred_at\x18\x05 \x01(\tR\n" +
 	"occurredAt\x12\x19\n" +
 	"\bactor_id\x18\x06 \x01(\tR\aactorId\x12\x19\n" +
-	"\bactor_ip\x18\a \x01(\tR\aactorIp\x12\x19\n" +
-	"\btrace_id\x18\b \x01(\tR\atraceId\x12\x1f\n" +
-	"\ventity_type\x18\t \x01(\tR\n" +
+	"\btrace_id\x18\a \x01(\tR\atraceId\x12\x1f\n" +
+	"\ventity_type\x18\b \x01(\tR\n" +
 	"entityType\x12\x1b\n" +
-	"\tentity_id\x18\n" +
-	" \x01(\tR\bentityId\x12!\n" +
-	"\fpayload_json\x18\v \x01(\tR\vpayloadJson\"\x88\x01\n" +
+	"\tentity_id\x18\t \x01(\tR\bentityId\x12!\n" +
+	"\fpayload_json\x18\n" +
+	" \x01(\tR\vpayloadJson\x12\x19\n" +
+	"\bactor_ip\x18\v \x01(\tR\aactorIp\"\x88\x01\n" +
 	"\x11ListEventsRequest\x12\x1f\n" +
 	"\ventity_type\x18\x01 \x01(\tR\n" +
 	"entityType\x12\x1b\n" +

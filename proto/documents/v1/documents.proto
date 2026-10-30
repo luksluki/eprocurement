@@ -120,11 +120,13 @@ message Event {
   int32 version = 4;         // payload schema version, 1 today
   string occurred_at = 5;    // RFC 3339
   string actor_id = 6;       // user id, empty when unknown
-  string actor_ip = 7;       // acting client IP (#44 envelope delta), empty on pre-#44 rows
-  string trace_id = 8;       // propagated trace, empty when unknown
-  string entity_type = 9;    // aggregate kind, e.g. "requisition"
-  string entity_id = 10;
-  string payload_json = 11;  // raw JSON payload, never restructured
+  string trace_id = 7;       // propagated trace, empty when unknown
+  string entity_type = 8;    // aggregate kind, e.g. "requisition"
+  string entity_id = 9;
+  string payload_json = 10;  // raw JSON payload, never restructured
+  // actor_ip is appended at the NEXT free number (11): renumbering already
+  // released fields breaks wire compatibility for mixed-version deploys.
+  string actor_ip = 11;      // acting client IP (#44 envelope delta), empty on pre-#44 rows
 }
 
 message ListEventsRequest {

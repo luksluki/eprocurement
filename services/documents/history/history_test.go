@@ -228,6 +228,28 @@ func TestAuditCSV(t *testing.T) {
 	}
 }
 
+// TestAuditCSVNeutralizesActorIP pins the #104 export convention for the
+// one audit column sourced from client-controlled input (X-Forwarded-For
+// behind the trusted proxy): a forged formula-looking IP must not execute
+// when the admin opens the export in a spreadsheet.
+func TestAuditCSVNeutralizesActorIP(t *testing.T) {
+	ev := validEvent("e-1")
+	for _, tc := range []struct{ ip, wantField string }{
+		{"=1+1", "'=1+1"},
+		{"+SUM(A1:A9)", "'+SUM(A1:A9)"},
+		{"-1+1", "'-1+1"},
+		{"@x", "'@x"},
+		{"203.0.113.7", "203.0.113.7"}, // plain IP untouched
+	} {
+		entry := NewAuditEntry(ev, "approve", testBase.Add(time.Minute))
+		entry.ActorIP = tc.ip
+		got := string(AuditCSV([]AuditEntry{entry}))
+		if !strings.Contains(got, ","+tc.wantField+",") {
+			t.Fatalf("actor_ip %q not neutralized as %q in:\n%s", tc.ip, tc.wantField, got)
+		}
+	}
+}
+
 // TestCursorRoundTrip pins the cursor codec: the keyset position survives
 // an encode/decode pair at MongoDB's millisecond precision.
 func TestCursorRoundTrip(t *testing.T) {

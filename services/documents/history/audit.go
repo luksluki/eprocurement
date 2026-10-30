@@ -99,7 +99,9 @@ const MaxAuditExportRows = 10000
 
 // AuditCSV renders entries as RFC 4180 CSV with the pinned bounded columns
 // (CRLF line endings, UTF-8 — the #49 export convention). Timestamps are
-// RFC 3339 UTC.
+// RFC 3339 UTC. actor_ip is the one column sourced from client-controlled
+// input (X-Forwarded-For behind the trusted proxy), so formula-looking
+// values are neutralized with a leading quote — the #104 export convention.
 func AuditCSV(entries []AuditEntry) []byte {
 	var buf bytes.Buffer
 	w := csv.NewWriter(&buf)
@@ -111,7 +113,7 @@ func AuditCSV(entries []AuditEntry) []byte {
 			e.OccurredAt.UTC().Format(time.RFC3339),
 			e.RecordedAt.UTC().Format(time.RFC3339),
 			e.ActorID,
-			e.ActorIP,
+			neutralizeFormula(e.ActorIP),
 			e.Action,
 			e.EntityType,
 			e.EntityID,
@@ -120,4 +122,18 @@ func AuditCSV(entries []AuditEntry) []byte {
 	}
 	w.Flush()
 	return buf.Bytes()
+}
+
+// neutralizeFormula prefixes spreadsheet formula triggers (=, +, -, @) with
+// a single quote so a forged value renders as text, mirroring the worker
+// export hardening (#49, services/worker/export/csv.go).
+func neutralizeFormula(value string) string {
+	if value == "" {
+		return value
+	}
+	switch value[0] {
+	case '=', '+', '-', '@':
+		return "'" + value
+	}
+	return value
 }
