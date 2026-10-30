@@ -188,6 +188,23 @@ values derived from `.env`, `TEST_S3_ENDPOINT` scheme-stripped):
   asserts the decide rows carry `203.0.113.7` from
   `logger.WithActorIP(ctx)`; `TestTraceInterceptorPropagatesActorIP` pins
   trimmed-present / empty-absent.
+- **CI round 1 fix (PR #109):** the Go job failed on
+  `TestAppendTxRoundTrip` — "appended row not returned by Pending"
+  (services/procurement/outbox/outbox_test.go). Root cause: the new
+  assertion polled `Pending(…, 10)`, but Pending returns the oldest
+  unpublished rows of **every** tenant and the DB-backed suites run in
+  parallel against one CI database (dev-note 045's documented hazard), so
+  other suites' unmarked rows pushed this test's row out of the first 10.
+  It passed locally only because the local compose worker's publisher loop
+  was draining the outbox (marking rows published within 2 s) — CI has no
+  worker. Fix: poll with a generous limit (1000) and match the specific
+  id, the pending-test convention (pending_test.go's `pendingIDs` +
+  `contains`). Reproduced the CI condition faithfully — worker stopped, 15
+  one-hour-old unpublished rows seeded, verified they persist: the
+  committed limit-10 code FAILs, the limit-1000 fix PASSes; rows removed
+  and worker restarted afterwards. Full CI-shaped rerun
+  (`go test ./... -count=1`, parallel, worker stopped):
+  **zero failing packages**.
 - `go test ./services/gateway/server/ -count=1` — green, including
   `TestAuditListRoute` (envelope with actor_ip, filters trimmed,
   x-tenant-id metadata), `TestAuditRouteRequiresPermission` (buyer 403

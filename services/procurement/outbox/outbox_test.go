@@ -133,8 +133,13 @@ func TestAppendTxRoundTrip(t *testing.T) {
 	}
 
 	// The publisher's read side carries actor_ip out with the row (#44) so
-	// the §14.5 envelope stays column-assembled, no payload parsing.
-	pending, err := Pending(ctx, db, 10)
+	// the §14.5 envelope stays column-assembled, no payload parsing. The
+	// limit is generous on purpose: Pending returns every tenant's oldest
+	// unpublished rows and the DB-backed suites run in parallel against one
+	// test database (dev-note 045), so other suites' unmarked rows can sit
+	// ahead of this one — the assertion matches the specific id, never a
+	// position or a global count.
+	pending, err := Pending(ctx, db, 1000)
 	if err != nil {
 		t.Fatalf("pending: %v", err)
 	}
