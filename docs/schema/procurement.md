@@ -1047,7 +1047,7 @@ missing (404 `requisition_not_found`).
 - #38: PO read endpoints + the PO/GRN UI (done — `ListPurchaseOrders`/`GetPurchaseOrder` at `po:read` behind `GET /api/v1/purchase-orders` / `/{id}`, the seven-status `po_status_invalid`/`po_page_invalid` filter contract, 0011's `purchase_orders_tenant_status_idx`, and the `/app/purchase-orders` list/detail screens with issue/acknowledge actions and the goods-receipt form). See the [PO list](#purchase-order-list--filters-pagination-query-plans-38) section below.
 - #39: invoice model and create API (done — 0009 tables, vendor invoice numbers unique per (tenant, vendor), vendor/currency derived server-side from the locked PO, server-recomputed totals, the cumulative strict `inv_over_bill: …` guard with the dedicated REST renderer, `pending|matched|discrepancy` status CHECK with `match_result` reserved for #40, attachment entity + routes + embedded detail read, no outbox row on create). See the [Invoices](#invoices-39) section.
 - #40: three-way match with tolerance (done — 0010 `match_settings` (defaults 0%/0%), the pure integer engine with the cumulative upper-side qty guard and the symmetric price guard, the pinned `match_result` shape with `inv_over_bill_qty`/`inv_over_bill_price` reason lines, the transactional Match under the PO row lock with the `matched` re-run guard and exactly one `invoice.matched`/`invoice.discrepancy` outbox row per run, gRPC `MatchInvoice`/`GetMatchSettings`/`ReplaceMatchSettings`, REST `POST /api/v1/invoices/{id}/match` + admin-only `GET|PUT /api/v1/match-settings` behind `match:configure`, no attachment gate). See the [Three-way match](#three-way-match-40) section.
-- #41: the invoice list endpoint, the `/app/invoices` UI, and the demo-flow enforcement of 'attachment required' — the remaining follow-ups of this model.
+- #41: invoice list endpoint + invoice UI with match result (done — `ListInvoices` at `invoice:read` behind `GET /api/v1/invoices` with the three-status `inv_status_invalid`/`inv_page_invalid` filter contract and header-only rows, 0012's `invoices_tenant_status_idx`, the `/app/invoices` list/detail screens with the MatchResultPanel rendering the #40 verdict + per-line diff, the client-side hard attachment gate on the Match button, the `/app/invoices/new?po=` create page, and the finance attachment upload — the demo flow's 'attachment required' obligation now lives in the UI). See the [Invoice list](#invoice-list--filters-pagination-query-plans-41) section below.
 - Approvals read endpoints/queue #32-34 (M2–M3).
 - The timeline/event read path (#42/#43/#47, `GET /api/v1/events`) consumes the outbox's `entity_type`/`entity_id` columns; a tenant+entity index arrives with whichever issue first queries them.
 
@@ -1288,3 +1288,104 @@ received/requested/ordered numbers appear in the message. The BFF proxies
 the access token server-side, mirror the goods-receipt shape validation, and
 forward gateway 4xx bodies verbatim. The server still enforces every gate —
 the helper only decides rendering.
+
+## Invoice list — filters, pagination, query plans (#41)
+
+`ListInvoices` (`invoice:read` — every role per docs/rbac.md, REST
+`GET /api/v1/invoices?q=&status=&page=&page_size=`) returns one page of
+**header-only** rows (items always empty AND `match_result_json` always
+empty — the detail read owns both) ordered by `created_at DESC, id DESC`
+(newest invoice first with the id as the deterministic tie-breaker — vendor
+numbers are free-form, so unlike the PO/requisition lists number order is
+not creation order) plus the total number of matching rows:
+
+- `q` — invoice **number prefix**, case-insensitive (`upper(number) LIKE
+  upper(q) || '%'`; vendor numbers are the issuer's convention, mixed case
+  is normal). LIKE wildcards in the input are escaped, so they match
+  literally.
+- `status` — `pending` | `matched` | `discrepancy` or empty (all); combines
+  with `q`. Unknown values → 400 `inv_status_invalid`, absurd pages → 400
+  `inv_page_invalid` (the #38 `po_status_invalid`/`po_page_invalid` twins).
+- `page` (1-based, default 1) / `page_size` (default 20, max 100). Responses
+  echo the normalized values; `total` counts matches across all pages. A
+  page past the end is empty but still reports the true `total` (the
+  explicit COUNT fallback).
+
+The query shape is #32's adopted verbatim (the #38 PO-list twin): one
+statement, page subquery (`ORDER BY created_at DESC, id DESC
+LIMIT/OFFSET`) + exact COUNT as an uncorrelated scalar subquery (executor
+InitPlan) + the past-the-end COUNT fallback. Cross-tenant rows are
+invisible through RLS; a non-UUID id on the detail read fails fast with
+`inv_id_invalid`.
+
+### Index (migration 0012)
+
+`invoices_tenant_status_idx (tenant_id, status)` — direct parity with
+`requisitions_tenant_status_idx` (0003) and
+`purchase_orders_tenant_status_idx` (0011): carries the status-filter
+shape's selectivity once a tenant's invoices reach list scale. There is no
+superseded index to drop (0009 created none on this pair); the prefix shapes
+keep tenant-leading scans under the #27 RLS-bypass-arm trade-off.
+
+### Measured plan (the #41 EXPLAIN evidence; the 100k fixture + p95 budget
+is deferred to #56 per the maintainer decision 2026-10-29)
+
+60k invoices seeded in one tenant (10% `matched`), `VACUUM (ANALYZE)` run,
+then the exact list statement EXPLAINed under the real RLS context
+(`SET ROLE eproc_app` + `app.tenant_id`). The status-filter shape — the
+shape 0012 exists for — runs both arms on the new index:
+
+- **Count arm (InitPlan)**: `Index Only Scan using
+  invoices_tenant_status_idx`, `Index Cond: (status = 'matched')`,
+  `Heap Fetches: 0`, 50 buffers, ~2.4 ms.
+- **Page arm**: `Bitmap Index Scan on invoices_tenant_status_idx` (`Index
+  Cond: (status = 'matched')`, 6k rows) → Bitmap Heap Scan → top-N heapsort
+  on `(created_at DESC, id DESC)`, ~8.5 ms total execution.
+
+The unfiltered count arm runs as an `Index Only Scan` over the same index
+(60k entries, `Heap Fetches: 0`, ~22 ms) — the planner prefers the 0012
+index even without the status predicate because `tenant_id` leads it.
+
+## Invoice UI with match result (#41)
+
+The PRD §11 `/app/invoices` screens consuming the read pair (the #38
+PO-list pattern): the list is a server component
+(DataTable/Badge/PageHeader/TablePagination from `@eprocurement/ui`) whose
+filters live in the URL and submit through a plain GET `<form>` — no client
+JavaScript required; the number column links to the detail; status badges
+cover the three invoice statuses (pending neutral, matched success,
+discrepancy danger). The detail page renders the header with the link to
+the billed PO, the lines table (po_item_id, qty, unit price, line total),
+the attachments panel, and the **MatchResultPanel** — the verdict plus one
+row per invoiced PO line with the quantities the #40 engine compared
+(ordered / received / invoiced + Δ = invoiced − received), the two unit
+prices (PO vs invoice + Δ, money-formatted), breach badges, and the pinned
+reason line localized with its parsed numbers (`inv_over_bill_qty` /
+`inv_over_bill_price`) — the mismatch cause on one screen (the issue's AC).
+
+- **Match button (the hard attachment gate)**: renders only for
+  finance/admin on a pending/discrepancy invoice (the pure
+  `lib/invoice-eligibility` helper mirroring the #40 re-run guard) and
+  stays **disabled until the invoice has an attachment in `ready` state** —
+  client-side only per the maintainer decision 2026-10-29 (the server never
+  checks, #40's decision); a lost race surfaces as the mapped 409
+  `inv_already_matched`.
+- **Attachments panel**: the embedded list (filename / size / status /
+  download through the BFF-minted presigned URL) plus the finance upload —
+  the #33 flow verbatim (declare through the BFF → PUT straight to the
+  MinIO presigned URL → complete verifies server-side); a completed upload
+  refreshes the panel, and its `ready` state unlocks the Match button.
+- **Create invoice**: `/app/invoices/new?po=<id>`, linked from the #38 PO
+  detail for finance on an invoicable PO (acknowledged /
+  partially_received / received — the #39 gate). The form prefills each
+  unit price with the PO price, validates client-side against the #39
+  domain rules (number non-empty after trimming ≤ 100, qty a whole number
+  > 0, price ≥ 0, ≥ 1 filled line), redirects to the new invoice's detail
+  on success, parses the pinned 409 `inv_over_bill` detail line so the
+  exact amounts appear inline, and runs the refresh dance on 401.
+
+The BFF proxies (`POST /api/invoices`, `POST /api/invoices/[id]/match`,
+`POST /api/invoices/[id]/attachments`,
+`…/[attachmentId]/{complete,download}`) keep the access token server-side,
+mirror the create shape validation, and forward gateway 4xx bodies
+verbatim.

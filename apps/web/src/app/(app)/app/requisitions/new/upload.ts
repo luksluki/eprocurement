@@ -103,7 +103,10 @@ export function createUploadApi(requisitionId: string): UploadApi {
   };
 }
 
-async function parseApiResult<T>(res: Response): Promise<ApiResult<T>> {
+// parseApiResult decodes a BFF response into the ApiResult shape — exported
+// since #41's invoice attachment panel builds its UploadApi on the same
+// contract.
+export async function parseApiResult<T>(res: Response): Promise<ApiResult<T>> {
   try {
     if (!res.ok) {
       const parsed = (await res.json().catch(() => null)) as { error?: string; code?: string } | null;

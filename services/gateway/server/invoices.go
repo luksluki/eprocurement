@@ -1,6 +1,7 @@
 package server
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -15,15 +16,17 @@ import (
 // registerInvoiceRoutes wires /api/v1/invoices: Bearer auth, RBAC (writes:
 // invoice:write — finance/admin at both layers; reads: invoice:read —
 // everyone in the tenant), and the verified claims propagated to
-// procurement as gRPC metadata. When documents is present, GET /:id embeds
-// attachment metadata and the attachment routes are registered (maintainer
-// decision 2026-10-27: attachment support ships with #39; the "required"
-// obligation is the demo flow's, #41/#40 — the create API never demands
-// one).
+// procurement as gRPC metadata. #39 landed create/detail + the attachment
+// routes, #40 the match action, and #41 the list read. When documents is
+// present, GET /:id embeds attachment metadata and the attachment routes
+// are registered (maintainer decision 2026-10-27: attachment support ships
+// with #39; the "required" obligation is the demo flow's, #41/#40 — the
+// create API never demands one).
 func registerInvoiceRoutes(app *fiber.App, verifier *token.Verifier, client ProcurementClient, documents DocumentsClient) {
 	invoices := app.Group("/api/v1/invoices", bearerAuth(verifier))
 
 	invoices.Post("/", RequirePermission(rbac.InvoiceWrite), createInvoice(client))
+	invoices.Get("/", RequirePermission(rbac.InvoiceRead), listInvoices(client))
 	invoices.Get("/:id", RequirePermission(rbac.InvoiceRead), getInvoice(client, documents))
 	invoices.Post("/:id/match", RequirePermission(rbac.InvoiceWrite), matchInvoice(client))
 	if documents != nil {
@@ -77,6 +80,41 @@ func createInvoice(client ProcurementClient) fiber.Handler {
 			return invoiceError(c, err)
 		}
 		return c.Status(fiber.StatusCreated).JSON(invoiceJSON(inv))
+	}
+}
+
+// listInvoices serves GET /api/v1/invoices (#41, the #38 PO-list twin):
+// query params q (number prefix), status (pending|matched|discrepancy), page,
+// page_size — normalized and validated in procurement. The response envelope
+// is {invoices, total, page, page_size}; rows are header-only (items empty,
+// match_result_json empty — the detail read owns both).
+func listInvoices(client ProcurementClient) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		claims, ok := claimsOf(c)
+		if !ok {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "missing bearer token"})
+		}
+		page, _ := strconv.Atoi(c.Query("page"))
+		pageSize, _ := strconv.Atoi(c.Query("page_size"))
+		resp, err := client.ListInvoices(forwardContext(c, claims), &procurementv1.ListInvoicesRequest{
+			Query:    strings.TrimSpace(c.Query("q")),
+			Status:   strings.TrimSpace(c.Query("status")),
+			Page:     int32(page),
+			PageSize: int32(pageSize),
+		})
+		if err != nil {
+			return invoiceError(c, err)
+		}
+		out := make([]fiber.Map, 0, len(resp.GetInvoices()))
+		for _, inv := range resp.GetInvoices() {
+			out = append(out, invoiceJSON(inv))
+		}
+		return c.JSON(fiber.Map{
+			"invoices":  out,
+			"total":     resp.GetTotal(),
+			"page":      resp.GetPage(),
+			"page_size": resp.GetPageSize(),
+		})
 	}
 }
 
@@ -171,6 +209,8 @@ var invoiceMessages = map[string]string{
 	"inv_number_duplicate":   "this vendor already has an invoice with this number",
 	"inv_not_found":          "invoice not found",
 	"inv_already_matched":    "this invoice is already matched; matching is final",
+	"inv_status_invalid":     "status must be pending, matched, or discrepancy",
+	"inv_page_invalid":       "page is out of range",
 	"po_id_invalid":          "purchase order id must be a UUID",
 	"po_not_found":           "purchase order not found",
 	"po_illegal_transition":  "only acknowledged, partially received, or received purchase orders can be invoiced",

@@ -39,8 +39,9 @@ const ServiceName = "procurement"
 // cumulative and status guards are domain checks inside the posting
 // transaction. Creating
 // an invoice is finance/admin (invoice:write — the money-records gate) and
-// the detail read is the broad invoice:read; the over-billing, duplicate,
-// and PO-status guards are domain checks inside the creation transaction.
+// the reads (#39 detail, #41 list) are the broad invoice:read; the
+// over-billing, duplicate, and PO-status guards are domain checks inside the
+// creation transaction.
 // Matching an invoice (#40) is finance/admin as well — invoice:write, the
 // same money-records gate as creating one (the finance reviewer persona,
 // PRD §5; no new permission for the match action). Configuring match
@@ -70,6 +71,7 @@ var methodPermissions = rbac.MethodPermissions{
 	"/procurement.v1.Procurement/PostGoodsReceipt":         rbac.GRNPost,
 	"/procurement.v1.Procurement/CreateInvoice":            rbac.InvoiceWrite,
 	"/procurement.v1.Procurement/GetInvoice":               rbac.InvoiceRead,
+	"/procurement.v1.Procurement/ListInvoices":             rbac.InvoiceRead,
 	"/procurement.v1.Procurement/MatchInvoice":             rbac.InvoiceWrite,
 	"/procurement.v1.Procurement/GetMatchSettings":         rbac.MatchConfigure,
 	"/procurement.v1.Procurement/ReplaceMatchSettings":     rbac.MatchConfigure,

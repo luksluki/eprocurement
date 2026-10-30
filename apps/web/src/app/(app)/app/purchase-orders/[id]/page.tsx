@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { getDictionary, getLocale } from "@/i18n/server";
 import { getPurchaseOrder } from "@/lib/gateway";
+import { canCreateInvoice } from "@/lib/invoice-eligibility";
 import { canAcknowledgePO, canIssuePO, canPostGoodsReceipt } from "@/lib/po-eligibility";
 import { requireSession } from "@/lib/session";
 import GoodsReceiptForm from "./GoodsReceiptForm";
@@ -75,6 +76,10 @@ export default async function PurchaseOrderDetailPage({ params }: { params: Prom
       ? "acknowledge"
       : null;
   const receiptable = canPostGoodsReceipt(roles, po.status);
+  // The invoice flow's entry point (#41, maintainer decision 2026-10-29): a
+  // Create-invoice link for finance on an invoicable PO (the #39 status
+  // set) — the link targets the dedicated /app/invoices/new?po= page.
+  const invoiceable = canCreateInvoice(roles, po.status);
 
   return (
     <section aria-labelledby="purchase-order-detail-title">
@@ -88,8 +93,19 @@ export default async function PurchaseOrderDetailPage({ params }: { params: Prom
             <span data-testid="detail-status">{badge(po.status)}</span>
           </h1>
         </div>
-        <div data-testid="po-actions-slot">
-          <POActions poId={po.id} kind={action} copy={copy.actions} />
+        <div className="flex flex-col items-end gap-2">
+          <div data-testid="po-actions-slot">
+            <POActions poId={po.id} kind={action} copy={copy.actions} />
+          </div>
+          {invoiceable ? (
+            <Link
+              href={`/app/invoices/new?po=${po.id}`}
+              className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+              data-testid="po-create-invoice-link"
+            >
+              {copy.actions.createInvoice}
+            </Link>
+          ) : null}
         </div>
       </div>
 

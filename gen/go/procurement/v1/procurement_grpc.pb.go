@@ -42,6 +42,7 @@ const (
 	Procurement_PostGoodsReceipt_FullMethodName         = "/procurement.v1.Procurement/PostGoodsReceipt"
 	Procurement_CreateInvoice_FullMethodName            = "/procurement.v1.Procurement/CreateInvoice"
 	Procurement_GetInvoice_FullMethodName               = "/procurement.v1.Procurement/GetInvoice"
+	Procurement_ListInvoices_FullMethodName             = "/procurement.v1.Procurement/ListInvoices"
 	Procurement_MatchInvoice_FullMethodName             = "/procurement.v1.Procurement/MatchInvoice"
 	Procurement_GetMatchSettings_FullMethodName         = "/procurement.v1.Procurement/GetMatchSettings"
 	Procurement_ReplaceMatchSettings_FullMethodName     = "/procurement.v1.Procurement/ReplaceMatchSettings"
@@ -200,6 +201,15 @@ type ProcurementClient interface {
 	// match_result_json carries the match's explanation once it ran (empty
 	// while pending).
 	GetInvoice(ctx context.Context, in *GetInvoiceRequest, opts ...grpc.CallOption) (*Invoice, error)
+	// ListInvoices returns one page of the caller tenant's invoices ordered by
+	// created_at descending (newest first — vendor numbers are free-form, so
+	// creation order is the list order; the id breaks ties deterministically).
+	// query matches a number prefix (case-insensitive — vendor numbers are the
+	// issuer's convention); status is pending | matched | discrepancy or empty;
+	// the two combine. total is the number of matching rows across all pages.
+	// Rows are header-only: items are always empty and match_result_json is
+	// always empty here — the detail read owns both.
+	ListInvoices(ctx context.Context, in *ListInvoicesRequest, opts ...grpc.CallOption) (*ListInvoicesResponse, error)
 	// MatchInvoice applies the three-way match (#40, FR-08) to one invoice of
 	// the caller's tenant: every line's cumulative invoiced quantity (across
 	// ALL the PO's invoices, this one included) is checked against the PO
@@ -461,6 +471,16 @@ func (c *procurementClient) GetInvoice(ctx context.Context, in *GetInvoiceReques
 	return out, nil
 }
 
+func (c *procurementClient) ListInvoices(ctx context.Context, in *ListInvoicesRequest, opts ...grpc.CallOption) (*ListInvoicesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListInvoicesResponse)
+	err := c.cc.Invoke(ctx, Procurement_ListInvoices_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *procurementClient) MatchInvoice(ctx context.Context, in *MatchInvoiceRequest, opts ...grpc.CallOption) (*Invoice, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Invoice)
@@ -644,6 +664,15 @@ type ProcurementServer interface {
 	// match_result_json carries the match's explanation once it ran (empty
 	// while pending).
 	GetInvoice(context.Context, *GetInvoiceRequest) (*Invoice, error)
+	// ListInvoices returns one page of the caller tenant's invoices ordered by
+	// created_at descending (newest first — vendor numbers are free-form, so
+	// creation order is the list order; the id breaks ties deterministically).
+	// query matches a number prefix (case-insensitive — vendor numbers are the
+	// issuer's convention); status is pending | matched | discrepancy or empty;
+	// the two combine. total is the number of matching rows across all pages.
+	// Rows are header-only: items are always empty and match_result_json is
+	// always empty here — the detail read owns both.
+	ListInvoices(context.Context, *ListInvoicesRequest) (*ListInvoicesResponse, error)
 	// MatchInvoice applies the three-way match (#40, FR-08) to one invoice of
 	// the caller's tenant: every line's cumulative invoiced quantity (across
 	// ALL the PO's invoices, this one included) is checked against the PO
@@ -743,6 +772,9 @@ func (UnimplementedProcurementServer) CreateInvoice(context.Context, *CreateInvo
 }
 func (UnimplementedProcurementServer) GetInvoice(context.Context, *GetInvoiceRequest) (*Invoice, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetInvoice not implemented")
+}
+func (UnimplementedProcurementServer) ListInvoices(context.Context, *ListInvoicesRequest) (*ListInvoicesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListInvoices not implemented")
 }
 func (UnimplementedProcurementServer) MatchInvoice(context.Context, *MatchInvoiceRequest) (*Invoice, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method MatchInvoice not implemented")
@@ -1188,6 +1220,24 @@ func _Procurement_GetInvoice_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Procurement_ListInvoices_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListInvoicesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProcurementServer).ListInvoices(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Procurement_ListInvoices_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProcurementServer).ListInvoices(ctx, req.(*ListInvoicesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Procurement_MatchInvoice_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(MatchInvoiceRequest)
 	if err := dec(in); err != nil {
@@ -1340,6 +1390,10 @@ var Procurement_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetInvoice",
 			Handler:    _Procurement_GetInvoice_Handler,
+		},
+		{
+			MethodName: "ListInvoices",
+			Handler:    _Procurement_ListInvoices_Handler,
 		},
 		{
 			MethodName: "MatchInvoice",

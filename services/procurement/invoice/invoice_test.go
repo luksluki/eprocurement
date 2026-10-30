@@ -111,3 +111,49 @@ func TestMatchGuard(t *testing.T) {
 		t.Fatalf("sentinel = %q, want inv_already_matched", ErrAlreadyMatched.Error())
 	}
 }
+
+// The #41 list-filter normalization and validation, table-driven: the three
+// statuses pass (plus the empty filter), page/page_size clamp into range with
+// the absurd-page rejection, and the query is trimmed + uppercased with LIKE
+// wildcards escaped — the #38 purchaseorder.ValidateList twin.
+func TestValidateList(t *testing.T) {
+	for name, tc := range map[string]struct {
+		in      ListFilter
+		want    ListFilter
+		wantErr error
+	}{
+		"defaults": {ListFilter{}, ListFilter{Page: 1, PageSize: DefaultPageSize, Query: ""}, nil},
+		"all three statuses": {ListFilter{Status: StatusPending}, ListFilter{Status: StatusPending, Page: 1, PageSize: DefaultPageSize}, nil},
+		"matched":            {ListFilter{Status: StatusMatched}, ListFilter{Status: StatusMatched, Page: 1, PageSize: DefaultPageSize}, nil},
+		"discrepancy":        {ListFilter{Status: StatusDiscrepancy}, ListFilter{Status: StatusDiscrepancy, Page: 1, PageSize: DefaultPageSize}, nil},
+		"status trims": {ListFilter{Status: " pending "},
+			ListFilter{Status: StatusPending, Page: 1, PageSize: DefaultPageSize}, nil},
+		"unknown status":  {ListFilter{Status: "paused"}, ListFilter{}, ErrStatusInvalid},
+		"po status leaks": {ListFilter{Status: "draft"}, ListFilter{}, ErrStatusInvalid},
+		"page below one": {ListFilter{Page: -3, PageSize: 10},
+			ListFilter{Page: 1, PageSize: 10}, nil},
+		"page over max": {ListFilter{Page: MaxPage + 1}, ListFilter{Page: MaxPage + 1}, ErrPageInvalid},
+		"page at max": {ListFilter{Page: MaxPage, PageSize: 10},
+			ListFilter{Page: MaxPage, PageSize: 10}, nil},
+		"page size below one": {ListFilter{PageSize: 0},
+			ListFilter{Page: 1, PageSize: DefaultPageSize}, nil},
+		"page size over max": {ListFilter{PageSize: 999},
+			ListFilter{Page: 1, PageSize: MaxPageSize}, nil},
+		"query trims and uppercases": {ListFilter{Query: "  inv/2026.001  "},
+			ListFilter{Page: 1, PageSize: DefaultPageSize, Query: "INV/2026.001"}, nil},
+		"query escapes wildcards": {ListFilter{Query: `50%_off\`},
+			ListFilter{Page: 1, PageSize: DefaultPageSize, Query: `50\%\_OFF\`}, nil},
+	} {
+		got, err := ValidateList(tc.in)
+		if !errors.Is(err, tc.wantErr) {
+			t.Errorf("%s: ValidateList(%+v) error = %v, want %v", name, tc.in, err, tc.wantErr)
+			continue
+		}
+		if tc.wantErr != nil {
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("%s: ValidateList(%+v) = %+v, want %+v", name, tc.in, got, tc.want)
+		}
+	}
+}

@@ -238,6 +238,9 @@ export type Dictionary = {
       genericError: string;
       sessionExpired: string;
       errorMessages: Record<string, string>;
+      // The invoice flow's entry point (#41, maintainer decision
+      // 2026-10-29): finance on an invoicable PO.
+      createInvoice: string;
     };
     receipt: {
       heading: string;
@@ -258,6 +261,115 @@ export type Dictionary = {
       genericError: string;
       errorMessages: Record<string, string>;
       overReceipt: string;
+    };
+  };
+  invoices: {
+    title: string;
+    description: string;
+    caption: string;
+    unavailable: string;
+    empty: string;
+    emptyHint: string;
+    columns: { number: string; status: string; vendor: string; currency: string; total: string; created: string };
+    filters: { numberLabel: string; numberPlaceholder: string; statusLabel: string; statusAll: string; pageSizeLabel: string; apply: string };
+    pagination: {
+      nav: string;
+      previous: string;
+      next: string;
+      summary: (range: { from: number; to: number; total: number; page: number; pageCount: number }) => string;
+    };
+  };
+  invoiceDetail: {
+    backToList: string;
+    notFound: string;
+    loadFailed: string;
+    fields: {
+      vendor: string;
+      currency: string;
+      total: string;
+      po: string;
+      poLink: string;
+      created: string;
+    };
+    items: {
+      heading: string;
+      poItem: string;
+      qty: string;
+      unitPrice: string;
+      lineTotal: string;
+    };
+    actions: {
+      match: string;
+      submitting: string;
+      gated: string;
+      genericError: string;
+      sessionExpired: string;
+      errorMessages: Record<string, string>;
+    };
+    attachments: {
+      heading: string;
+      empty: string;
+      columns: { filename: string; size: string; status: string; download: string };
+      downloadFailed: string;
+      uploadLabel: string;
+      uploading: string;
+    };
+    match: {
+      heading: string;
+      verdictMatched: string;
+      verdictDiscrepancy: string;
+      pending: string;
+      invalid: string;
+      columns: {
+        poItem: string;
+        qtyOrdered: string;
+        qtyReceived: string;
+        qtyInvoiced: string;
+        qtyDelta: string;
+        poPrice: string;
+        invoicePrice: string;
+        priceDelta: string;
+        flags: string;
+        reason: string;
+      };
+      qtyBreach: string;
+      priceBreach: string;
+      ok: string;
+      // Template strings with {placeholders} — interpolated with the numbers
+      // parsed from the pinned reason lines.
+      reasonQty: string;
+      reasonPrice: string;
+    };
+  };
+  invoiceForm: {
+    title: string;
+    back: string;
+    missingPO: string;
+    poNotFound: string;
+    loadFailed: string;
+    notAllowed: string;
+    form: {
+      heading: string;
+      numberLabel: string;
+      numberPlaceholder: string;
+      itemsHeading: string;
+      itemsHint: string;
+      itemsLine: string;
+      itemsQty: string;
+      itemsUnitPrice: string;
+      itemsLineTotal: string;
+      submit: string;
+      submitting: string;
+      numberInvalid: string;
+      qtyInvalid: string;
+      priceInvalid: string;
+      minOneLine: string;
+      genericError: string;
+      sessionExpired: string;
+      errorMessages: Record<string, string>;
+      // Template with {poNumber}/{invoiced}/{requested}/{total} — the parsed
+      // over-bill detail line, amounts pre-formatted as money.
+      overBill: string;
     };
   };
   pages: {
@@ -547,6 +659,7 @@ const id: Dictionary = {
         po_id_invalid: "Id pesanan pembelian harus UUID.",
         gateway_unavailable: "Gateway tidak terjangkau.",
       },
+      createInvoice: "Buat faktur",
     },
     receipt: {
       heading: "Catat penerimaan barang (GRN)",
@@ -576,6 +689,153 @@ const id: Dictionary = {
       },
       overReceipt:
         "Kelebihan penerimaan: baris ini sudah diterima {received} dan diminta {requested} lagi, padahal dipesan {ordered}.",
+    },
+  },
+  invoices: {
+    title: "Faktur",
+    description:
+      "Faktur vendor tenant Anda, terbaru dulu. Filter dan paginasi hidup di URL dan disajikan satu halaman per permintaan.",
+    caption: "Satu halaman faktur",
+    unavailable: "Daftar faktur tidak tersedia saat ini.",
+    empty: "Belum ada faktur.",
+    emptyHint:
+      "Faktur dibuat dari PO yang telah dikonfirmasi (tautan ‘Buat faktur’ di detail PO sebagai finance).",
+    columns: {
+      number: "Nomor",
+      status: "Status",
+      vendor: "Pemasok",
+      currency: "Mata uang",
+      total: "Total",
+      created: "Dibuat",
+    },
+    filters: {
+      numberLabel: "Cari nomor",
+      numberPlaceholder: "INV/2026/0001",
+      statusLabel: "Status",
+      statusAll: "Semua status",
+      pageSizeLabel: "Ukuran halaman",
+      apply: "Terapkan",
+    },
+    pagination: {
+      nav: "Navigasi halaman faktur",
+      previous: "Sebelumnya",
+      next: "Berikutnya",
+      summary: ({ from, to, total }) => `Menampilkan ${from}–${to} dari ${total.toLocaleString("id-ID")} faktur`,
+    },
+  },
+  invoiceDetail: {
+    backToList: "Kembali ke daftar faktur",
+    notFound: "Faktur tidak ditemukan (atau milik tenant lain).",
+    loadFailed: "Gagal memuat faktur.",
+    fields: {
+      vendor: "Pemasok",
+      currency: "Mata uang",
+      total: "Total",
+      po: "Pesanan pembelian",
+      poLink: "Buka pesanan pembelian",
+      created: "Dibuat",
+    },
+    items: {
+      heading: "Baris faktur",
+      poItem: "Baris PO",
+      qty: "Jumlah",
+      unitPrice: "Harga satuan",
+      lineTotal: "Total baris",
+    },
+    actions: {
+      match: "Jalankan pencocokan",
+      submitting: "Mencocokkan…",
+      gated: "Unggah dan selesaikan lampiran faktur vendor (status ready) sebelum mencocokkan.",
+      genericError: "Gagal menjalankan pencocokan — coba lagi.",
+      sessionExpired: "Sesi berakhir — mengalihkan ke halaman masuk…",
+      errorMessages: {
+        inv_already_matched: "Faktur ini sudah dicocokkan; hasil pencocokan bersifat final.",
+        inv_not_found: "Faktur tidak ditemukan.",
+        inv_id_invalid: "Id faktur harus UUID.",
+        gateway_unavailable: "Gateway tidak terjangkau.",
+      },
+    },
+    attachments: {
+      heading: "Lampiran",
+      empty: "Belum ada lampiran.",
+      columns: {
+        filename: "Nama file",
+        size: "Ukuran",
+        status: "Status",
+        download: "Unduh",
+      },
+      downloadFailed: "Gagal mengambil tautan unduhan — coba lagi.",
+      uploadLabel: "Unggah dokumen faktur vendor (pdf, png, jpeg, webp, docx, xlsx)",
+      uploading: "Mengunggah…",
+    },
+    match: {
+      heading: "Hasil pencocokan 3-arah",
+      verdictMatched: "Cocok",
+      verdictDiscrepancy: "Ada selisih",
+      pending: "Belum dijalankan — jalankan pencocokan untuk mengisi hasilnya.",
+      invalid: "Hasil pencocokan tidak dapat dibaca.",
+      columns: {
+        poItem: "Baris PO",
+        qtyOrdered: "Dipesan",
+        qtyReceived: "Diterima",
+        qtyInvoiced: "Ditagih",
+        qtyDelta: "Δ jumlah",
+        poPrice: "Harga PO",
+        invoicePrice: "Harga faktur",
+        priceDelta: "Δ harga",
+        flags: "Penanda",
+        reason: "Alasan",
+      },
+      qtyBreach: "jumlah",
+      priceBreach: "harga",
+      ok: "sesuai",
+      reasonQty: "Kelebihan tagihan jumlah: sudah ditagih {invoiced} padahal diterima {received} (toleransi {pct}%).",
+      reasonPrice:
+        "Selisih harga: harga PO {poPrice} tetapi faktur menagih {invoicePrice} (toleransi {pct}%).",
+    },
+  },
+  invoiceForm: {
+    title: "Faktur baru",
+    back: "Kembali",
+    missingPO: "Parameter po wajib diisi — buka halaman ini dari detail pesanan pembelian.",
+    poNotFound: "Pesanan pembelian tidak ditemukan (atau milik tenant lain).",
+    loadFailed: "Gagal memuat pesanan pembelian.",
+    notAllowed:
+      "Hanya finance/admin yang dapat membuat faktur, dan hanya pada PO berstatus acknowledged, partially_received, atau received.",
+    form: {
+      heading: "Faktur untuk PO",
+      numberLabel: "Nomor faktur vendor (1–100 karakter)",
+      numberPlaceholder: "INV/2026/0001",
+      itemsHeading: "Baris yang ditagih",
+      itemsHint:
+        "Isi jumlah per baris PO yang ditagih faktur ini — harga sudah diisi harga PO dan boleh disesuaikan. Baris tanpa jumlah dilewati.",
+      itemsLine: "Baris PO",
+      itemsQty: "Jumlah",
+      itemsUnitPrice: "Harga satuan (sen)",
+      itemsLineTotal: "Total baris",
+      submit: "Simpan faktur",
+      submitting: "Menyimpan…",
+      numberInvalid: "Nomor faktur wajib 1–100 karakter setelah dipangkas.",
+      qtyInvalid: "Jumlah harus bilangan bulat lebih dari 0.",
+      priceInvalid: "Harga satuan harus 0 atau lebih.",
+      minOneLine: "Isi minimal satu baris dengan jumlah lebih dari 0.",
+      genericError: "Gagal menyimpan faktur — coba lagi.",
+      sessionExpired: "Sesi berakhir — mengalihkan ke halaman masuk…",
+      errorMessages: {
+        inv_number_invalid: "Nomor faktur wajib 1–100 karakter setelah dipangkas.",
+        inv_items_empty: "Faktur memerlukan minimal satu baris.",
+        inv_qty_invalid: "Setiap jumlah yang ditagih harus lebih dari 0.",
+        inv_unit_price_invalid: "Setiap harga satuan harus 0 atau lebih.",
+        inv_po_item_duplicate: "Satu baris PO hanya boleh muncul sekali per faktur.",
+        inv_po_item_unknown: "po_item_id bukan baris dari pesanan pembelian ini.",
+        inv_number_duplicate: "Pemasok ini sudah punya faktur dengan nomor tersebut.",
+        po_id_invalid: "Id pesanan pembelian harus UUID.",
+        po_not_found: "Pesanan pembelian tidak ditemukan.",
+        po_illegal_transition: "Hanya PO acknowledged, partially_received, atau received yang dapat ditagih.",
+        gateway_unavailable: "Gateway tidak terjangkau.",
+      },
+      overBill:
+        "Melebihi total PO {poNumber}: sudah ditagih {invoiced} dan faktur ini menagih {requested} lagi, padahal totalnya {total}.",
     },
   },
   pages: {
@@ -893,6 +1153,7 @@ const en: Dictionary = {
         po_id_invalid: "Purchase order id must be a UUID.",
         gateway_unavailable: "The gateway is unreachable.",
       },
+      createInvoice: "Create invoice",
     },
     receipt: {
       heading: "Record a goods receipt (GRN)",
@@ -922,6 +1183,152 @@ const en: Dictionary = {
       },
       overReceipt:
         "Over-receipt: this line has already received {received} and requests {requested} more, but only {ordered} were ordered.",
+    },
+  },
+  invoices: {
+    title: "Invoices",
+    description:
+      "Your tenant's vendor invoices, newest first. Filters and pagination live in the URL and are served one page at a time.",
+    caption: "One page of invoices",
+    unavailable: "The invoice list is unavailable right now.",
+    empty: "No invoices yet.",
+    emptyHint:
+      "Invoices are created from confirmed purchase orders (the ‘Create invoice’ link on a PO detail, as finance).",
+    columns: {
+      number: "Number",
+      status: "Status",
+      vendor: "Vendor",
+      currency: "Currency",
+      total: "Total",
+      created: "Created",
+    },
+    filters: {
+      numberLabel: "Search number",
+      numberPlaceholder: "INV/2026/0001",
+      statusLabel: "Status",
+      statusAll: "All statuses",
+      pageSizeLabel: "Page size",
+      apply: "Apply",
+    },
+    pagination: {
+      nav: "Invoice page navigation",
+      previous: "Previous",
+      next: "Next",
+      summary: ({ from, to, total }) => `Showing ${from}–${to} of ${total.toLocaleString("en-US")} invoices`,
+    },
+  },
+  invoiceDetail: {
+    backToList: "Back to the invoice list",
+    notFound: "Invoice not found (or it belongs to another tenant).",
+    loadFailed: "Failed to load the invoice.",
+    fields: {
+      vendor: "Vendor",
+      currency: "Currency",
+      total: "Total",
+      po: "Purchase order",
+      poLink: "Open purchase order",
+      created: "Created",
+    },
+    items: {
+      heading: "Invoice lines",
+      poItem: "PO line",
+      qty: "Qty",
+      unitPrice: "Unit price",
+      lineTotal: "Line total",
+    },
+    actions: {
+      match: "Run match",
+      submitting: "Matching…",
+      gated: "Upload and complete a vendor invoice attachment (ready status) before matching.",
+      genericError: "Failed to run the match — try again.",
+      sessionExpired: "Session expired — redirecting to sign-in…",
+      errorMessages: {
+        inv_already_matched: "This invoice is already matched; the result is final.",
+        inv_not_found: "Invoice not found.",
+        inv_id_invalid: "Invoice id must be a UUID.",
+        gateway_unavailable: "The gateway is unreachable.",
+      },
+    },
+    attachments: {
+      heading: "Attachments",
+      empty: "No attachments yet.",
+      columns: {
+        filename: "Filename",
+        size: "Size",
+        status: "Status",
+        download: "Download",
+      },
+      downloadFailed: "Could not fetch the download link — try again.",
+      uploadLabel: "Upload the vendor invoice document (pdf, png, jpeg, webp, docx, xlsx)",
+      uploading: "Uploading…",
+    },
+    match: {
+      heading: "Three-way match result",
+      verdictMatched: "Matched",
+      verdictDiscrepancy: "Discrepancy",
+      pending: "Not run yet — run the match to fill in the result.",
+      invalid: "The stored match result could not be read.",
+      columns: {
+        poItem: "PO line",
+        qtyOrdered: "Ordered",
+        qtyReceived: "Received",
+        qtyInvoiced: "Invoiced",
+        qtyDelta: "Δ qty",
+        poPrice: "PO price",
+        invoicePrice: "Invoice price",
+        priceDelta: "Δ price",
+        flags: "Flags",
+        reason: "Reason",
+      },
+      qtyBreach: "qty",
+      priceBreach: "price",
+      ok: "ok",
+      reasonQty: "Quantity over-billed: {invoiced} invoiced while only {received} were received (tolerance {pct}%).",
+      reasonPrice: "Price differs: the PO price is {poPrice} but the invoice bills {invoicePrice} (tolerance {pct}%).",
+    },
+  },
+  invoiceForm: {
+    title: "New invoice",
+    back: "Back",
+    missingPO: "The po parameter is required — open this page from a purchase order detail.",
+    poNotFound: "Purchase order not found (or it belongs to another tenant).",
+    loadFailed: "Failed to load the purchase order.",
+    notAllowed:
+      "Only finance/admin can create invoices, and only on an acknowledged, partially_received, or received PO.",
+    form: {
+      heading: "Invoice for PO",
+      numberLabel: "Vendor invoice number (1–100 characters)",
+      numberPlaceholder: "INV/2026/0001",
+      itemsHeading: "Lines to bill",
+      itemsHint:
+        "Fill the quantity for each PO line this invoice bills — prices are prefilled with the PO price and may be adjusted. Lines without a quantity are skipped.",
+      itemsLine: "PO line",
+      itemsQty: "Qty",
+      itemsUnitPrice: "Unit price (cents)",
+      itemsLineTotal: "Line total",
+      submit: "Save invoice",
+      submitting: "Saving…",
+      numberInvalid: "The invoice number must be 1–100 characters after trimming.",
+      qtyInvalid: "Quantity must be a whole number greater than 0.",
+      priceInvalid: "Unit price must be zero or more.",
+      minOneLine: "Fill at least one line with a quantity greater than 0.",
+      genericError: "Failed to save the invoice — try again.",
+      sessionExpired: "Session expired — redirecting to sign-in…",
+      errorMessages: {
+        inv_number_invalid: "The invoice number must be 1–100 characters after trimming.",
+        inv_items_empty: "An invoice needs at least one item line.",
+        inv_qty_invalid: "Each invoiced quantity must be greater than zero.",
+        inv_unit_price_invalid: "Each invoiced unit price must be zero or more.",
+        inv_po_item_duplicate: "Each purchase order line may appear once per invoice.",
+        inv_po_item_unknown: "po_item_id does not name a line of this purchase order.",
+        inv_number_duplicate: "This vendor already has an invoice with this number.",
+        po_id_invalid: "Purchase order id must be a UUID.",
+        po_not_found: "Purchase order not found.",
+        po_illegal_transition: "Only acknowledged, partially received, or received purchase orders can be invoiced.",
+        gateway_unavailable: "The gateway is unreachable.",
+      },
+      overBill:
+        "Over-bills PO {poNumber}: {invoiced} already invoiced and this invoice requests {requested} more, but the total is {total}.",
     },
   },
   pages: {
