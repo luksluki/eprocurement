@@ -141,6 +141,12 @@ func (f *fakeRequisitionClient) GetInvoice(ctx context.Context, in *procurementv
 	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
 }
 
+// The #41 invoice list method satisfies the widened ProcurementClient
+// interface; the invoice tests use their own fake with recording.
+func (f *fakeRequisitionClient) ListInvoices(ctx context.Context, in *procurementv1.ListInvoicesRequest, opts ...grpc.CallOption) (*procurementv1.ListInvoicesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
+}
+
 // The #40 match methods satisfy the widened ProcurementClient interface;
 // the match/settings tests use their own fakes with recording.
 func (f *fakeRequisitionClient) MatchInvoice(ctx context.Context, in *procurementv1.MatchInvoiceRequest, opts ...grpc.CallOption) (*procurementv1.Invoice, error) {

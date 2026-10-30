@@ -198,6 +198,84 @@ func (s *Store) Get(ctx context.Context, tenantID, id string) (Invoice, error) {
 	return inv, nil
 }
 
+// listPredicates is the shared WHERE clause of the invoice list's page
+// subquery and its count arm (#41, the #32/#38 requisition/PO-list contract).
+// The prefix arm compares upper(number) against the uppercased query so the
+// match is case-insensitive (vendor numbers are free-form); LIKE wildcards
+// were escaped by ValidateList.
+const listPredicates = `WHERE ($1::text = '' OR status = $1::text)
+		  AND ($2::text = '' OR upper(number) LIKE $2::text || '%')`
+
+// List returns one page of invoice headers ordered by created_at descending
+// with the id as the deterministic tie-breaker (newest invoice first — vendor
+// numbers are free-form, so number order is not creation order; the #38 PO
+// list orders by number only because PO numbers are sequential per tenant)
+// plus the total number of matching rows (across pages). Filters: status
+// equality and a case-insensitive number-prefix query — escaped so user input
+// with % or _ is literal. The filter must come from ValidateList. Rows are
+// header-only: lines are not loaded and MatchResult stays empty (the detail
+// read owns both).
+//
+// The total rides the same single statement as the page — the #32 shape the
+// PO list adopted on measured evidence (an exact COUNT as an uncorrelated
+// scalar subquery / InitPlan attached to the LIMIT/OFFSET page subquery; see
+// purchaseorder.Store.List for the full rationale). An empty (past-the-end)
+// page emits no rows, so an explicit COUNT fallback recovers the true total.
+func (s *Store) List(ctx context.Context, tenantID string, f ListFilter) ([]Invoice, int, error) {
+	var (
+		invs  []Invoice
+		total int
+	)
+	err := tenant.WithTenant(ctx, s.db, tenantID, func(tx pgx.Tx) error {
+		offset := (int(f.Page) - 1) * int(f.PageSize)
+		rows, err := tx.Query(ctx, `
+			SELECT c.id, c.tenant_id, c.po_id, c.vendor_id, c.number, c.currency,
+			       c.total_cents, c.status, c.created_at, c.created_by,
+			       (SELECT count(*) FROM procurement.invoices `+listPredicates+`) AS total_count
+			FROM (SELECT id, tenant_id, po_id, vendor_id, number, currency,
+				      total_cents, status, created_at, created_by
+				      FROM procurement.invoices
+				      `+listPredicates+`
+				      ORDER BY created_at DESC, id DESC
+				      LIMIT $3 OFFSET $4) c
+			ORDER BY c.created_at DESC, c.id DESC`,
+			f.Status, f.Query, f.PageSize, offset)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				inv       Invoice
+				createdBy *string
+			)
+			if err := rows.Scan(&inv.ID, &inv.TenantID, &inv.POID, &inv.VendorID,
+				&inv.Number, &inv.Currency, &inv.TotalCents, &inv.Status,
+				&inv.CreatedAt, &createdBy, &total); err != nil {
+				return err
+			}
+			if createdBy != nil {
+				inv.CreatedBy = *createdBy
+			}
+			invs = append(invs, inv)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if len(invs) == 0 {
+			// Past-the-end page: the join's left side is empty; count matches
+			// explicitly so callers still see the real total.
+			return tx.QueryRow(ctx,
+				`SELECT count(*) FROM procurement.invoices `+listPredicates, f.Status, f.Query).Scan(&total)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, 0, fmt.Errorf("invoice: list: %w", err)
+	}
+	return invs, total, nil
+}
+
 // insertInvoice writes the header (deriving vendor/currency from the locked
 // PO) and the lines, returning the stored invoice with its row timestamps.
 func insertInvoice(ctx context.Context, tx pgx.Tx, tenantID string, po purchaseorder.PurchaseOrder, in CreateInput) (Invoice, error) {

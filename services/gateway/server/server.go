@@ -28,8 +28,8 @@ type Option func(*gatewayOptions)
 // ProcurementClient is the full procurement surface the gateway proxies: the
 // vendor API, the requisition create/edit/submit/read API, the approval
 // decide/rules API, the PO conversion API, the PO lifecycle actions, the
-// goods-receipt posting API, and the PO read pair (#38 list/detail). The
-// generated gRPC client satisfies it; tests substitute a fake.
+// goods-receipt posting API, and the PO (#38) and invoice (#41) read pairs.
+// The generated gRPC client satisfies it; tests substitute a fake.
 type ProcurementClient interface {
 	VendorClient
 	CreateRequisition(ctx context.Context, in *procurementv1.CreateRequisitionRequest, opts ...grpc.CallOption) (*procurementv1.Requisition, error)
@@ -50,6 +50,7 @@ type ProcurementClient interface {
 	PostGoodsReceipt(ctx context.Context, in *procurementv1.PostGoodsReceiptRequest, opts ...grpc.CallOption) (*procurementv1.PostGoodsReceiptResponse, error)
 	CreateInvoice(ctx context.Context, in *procurementv1.CreateInvoiceRequest, opts ...grpc.CallOption) (*procurementv1.Invoice, error)
 	GetInvoice(ctx context.Context, in *procurementv1.GetInvoiceRequest, opts ...grpc.CallOption) (*procurementv1.Invoice, error)
+	ListInvoices(ctx context.Context, in *procurementv1.ListInvoicesRequest, opts ...grpc.CallOption) (*procurementv1.ListInvoicesResponse, error)
 	MatchInvoice(ctx context.Context, in *procurementv1.MatchInvoiceRequest, opts ...grpc.CallOption) (*procurementv1.Invoice, error)
 	GetMatchSettings(ctx context.Context, in *procurementv1.GetMatchSettingsRequest, opts ...grpc.CallOption) (*procurementv1.MatchSettings, error)
 	ReplaceMatchSettings(ctx context.Context, in *procurementv1.ReplaceMatchSettingsRequest, opts ...grpc.CallOption) (*procurementv1.MatchSettings, error)

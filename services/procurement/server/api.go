@@ -783,6 +783,8 @@ func mapInvoiceError(err error) error {
 		errors.Is(err, invoice.ErrPOItemDuplicate),
 		errors.Is(err, invoice.ErrPOItemUnknown),
 		errors.Is(err, invoice.ErrIDInvalid),
+		errors.Is(err, invoice.ErrStatusInvalid),
+		errors.Is(err, invoice.ErrPageInvalid),
 		errors.Is(err, purchaseorder.ErrIDInvalid):
 		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, invoice.ErrNumberDuplicate):
@@ -857,6 +859,37 @@ func (a *api) GetInvoice(ctx context.Context, req *procurementv1.GetInvoiceReque
 		return nil, mapInvoiceError(err)
 	}
 	return invoicePB(inv), nil
+}
+
+// ListInvoices serves the invoice list (invoice:read — every role per
+// docs/rbac.md; #41, the #38 PO-list twin): filters validated in the domain,
+// one header-only page (lines are not loaded and match_result stays empty —
+// the detail read owns both), newest first by creation time. Bad status →
+// 400 inv_status_invalid, absurd page → 400 inv_page_invalid.
+func (a *api) ListInvoices(ctx context.Context, req *procurementv1.ListInvoicesRequest) (*procurementv1.ListInvoicesResponse, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	filter, err := invoice.ValidateList(invoice.ListFilter{
+		Query: req.GetQuery(), Status: req.GetStatus(),
+		Page: req.GetPage(), PageSize: req.GetPageSize(),
+	})
+	if err != nil {
+		return nil, mapInvoiceError(err)
+	}
+	headers, total, err := a.invoices.List(ctx, auth.TenantID, filter)
+	if err != nil {
+		return nil, mapInvoiceError(err)
+	}
+	out := &procurementv1.ListInvoicesResponse{
+		Total: int32(total), Page: filter.Page, PageSize: filter.PageSize,
+		Invoices: make([]*procurementv1.Invoice, 0, len(headers)),
+	}
+	for _, inv := range headers {
+		out.Invoices = append(out.Invoices, invoicePB(inv))
+	}
+	return out, nil
 }
 
 // MatchInvoice applies the three-way match to one invoice of the caller's

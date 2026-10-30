@@ -153,6 +153,15 @@ service Procurement {
   // match_result_json carries the match's explanation once it ran (empty
   // while pending).
   rpc GetInvoice(GetInvoiceRequest) returns (Invoice);
+  // ListInvoices returns one page of the caller tenant's invoices ordered by
+  // created_at descending (newest first — vendor numbers are free-form, so
+  // creation order is the list order; the id breaks ties deterministically).
+  // query matches a number prefix (case-insensitive — vendor numbers are the
+  // issuer's convention); status is pending | matched | discrepancy or empty;
+  // the two combine. total is the number of matching rows across all pages.
+  // Rows are header-only: items are always empty and match_result_json is
+  // always empty here — the detail read owns both.
+  rpc ListInvoices(ListInvoicesRequest) returns (ListInvoicesResponse);
   // MatchInvoice applies the three-way match (#40, FR-08) to one invoice of
   // the caller's tenant: every line's cumulative invoiced quantity (across
   // ALL the PO's invoices, this one included) is checked against the PO
@@ -524,6 +533,29 @@ message CreateInvoiceRequest {
 // GetInvoiceRequest names the invoice to read.
 message GetInvoiceRequest {
   string id = 1;
+}
+
+// ListInvoicesRequest is the invoice-list filter set (#41): a free-text
+// number prefix, an optional status, and server-side pagination.
+message ListInvoicesRequest {
+  // Free-text match: invoice number prefix, case-insensitive (vendor numbers
+  // are free-form, the issuer's convention). Empty means no text filter. LIKE
+  // wildcards in the input are literal.
+  string query = 1;
+  // pending | matched | discrepancy | "" (all).
+  string status = 2;
+  int32 page = 3;      // 1-based; default 1
+  int32 page_size = 4; // default 20, max 100
+}
+
+// ListInvoicesResponse is the list envelope. Rows are header-only: items are
+// always empty and match_result_json is always empty (the detail read owns
+// the bodies and the match's explanation).
+message ListInvoicesResponse {
+  repeated Invoice invoices = 1;
+  int32 total = 2;      // matching rows across all pages
+  int32 page = 3;       // normalized values actually applied
+  int32 page_size = 4;
 }
 
 // MatchInvoiceRequest names the invoice to match (the caller's tenant comes

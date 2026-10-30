@@ -2292,6 +2292,191 @@ func TestInvoiceGRPC(t *testing.T) {
 	}
 }
 
+// grpcSetInvoiceStatus is the #41 list fixture's SQL half: only the #40 match
+// writes matched/discrepancy, and the list only needs the stored values.
+func grpcSetInvoiceStatus(t *testing.T, db *pgxpool.Pool, invoiceID, status string) {
+	t.Helper()
+	if err := tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		_, err := tx.Exec(context.Background(), `
+			UPDATE procurement.invoices SET status = $2 WHERE id = $1`, invoiceID, status)
+		return err
+	}); err != nil {
+		t.Fatalf("set invoice status %s: %v", status, err)
+	}
+}
+
+// The #41 invoice list through the full gRPC wiring (the #38 PO-list twin):
+// defaults newest-first with header-only rows (no items, no match_result —
+// even on invoices whose stored verdict landed), the three-status whitelist,
+// the case-insensitive number prefix, combined filters, the past-the-end
+// total fallback, cross-tenant invisibility, the list machine codes, and the
+// anonymous rejection. Listed by a viewer — invoice:read is every role.
+func TestInvoiceGRPCList(t *testing.T) {
+	client, db, cleanup := startProcurement(t)
+	defer cleanup()
+	grpcCleanupRequisition(t, db)
+	grpcCleanupPOVendor(t, db)
+	grpcCleanupInvoiceVendor(t, db)
+	defer func() { // LIFO: before the pool closes (the file's leak pattern).
+		grpcCleanupRequisition(t, db)
+		grpcCleanupPOVendor(t, db)
+		grpcCleanupInvoiceVendor(t, db)
+	}()
+
+	// Three invoices of one vendor in tenant A (3 × 5,000,000 fits the
+	// 15,450,000 budget), mixed-case numbers for the prefix arm.
+	po := grpcInvoicablePO(t, client, "G-INV39-A")
+	laptop := grpcItemByQty(t, po, 2)
+	create := func(number string) *procurementv1.Invoice {
+		t.Helper()
+		inv, err := client.CreateInvoice(callerCtx(gTenantA, rbac.RoleFinance), &procurementv1.CreateInvoiceRequest{
+			PoId: po.GetId(), Number: number,
+			Items: []*procurementv1.InvoiceItem{{PoItemId: laptop.GetId(), Qty: 1, UnitPriceCents: 5000000}},
+		})
+		if err != nil {
+			t.Fatalf("create %s: %v", number, err)
+		}
+		return inv
+	}
+	first := create("inv/lowercase/001")
+	second := create("INV/MIXED/002")
+	third := create("Inv/Mixed/003")
+	grpcSetInvoiceStatus(t, db, second.GetId(), "discrepancy")
+	grpcSetInvoiceStatus(t, db, third.GetId(), "matched")
+
+	// Tenant B's own invoice — the cross-tenant row.
+	if _, err := client.ReplaceApprovalRules(callerCtx(gTenantB, rbac.RoleAdmin),
+		&procurementv1.ReplaceApprovalRulesRequest{Rules: testRules()[:1]}); err != nil {
+		t.Fatalf("configure rules B: %v", err)
+	}
+	vendorB, err := client.CreateVendor(callerCtx(gTenantB, rbac.RoleBuyer),
+		&procurementv1.CreateVendorRequest{Code: "G-INV39-B", Name: "PT Invoice B"})
+	if err != nil {
+		t.Fatalf("create vendor B: %v", err)
+	}
+	prB, err := client.CreateRequisition(callerCtx(gTenantB, rbac.RoleRequester),
+		&procurementv1.CreateRequisitionRequest{Currency: "IDR", Items: testItems()})
+	if err != nil {
+		t.Fatalf("create B: %v", err)
+	}
+	submittedB, err := client.SubmitRequisition(callerCtx(gTenantB, rbac.RoleRequester),
+		&procurementv1.SubmitRequisitionRequest{Id: prB.GetId()})
+	if err != nil {
+		t.Fatalf("submit B: %v", err)
+	}
+	if _, err := client.DecideApproval(callerCtxAs(gUserB, gTenantB, rbac.RoleApprover),
+		&procurementv1.DecideApprovalRequest{StepId: submittedB.GetApprovalSteps()[0].GetId(), Decision: "approve"}); err != nil {
+		t.Fatalf("decide B: %v", err)
+	}
+	wrappedB, err := client.CreatePurchaseOrder(callerCtx(gTenantB, rbac.RoleBuyer),
+		&procurementv1.CreatePurchaseOrderRequest{RequisitionId: prB.GetId(), VendorId: vendorB.GetId()})
+	if err != nil {
+		t.Fatalf("convert B: %v", err)
+	}
+	poB := wrappedB.GetPurchaseOrder()
+	if _, err := client.IssuePurchaseOrder(callerCtx(gTenantB, rbac.RoleBuyer),
+		&procurementv1.IssuePurchaseOrderRequest{Id: poB.GetId()}); err != nil {
+		t.Fatalf("issue B: %v", err)
+	}
+	ackB, err := client.AcknowledgePurchaseOrder(callerCtx(gTenantB, rbac.RoleBuyer),
+		&procurementv1.AcknowledgePurchaseOrderRequest{Id: poB.GetId()})
+	if err != nil {
+		t.Fatalf("acknowledge B: %v", err)
+	}
+	invB, err := client.CreateInvoice(callerCtx(gTenantB, rbac.RoleFinance), &procurementv1.CreateInvoiceRequest{
+		PoId: poB.GetId(), Number: "INV-TENANT-B",
+		Items: []*procurementv1.InvoiceItem{{PoItemId: grpcItemByQty(t, ackB, 2).GetId(), Qty: 1, UnitPriceCents: 5000000}},
+	})
+	if err != nil {
+		t.Fatalf("create B invoice: %v", err)
+	}
+
+	// Defaults: page 1, page size 20, tenant A's three rows newest first —
+	// listed by a viewer (invoice:read is broad; writes are finance-only).
+	resp, err := client.ListInvoices(callerCtx(gTenantA, rbac.RoleViewer), &procurementv1.ListInvoicesRequest{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if resp.GetPage() != 1 || resp.GetPageSize() != 20 || resp.GetTotal() != 3 || len(resp.GetInvoices()) != 3 {
+		t.Fatalf("defaults: page=%d size=%d total=%d rows=%d",
+			resp.GetPage(), resp.GetPageSize(), resp.GetTotal(), len(resp.GetInvoices()))
+	}
+	rows := resp.GetInvoices()
+	if rows[0].GetId() != third.GetId() || rows[2].GetId() != first.GetId() {
+		t.Fatalf("not newest-first: %s...%s", rows[0].GetId(), rows[2].GetId())
+	}
+	// Header-only: items and match_result are never populated on list rows —
+	// even on the matched/discrepancy rows whose stored verdicts exist.
+	for _, row := range rows {
+		if len(row.GetItems()) != 0 {
+			t.Fatalf("list row carries items: %+v", row)
+		}
+		if row.GetMatchResultJson() != "" {
+			t.Fatalf("list row carries match_result: %+v", row)
+		}
+		if row.GetId() == "" || row.GetTenantId() != gTenantA || row.GetVendorId() == "" ||
+			row.GetPoId() == "" || row.GetNumber() == "" || row.GetCurrency() == "" ||
+			row.GetTotalCents() == 0 || row.GetStatus() == "" || row.GetCreatedAt() == "" {
+			t.Fatalf("header fields missing: %+v", row)
+		}
+	}
+
+	// Status filters over the three-value whitelist.
+	resp, err = client.ListInvoices(callerCtx(gTenantA, rbac.RoleViewer),
+		&procurementv1.ListInvoicesRequest{Status: "matched", PageSize: 10})
+	if err != nil || resp.GetTotal() != 1 || resp.GetInvoices()[0].GetId() != third.GetId() {
+		t.Fatalf("status filter = (%+v, %v)", resp, err)
+	}
+	resp, err = client.ListInvoices(callerCtx(gTenantA, rbac.RoleViewer),
+		&procurementv1.ListInvoicesRequest{Status: "pending", PageSize: 10})
+	if err != nil || resp.GetTotal() != 1 || resp.GetInvoices()[0].GetId() != first.GetId() {
+		t.Fatalf("pending filter = (%+v, %v)", resp, err)
+	}
+	// Number-prefix query, lowercase input over mixed-case numbers.
+	resp, err = client.ListInvoices(callerCtx(gTenantA, rbac.RoleViewer),
+		&procurementv1.ListInvoicesRequest{Query: "inv/lower"})
+	if err != nil || resp.GetTotal() != 1 || resp.GetInvoices()[0].GetId() != first.GetId() {
+		t.Fatalf("prefix query = (%+v, %v)", resp, err)
+	}
+	// Combined: the shared prefix + matched leaves only third.
+	resp, err = client.ListInvoices(callerCtx(gTenantA, rbac.RoleViewer),
+		&procurementv1.ListInvoicesRequest{Query: "INV/", Status: "matched", PageSize: 10})
+	if err != nil || resp.GetTotal() != 1 || resp.GetInvoices()[0].GetId() != third.GetId() {
+		t.Fatalf("combined = (%+v, %v)", resp, err)
+	}
+	// Past-the-end page: empty rows, true total via the COUNT fallback.
+	resp, err = client.ListInvoices(callerCtx(gTenantA, rbac.RoleViewer),
+		&procurementv1.ListInvoicesRequest{Page: 9, PageSize: 2})
+	if err != nil || len(resp.GetInvoices()) != 0 || resp.GetTotal() != 3 {
+		t.Fatalf("past-the-end = (%+v, %v)", resp, err)
+	}
+	// Cross-tenant listing: tenant B sees only its own row.
+	resp, err = client.ListInvoices(callerCtx(gTenantB, rbac.RoleViewer), &procurementv1.ListInvoicesRequest{})
+	if err != nil || resp.GetTotal() != 1 || resp.GetInvoices()[0].GetTenantId() != gTenantB ||
+		resp.GetInvoices()[0].GetId() != invB.GetId() {
+		t.Fatalf("tenantB sees (%+v, %v)", resp, err)
+	}
+
+	// Validation: unknown status and absurd page answer the #41 machine codes
+	// as InvalidArgument.
+	_, err = client.ListInvoices(callerCtx(gTenantA, rbac.RoleViewer),
+		&procurementv1.ListInvoicesRequest{Status: "paused"})
+	if status.Code(err) != codes.InvalidArgument || status.Convert(err).Message() != "inv_status_invalid" {
+		t.Fatalf("bad status: got (%v, %q), want InvalidArgument inv_status_invalid", status.Code(err), status.Convert(err).Message())
+	}
+	_, err = client.ListInvoices(callerCtx(gTenantA, rbac.RoleViewer),
+		&procurementv1.ListInvoicesRequest{Page: 2000000})
+	if status.Code(err) != codes.InvalidArgument || status.Convert(err).Message() != "inv_page_invalid" {
+		t.Fatalf("bad page: got (%v, %q), want InvalidArgument inv_page_invalid", status.Code(err), status.Convert(err).Message())
+	}
+
+	// Anonymous: the interceptor's re-check rejects metadata-less calls (the
+	// method must stay in methodPermissions).
+	if _, err := client.ListInvoices(context.Background(), &procurementv1.ListInvoicesRequest{}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("anonymous list: code = %v, want Unauthenticated", status.Code(err))
+	}
+}
+
 // The #39 error mapping as a pure unit test (no database): shape codes →
 // InvalidArgument, the over-bill detail line and the illegal-status guard →
 // Aborted, duplicate number → AlreadyExists, not-found → 404 — the typed
@@ -2313,6 +2498,8 @@ func TestMapInvoiceError(t *testing.T) {
 		"line duplicate":     {invoice.ErrPOItemDuplicate, codes.InvalidArgument, "inv_po_item_duplicate"},
 		"line unknown":       {invoice.ErrPOItemUnknown, codes.InvalidArgument, "inv_po_item_unknown"},
 		"invoice id invalid": {invoice.ErrIDInvalid, codes.InvalidArgument, "inv_id_invalid"},
+		"status invalid":     {invoice.ErrStatusInvalid, codes.InvalidArgument, "inv_status_invalid"},
+		"page invalid":       {invoice.ErrPageInvalid, codes.InvalidArgument, "inv_page_invalid"},
 		"po id invalid":      {purchaseorder.ErrIDInvalid, codes.InvalidArgument, "po_id_invalid"},
 		"duplicate number":   {invoice.ErrNumberDuplicate, codes.AlreadyExists, "inv_number_duplicate"},
 		"already matched":    {invoice.ErrAlreadyMatched, codes.Aborted, "inv_already_matched"},

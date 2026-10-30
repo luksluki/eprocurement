@@ -564,6 +564,152 @@ export function postGoodsReceipt(
 }
 
 
+// ---------------------------------------------------------------------------
+// Invoices (#41). The list is a thin proxy (the server component only needs
+// data-or-null); the detail, create, and match calls return the typed
+// GatewayResult so the BFF routes can forward 4xx machine codes verbatim (the
+// purchase-order convention of #38).
+
+// InvoiceItemWire is one invoice line as the gateway renders it: the PO line
+// it bills, the invoiced quantity, and the invoiced unit price.
+export type InvoiceItemWire = {
+  po_item_id: string;
+  qty: number;
+  unit_price_cents: number;
+};
+
+// InvoiceHeader is one row of the invoice list (issue #41). List rows are
+// header-only: items are always an empty array and match_result_json is
+// always "" on the wire (documented in proto/procurement/v1/procurement.proto).
+export type InvoiceHeader = {
+  id: string;
+  tenant_id: string;
+  po_id: string;
+  vendor_id: string;
+  number: string;
+  currency: string;
+  total_cents: number;
+  status: string;
+  match_result_json: string;
+  items: unknown[];
+  created_by: string;
+  created_at: string;
+};
+
+// Envelope of GET /api/v1/invoices: { invoices, total, page, page_size }.
+export type InvoiceListPage = {
+  invoices: InvoiceHeader[];
+  total: number;
+  page: number;
+  page_size: number;
+};
+
+// InvoiceDetail is the GET /api/v1/invoices/:id shape: the full aggregate
+// with typed lines plus the embedded attachment metadata (when documents is
+// wired gateway-side).
+export type InvoiceDetail = Omit<InvoiceHeader, "items"> & {
+  items: InvoiceItemWire[];
+  attachments?: AttachmentMeta[];
+};
+
+// listInvoices loads one tenant-scoped page of the invoice list. Returns
+// null on any failure so the server-rendered list page can show its error
+// state instead of crashing (the listPurchaseOrders convention).
+export async function listInvoices(
+  accessToken: string,
+  params: { q: string; status: string; page: number; pageSize: number },
+): Promise<InvoiceListPage | null> {
+  try {
+    const url = new URL(`${gatewayUrl()}/api/v1/invoices`);
+    if (params.q !== "") url.searchParams.set("q", params.q);
+    if (params.status !== "") url.searchParams.set("status", params.status);
+    url.searchParams.set("page", String(params.page));
+    url.searchParams.set("page_size", String(params.pageSize));
+    const res = await fetch(url, {
+      headers: { authorization: `Bearer ${accessToken}` },
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      return null;
+    }
+    const body = (await res.json()) as {
+      invoices?: InvoiceHeader[];
+      total?: number;
+      page?: number;
+      page_size?: number;
+    };
+    if (!Array.isArray(body.invoices)) {
+      return null;
+    }
+    return {
+      invoices: body.invoices,
+      total: body.total ?? body.invoices.length,
+      page: body.page ?? params.page,
+      page_size: body.page_size ?? params.pageSize,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// getInvoice reads the detail aggregate (header, lines, match_result_json,
+// attachments); 404 (also the cross-tenant answer) is discriminated through
+// the shared GatewayResult so the page can render its not-found state.
+export function getInvoice(accessToken: string, id: string): Promise<GatewayResult<InvoiceDetail>> {
+  return callGateway(accessToken, `/api/v1/invoices/${encodeURIComponent(id)}`);
+}
+
+// createInvoice records one vendor invoice against a PO (invoice:write —
+// finance/admin; #39 contract). A 409 inv_over_bill carries the pinned detail
+// line in `error` ("inv_over_bill: po_number=… invoiced=… requested=…
+// total=…"), preserved verbatim by the gateway's dedicated renderer.
+export function createInvoice(
+  accessToken: string,
+  poId: string,
+  number: string,
+  items: InvoiceItemWire[],
+): Promise<GatewayResult<InvoiceDetail>> {
+  return callGateway(accessToken, "/api/v1/invoices", {
+    method: "POST",
+    body: { po_id: poId, number, items },
+  });
+}
+
+// matchInvoice runs the three-way match on one invoice (invoice:write —
+// finance/admin; #40). The response is the updated invoice: status
+// matched/discrepancy with match_result_json filled.
+export function matchInvoice(accessToken: string, id: string): Promise<GatewayResult<InvoiceDetail>> {
+  return callGateway(accessToken, `/api/v1/invoices/${encodeURIComponent(id)}/match`, { method: "POST" });
+}
+
+// declareInvoiceAttachment asks the gateway for a presigned PUT URL bound to
+// the invoice (entity existence checked gateway-side; invoice:write).
+export function declareInvoiceAttachment(
+  accessToken: string,
+  invoiceId: string,
+  declaration: AttachmentDeclaration,
+): Promise<GatewayResult<DeclaredUpload>> {
+  return callGateway(accessToken, `/api/v1/invoices/${encodeURIComponent(invoiceId)}/attachments`, {
+    method: "POST",
+    body: declaration,
+  });
+}
+
+// completeInvoiceAttachment tells the gateway to verify the uploaded object
+// (size/mime/checksum) and flip the attachment to ready.
+export function completeInvoiceAttachment(
+  accessToken: string,
+  invoiceId: string,
+  attachmentId: string,
+): Promise<GatewayResult<AttachmentMeta>> {
+  return callGateway(
+    accessToken,
+    `/api/v1/invoices/${encodeURIComponent(invoiceId)}/attachments/${encodeURIComponent(attachmentId)}/complete`,
+    { method: "POST" },
+  );
+}
+
+
 // EventsPage is the GET /api/v1/events envelope. Pagination is keyset, not
 // offset: next_cursor is the opaque continuation token and is empty on the
 // last page — a deliberate deviation from the page/total convention

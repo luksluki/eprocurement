@@ -37,10 +37,23 @@ type fakeInvoiceClient struct {
 	getErr error
 	getCtx context.Context
 
+	listReq *procurementv1.ListInvoicesRequest
+	listRes *procurementv1.ListInvoicesResponse
+	listErr error
+	listCtx context.Context
+
 	matchReq *procurementv1.MatchInvoiceRequest
 	matchRes *procurementv1.Invoice
 	matchErr error
 	matchCtx context.Context
+}
+
+func (f *fakeInvoiceClient) ListInvoices(ctx context.Context, in *procurementv1.ListInvoicesRequest, opts ...grpc.CallOption) (*procurementv1.ListInvoicesResponse, error) {
+	f.listCtx, f.listReq = ctx, in
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.listRes, nil
 }
 
 func (f *fakeInvoiceClient) MatchInvoice(ctx context.Context, in *procurementv1.MatchInvoiceRequest, opts ...grpc.CallOption) (*procurementv1.Invoice, error) {
@@ -403,6 +416,96 @@ func TestMatchInvoiceRoute(t *testing.T) {
 	md := metadataOf(t, fake.matchCtx)
 	if md["x-tenant-id"] != "tenant-29" || md["x-user-id"] != "user-29" || md["x-role"] != rbac.RoleFinance {
 		t.Fatalf("propagated metadata = %v", md)
+	}
+}
+
+// AC (#41): GET /api/v1/invoices is wired through server.New with
+// WithProcurement, invoice:read (the broadest read — viewer passes) grants
+// access, the envelope is {invoices, total, page, page_size} with
+// header-only rows, the query params ride through to procurement, and the
+// verified claims are propagated as gRPC metadata.
+func TestInvoiceListRouteThroughServerNew(t *testing.T) {
+	// A header-only row, as procurement's list guarantees (no items).
+	headerRow := sampleInvoice()
+	headerRow.Items = nil
+	fake := &fakeInvoiceClient{
+		fakeRequisitionClient: &fakeRequisitionClient{fakeVendorClient: &fakeVendorClient{}},
+		createRes:             sampleInvoice(),
+		getRes:                sampleInvoice(),
+		listRes: &procurementv1.ListInvoicesResponse{
+			Invoices: []*procurementv1.Invoice{headerRow}, Total: 1, Page: 2, PageSize: 50,
+		},
+	}
+	_, verifier, priv, kid := newTestApp(t)
+	app := New(slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil)), verifier, WithProcurement(fake))
+	t.Cleanup(func() { _ = app.Shutdown() })
+	token := reqTokenFor(t, priv, kid, rbac.RoleViewer) // invoice:read — every role
+
+	resp, body := reqDo(t, app, "GET", "/api/v1/invoices?q=%20INV%2F20%20&status=matched&page=2&page_size=50", token, "", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list status = %d, body = %v", resp.StatusCode, body)
+	}
+	if body["total"] != float64(1) || body["page"] != float64(2) || body["page_size"] != float64(50) {
+		t.Fatalf("envelope = %v", body)
+	}
+	rows, _ := body["invoices"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("invoices = %v", body["invoices"])
+	}
+	row, _ := rows[0].(map[string]any)
+	if row["number"] != "INV/2026/0001" || row["status"] != "pending" {
+		t.Fatalf("row = %v", row)
+	}
+	items, _ := row["items"].([]any)
+	if len(items) != 0 {
+		t.Fatalf("list row carries items: %v", row["items"])
+	}
+	// The filters were forwarded trimmed; claims ride along as gRPC metadata.
+	if fake.listReq.GetQuery() != "INV/20" || fake.listReq.GetStatus() != "matched" ||
+		fake.listReq.GetPage() != 2 || fake.listReq.GetPageSize() != 50 {
+		t.Fatalf("forwarded list request = %+v", fake.listReq)
+	}
+	md := metadataOf(t, fake.listCtx)
+	if md["x-tenant-id"] != "tenant-29" || md["x-user-id"] != "user-29" {
+		t.Fatalf("metadata = %v", md)
+	}
+}
+
+// AC (#41): the list route requires a Bearer token (401 anonymous before any
+// procurement call) and renders the list-filter machine codes — 400
+// inv_status_invalid / inv_page_invalid with their human sentences — through
+// the shared mapping.
+func TestInvoiceListRouteErrors(t *testing.T) {
+	app, fake, _, _ := invoiceTestApp(t, nil)
+	resp, _ := reqDo(t, app, "GET", "/api/v1/invoices", "", "", nil)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous status = %d, want 401", resp.StatusCode)
+	}
+	if fake.listReq != nil {
+		t.Fatalf("procurement called without a token")
+	}
+
+	for name, tc := range map[string]struct {
+		query     string
+		err       error
+		want      int
+		wantCode  string
+		wantError string
+	}{
+		"bad status": {"status=paused", status.Error(codes.InvalidArgument, "inv_status_invalid"),
+			http.StatusBadRequest, "inv_status_invalid", "status must be pending, matched, or discrepancy"},
+		"bad page": {"page=2000000", status.Error(codes.InvalidArgument, "inv_page_invalid"),
+			http.StatusBadRequest, "inv_page_invalid", "page is out of range"},
+	} {
+		app, fake, header, _ := invoiceTestApp(t, nil)
+		fake.listErr = tc.err
+		resp, body := reqDo(t, app, "GET", "/api/v1/invoices?"+tc.query, tokenOf(header), "", nil)
+		if resp.StatusCode != tc.want {
+			t.Fatalf("%s: status = %d, want %d", name, resp.StatusCode, tc.want)
+		}
+		if body["code"] != tc.wantCode || body["error"] != tc.wantError {
+			t.Fatalf("%s: body = %v, want (%q, %q)", name, body, tc.wantCode, tc.wantError)
+		}
 	}
 }
 

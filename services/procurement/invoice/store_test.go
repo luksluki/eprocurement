@@ -647,3 +647,196 @@ func errString(err error) string {
 	}
 	return err.Error()
 }
+
+// mustValidateInv normalizes a filter or fails the test.
+func mustValidateInv(t *testing.T, f ListFilter) ListFilter {
+	t.Helper()
+	filter, err := ValidateList(f)
+	if err != nil {
+		t.Fatalf("ValidateList: %v", err)
+	}
+	return filter
+}
+
+// listOK runs one validated list call, failing the test on error.
+func listOK(t *testing.T, s *Store, tenantID string, f ListFilter) ([]Invoice, int) {
+	t.Helper()
+	rows, total, err := s.List(t.Context(), tenantID, mustValidateInv(t, f))
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	return rows, total
+}
+
+// setInvStatus is the list fixture's SQL half: only the #40 match writes
+// matched/discrepancy + match_result, and pulling the whole match engine in
+// would invert this package's dependency direction — the list only needs the
+// stored values, so the fixture sets them directly under RLS bypass.
+func setInvStatus(t *testing.T, db *pgxpool.Pool, invoiceID, status, matchResult string) {
+	t.Helper()
+	if err := tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		_, err := tx.Exec(context.Background(), `
+			UPDATE procurement.invoices
+			SET status = $2, match_result = NULLIF($3, '')::jsonb
+			WHERE id = $1`, invoiceID, status, matchResult)
+		return err
+	}); err != nil {
+		t.Fatalf("set status %s: %v", status, err)
+	}
+}
+
+// AC (#41 list filters): descending creation order, header-only rows (no
+// lines, no match_result — even on invoices whose stored match_result is
+// filled), status equality over the three-value whitelist, case-insensitive
+// number-prefix matching with literal wildcards, combined filters, and
+// cross-tenant invisibility through RLS.
+func TestStoreListFilters(t *testing.T) {
+	db := openTestDB(t)
+	cleanupINV(t, db)
+	t.Cleanup(func() { cleanupINV(t, db) })
+	ctx := context.Background()
+	s := NewStore(db)
+	po := invoicablePO(t, db, invTenantA, "INV-39-A", invBasket)
+	laptop := invItemByQty(t, po, 2)
+
+	// Three invoices of one vendor (distinct numbers, 3 × 5,000,000 fits the
+	// 15,450,000 budget), mixed-case numbers for the prefix arm.
+	create := func(number string) Invoice {
+		t.Helper()
+		inv, err := s.Create(ctx, invTenantA, CreateInput{
+			POID: po.ID, Number: number,
+			Items: []Item{{POItemID: laptop.ID, Qty: 1, UnitPriceCents: 5000000}},
+			Actor: invFinance,
+		})
+		if err != nil {
+			t.Fatalf("create %s: %v", number, err)
+		}
+		return inv
+	}
+	first := create("inv/lowercase/001")
+	second := create("INV/MIXED/002")
+	third := create("Inv/Mixed/003")
+	// The match is the only writer of matched/discrepancy — the fixture sets
+	// the stored verdicts directly (see setInvStatus).
+	setInvStatus(t, db, second.ID, StatusDiscrepancy, `{"matched":false,"lines":[]}`)
+	setInvStatus(t, db, third.ID, StatusMatched, `{"matched":true,"lines":[]}`)
+
+	// Tenant B's own PO + invoice — the cross-tenant row.
+	poB := invoicablePO(t, db, invTenantB, "INV-39-B2", invBasket)
+	laptopB := invItemByQty(t, poB, 2)
+	if _, err := s.Create(ctx, invTenantB, CreateInput{
+		POID: poB.ID, Number: "INV-TENANT-B",
+		Items: []Item{{POItemID: laptopB.ID, Qty: 1, UnitPriceCents: 5000000}},
+		Actor: invFinance,
+	}); err != nil {
+		t.Fatalf("create tenant B invoice: %v", err)
+	}
+
+	// Defaults: tenant A's three rows newest first, header-only.
+	rows, total := listOK(t, s, invTenantA, ListFilter{PageSize: 10})
+	if total != 3 || len(rows) != 3 {
+		t.Fatalf("defaults: total = %d, rows = %d, want 3/3", total, len(rows))
+	}
+	if rows[0].ID != third.ID || rows[1].ID != second.ID || rows[2].ID != first.ID {
+		t.Fatalf("not newest-first: %s, %s, %s", rows[0].ID, rows[1].ID, rows[2].ID)
+	}
+	for _, row := range rows {
+		if row.Items != nil {
+			t.Fatalf("list row carries lines: %+v", row.Items)
+		}
+		if row.MatchResult != "" {
+			t.Fatalf("list row carries match_result: %q", row.MatchResult)
+		}
+		if row.Number == "" || row.VendorID == "" || row.POID == "" || row.Currency == "" ||
+			row.TotalCents == 0 || row.Status == "" || row.CreatedAt.IsZero() {
+			t.Fatalf("header fields missing: %+v", row)
+		}
+	}
+
+	// Status filters over the three-value whitelist.
+	rows, total = listOK(t, s, invTenantA, ListFilter{Status: StatusMatched, PageSize: 10})
+	if total != 1 || len(rows) != 1 || rows[0].ID != third.ID {
+		t.Fatalf("matched filter: (%d, %d rows, first %s)", total, len(rows), rows[0].ID)
+	}
+	rows, total = listOK(t, s, invTenantA, ListFilter{Status: StatusDiscrepancy, PageSize: 10})
+	if total != 1 || rows[0].ID != second.ID {
+		t.Fatalf("discrepancy filter: (%d, %s)", total, rows[0].ID)
+	}
+	rows, total = listOK(t, s, invTenantA, ListFilter{Status: StatusPending, PageSize: 10})
+	if total != 1 || rows[0].ID != first.ID {
+		t.Fatalf("pending filter: (%d, %s)", total, rows[0].ID)
+	}
+
+	// Number-prefix query, lowercase input over mixed-case numbers.
+	rows, total = listOK(t, s, invTenantA, ListFilter{Query: "inv/lower", PageSize: 10})
+	if total != 1 || rows[0].ID != first.ID {
+		t.Fatalf("prefix lowercase: (%d, %s), want first", total, rows[0].ID)
+	}
+	// A literal % matches nothing (wildcards escaped by ValidateList).
+	rows, total = listOK(t, s, invTenantA, ListFilter{Query: "%", PageSize: 10})
+	if total != 0 || len(rows) != 0 {
+		t.Fatalf("literal %%: (%d, %d rows), want 0/0", total, len(rows))
+	}
+	// Combined: the shared prefix + matched leaves only third.
+	rows, total = listOK(t, s, invTenantA, ListFilter{Query: "INV/", Status: StatusMatched, PageSize: 10})
+	if total != 1 || rows[0].ID != third.ID {
+		t.Fatalf("combined: (%d, %s), want third", total, rows[0].ID)
+	}
+
+	// Cross-tenant: tenant B's list sees only its own row, never tenant A's;
+	// tenant A's totals never count tenant B's invoice.
+	rows, total = listOK(t, s, invTenantB, ListFilter{})
+	if total != 1 || len(rows) != 1 || rows[0].TenantID != invTenantB ||
+		rows[0].Number != "INV-TENANT-B" {
+		t.Fatalf("tenant B list = (%d, %+v), want its one row only", total, rows)
+	}
+	rows, total = listOK(t, s, invTenantA, ListFilter{Query: "INV-TENANT-B"})
+	if total != 0 || len(rows) != 0 {
+		t.Fatalf("tenant A sees tenant B's invoice: (%d, %+v)", total, rows)
+	}
+}
+
+// AC (#41 pagination): deep pages slice correctly, a past-the-end page keeps
+// the true total through the COUNT fallback, and zero values normalize to the
+// 1/20 defaults.
+func TestStoreListPagination(t *testing.T) {
+	db := openTestDB(t)
+	cleanupINV(t, db)
+	t.Cleanup(func() { cleanupINV(t, db) })
+	ctx := context.Background()
+	s := NewStore(db)
+	po := invoicablePO(t, db, invTenantA, "INV-39-A", invBasket)
+	laptop := invItemByQty(t, po, 2)
+
+	var created []Invoice
+	for i, number := range []string{"INV-PAGE-1", "INV-PAGE-2", "INV-PAGE-3"} {
+		inv, err := s.Create(ctx, invTenantA, CreateInput{
+			POID: po.ID, Number: number,
+			Items: []Item{{POItemID: laptop.ID, Qty: 1, UnitPriceCents: int64(i+1) * 100000}},
+			Actor: invFinance,
+		})
+		if err != nil {
+			t.Fatalf("create %s: %v", number, err)
+		}
+		created = append(created, inv)
+	}
+
+	// Deep page: page 2 of size 2 carries the oldest row only.
+	rows, total := listOK(t, s, invTenantA, ListFilter{Page: 2, PageSize: 2})
+	if total != 3 || len(rows) != 1 || rows[0].ID != created[0].ID {
+		t.Fatalf("deep page: total = %d, rows = %+v", total, rows)
+	}
+	// Past-the-end page: no rows, but the true total via the fallback COUNT.
+	rows, total = listOK(t, s, invTenantA, ListFilter{Page: 5, PageSize: 2})
+	if total != 3 || len(rows) != 0 {
+		t.Fatalf("past-the-end: total = %d, rows = %d, want 3/0", total, len(rows))
+	}
+	// Zero values: the normalized 1/20 defaults return everything.
+	rows, total = listOK(t, s, invTenantA, ListFilter{})
+	if total != 3 || len(rows) != 3 {
+		t.Fatalf("defaults: total = %d, rows = %d, want 3/3", total, len(rows))
+	}
+	if rows[0].ID != created[2].ID {
+		t.Fatalf("defaults not newest-first: %s", rows[0].ID)
+	}
+}

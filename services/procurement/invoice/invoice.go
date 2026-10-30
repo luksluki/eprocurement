@@ -10,6 +10,7 @@ package invoice
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -53,7 +54,72 @@ var (
 	// the intended loop, and each run appends its own event (maintainer
 	// decision 2026-10-28).
 	ErrAlreadyMatched = errors.New("inv_already_matched")
+	// ErrStatusInvalid / ErrPageInvalid are the list-filter sentinels (#41,
+	// the #38 purchaseorder.ValidateList precedent requisition.go): an
+	// unknown status value or an absurd page number.
+	ErrStatusInvalid = errors.New("inv_status_invalid")
+	ErrPageInvalid   = errors.New("inv_page_invalid")
 )
+
+// listStatuses is the status whitelist for the invoice list filter: the three
+// statuses the 0009 CHECK enforces (the empty filter means "all").
+var listStatuses = map[string]bool{
+	StatusPending: true, StatusMatched: true, StatusDiscrepancy: true,
+}
+
+// List bounds for pagination (same contract as the vendor/requisition/PO
+// lists, #27/#32/#38).
+const (
+	DefaultPageSize = 20
+	MaxPageSize     = 100
+	MaxPage         = 1000000
+)
+
+// ListFilter is the invoice-list query (#41): a free-text number-prefix
+// match, an optional status, and server-side pagination. Zero values fall
+// back to the defaults; ordering is fixed by creation time descending with
+// the id as the deterministic tie-breaker (newest invoice first — vendor
+// numbers are free-form, so unlike the PO/requisition lists number order is
+// not creation order).
+type ListFilter struct {
+	Query    string
+	Status   string
+	Page     int32
+	PageSize int32
+}
+
+// ValidateList normalizes and validates the filter: status must be one of the
+// three invoice statuses (or empty), page/page_size are clamped into range,
+// and the query is trimmed and uppercased (the prefix match compares
+// case-insensitively — vendor numbers are the issuer's convention) with LIKE
+// wildcards escaped so user input matches literally.
+func ValidateList(f ListFilter) (ListFilter, error) {
+	f.Status = strings.TrimSpace(f.Status)
+	if f.Status != "" && !listStatuses[f.Status] {
+		return f, ErrStatusInvalid
+	}
+	if f.Page < 1 {
+		f.Page = 1
+	}
+	if f.Page > MaxPage {
+		return f, ErrPageInvalid
+	}
+	if f.PageSize < 1 {
+		f.PageSize = DefaultPageSize
+	}
+	if f.PageSize > MaxPageSize {
+		f.PageSize = MaxPageSize
+	}
+	f.Query = escapeLike(strings.ToUpper(strings.TrimSpace(f.Query)))
+	return f, nil
+}
+
+// escapeLike neutralizes LIKE wildcards so a query containing %, _, or \
+// matches those literal characters (same helper contract as the lists).
+func escapeLike(s string) string {
+	r := strings.NewReplacer(`\`, `\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
+}
 
 // OverBillError names the PO whose existing invoices plus this request
 // would exceed po.total_cents. Error() is the wire format pinned in
