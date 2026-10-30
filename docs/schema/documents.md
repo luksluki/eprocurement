@@ -49,6 +49,8 @@ reaper → pending older than ATTACHMENT_PENDING_TTL (default 24h):
 | `ListAttachments` | per entity: `vendor:read` / `requisition:read` / `invoice:read` | by owner (entity type + id), oldest first |
 | `GetDownloadUrl` | per entity: `vendor:read` / `requisition:read` / `invoice:read` | ready attachments only, returns presigned GET |
 | `ListEvents` | `requisition:read` | interceptor map (single permission) |
+| `ListAudit` | `audit:read` | interceptor map (#44); viewer/admin only |
+| `ExportAudit` | `audit:read` | interceptor map (#44); bounded CSV, newest 10 000 rows |
 | `ListExportRuns` | `export:run` | interceptor map (#49); export run history, newest first |
 | `GetExportDownloadUrl` | `export:run` | interceptor map (#49); presigned GET for successful runs |
 
@@ -130,11 +132,13 @@ Integration tests run against real MongoDB + MinIO and are gated on
 
 `services/documents/history` is the append-only projection of procurement
 domain events (PRD §14.3 CQRS-lite; ADR-0001: no dual writes). `Store.Apply`
-is the projection function the worker consumers (#45–#47) will call; the
+is the projection function the worker consumers (#45–#47) call; the
 transport (RabbitMQ) is theirs. Both collections are **append-only** — no
-update or delete path exists anywhere in the codebase, and the package
-exports only `EnsureIndexes`, the document constructors, `Apply`, and
-`List` (PRD §17).
+update or delete path exists on the service surface or in the seed (the
+seed bulk-inserts demo rows directly, also insert-only; PRD §17 "no
+update/delete API"), and the package exports only `EnsureIndexes`, the
+document constructors, `Apply`, and the read side (`List`, `ListAudit`,
+`ExportAudit`).
 
 ### Collections
 
@@ -148,26 +152,44 @@ exports only `EnsureIndexes`, the document constructors, `Apply`, and
 | `version` | int | payload schema version, 1 today |
 | `occurred_at` | date | business time (ms precision) |
 | `actor_id` | string | the acting user; empty when unknown |
+| `actor_ip` | string | the acting client's IP as the gateway resolved it (#44 envelope delta); empty on events raised before #44 |
 | `trace_id` | string | propagated trace; empty when unknown |
 | `entity_type` | string | aggregate kind, e.g. `requisition` |
 | `entity_id` | string | aggregate id |
 | `payload` | string | **raw JSON string** — full fidelity of the procurement outbox jsonb (no key reordering, no number re-encoding); `ListEvents` returns it verbatim as `payload_json` |
 
-`audit_log` — one document per **decision** event (`pr.approved`,
-`pr.step_approved`, `pr.rejected`, `pr.step_rejected` — the decide types of
-dev-note 031; `history.AuditAction` maps them to `approve`/`reject`):
+`audit_log` — one document per **decision** event (#44 completes the
+PRD §14.7 verb set): `pr.approved`, `pr.step_approved`, `pr.rejected`,
+`pr.step_rejected` (dev-note 031), `po.issued`, `grn.posted`,
+`invoice.matched`, `invoice.discrepancy` — eight decision event types over
+the five verbs, mapped by `history.AuditAction` to
+`approve`/`reject`/`issue`/`post`/`match` (`invoice.discrepancy` is the
+same match decision with the other outcome). The lifecycle actions §14.7
+leaves out stay non-decisions: `po.acknowledged`, `po.cancelled`,
+`po.closed`, `pr.submitted`:
 
 | Field | Type | Notes |
 |---|---|---|
 | `event_id` | string | unique; dedupes audit writes per event |
 | `tenant_id` | string | tenant scoping |
-| `actor_id` | string | the decider |
-| `action` | string | `approve` \| `reject` |
-| `entity_type` / `entity_id` | string | the decided aggregate (the requisition) |
+| `actor_id` | string | the decider — **the authoritative attribution** (the JWT subject) |
+| `actor_ip` | string | the client IP the gateway recorded for the call (#44); see the trust note below |
+| `action` | string | `approve` \| `reject` \| `issue` \| `post` \| `match` |
+| `entity_type` / `entity_id` | string | the decided aggregate (requisition, purchase order, or invoice) |
 | `details` | string | raw JSON payload of the event, verbatim |
 | `trace_id` | string | propagated trace |
 | `occurred_at` | date | business time |
 | `recorded_at` | date | projection time (when Apply wrote the row) |
+
+**`actor_ip` trust note (#44).** The IP is what fiber's
+trusted-proxy-checked `c.IP()` reported at the gateway: a caller whose
+socket address is inside `GATEWAY_TRUSTED_PROXIES` (the demo compose
+stack's docker network range) is trusted to set `X-Forwarded-For`, every
+other caller is recorded with its socket address. Anyone inside the
+trusted range can therefore spoof the recorded IP — the documented
+trade-off; `actor_id` (the verified JWT subject) remains the authoritative
+attribution, and the trade-off is flagged for maintainer review in #44's
+PR. Rows/events raised before #44 carry `""`.
 
 Decoding tolerates absent fields (zero values, no error) — rows written
 before a field existed (e.g. the pre-#42 seed shape without
@@ -237,6 +259,52 @@ tenant can read its own timeline; the mapping is mandatory because methods
 missing from `MethodPermissions` pass through unprotected (rbac/grpc.go).
 No new permission was added — `internal/platform/rbac` and `docs/rbac.md`
 are untouched.
+
+## Audit log read API (#44)
+
+`ListAudit` / `ExportAudit` are the audit admin view's read side (PRD
+§14.7, the #47 notifications precedent: documents owns the projection, the
+gateway serves the REST surface). Both map to **`audit:read`** in
+`methodPermissions` — viewer/admin only (the maintainer decision on
+issue #44; the first real consumer of the permission).
+
+### ListAudit
+
+`Store.ListAudit(ctx, tenant, AuditFilter)` — the ListEvents contract on
+the audit collection: order `occurred_at DESC, event_id DESC` (decision
+step + terminal pairs share `occurred_at`), keyset cursor (the same opaque
+codec), tenant scoping absolute (another tenant's rows are invisible —
+empty result). Filters: `action` must be empty or one of the five audit
+verbs (`audit_action_invalid` otherwise), `entity_type`+`entity_id`
+both-or-neither (`events_filter_invalid`), limit default 20 / max 100
+clamped. `details` is deliberately **not** on the wire — the bounded column
+set; the same payload is readable through ListEvents `payload_json`.
+
+### ExportAudit
+
+`Store.ExportAudit` + `history.AuditCSV` render the tenant's audit log as
+RFC 4180 CSV (CRLF, the #49 convention). Three explicit bounds keep the
+unary gRPC response far under the default 4 MiB *and* the raised 16 MiB
+receive limit the gateway sets on its documents dial:
+
+1. **bounded columns** — `event_id, occurred_at, recorded_at, actor_id,
+   actor_ip, action, entity_type, entity_id, trace_id`; the raw
+   `details`/payload JSON is excluded;
+2. **`grpc.MaxCallRecvMsgSize(16 MiB)`** on the gateway's documents dial
+   (`cmd/gateway/main.go`);
+3. **cap 10 000 newest rows** per tenant (`MaxAuditExportRows`).
+
+REST: `GET /api/v1/audit` and `GET /api/v1/audit/export` (text/csv,
+`Content-Disposition: attachment; filename="audit-log.csv"`), both behind
+`RequirePermission(audit:read)`. A streaming/MinIO download (the #49
+nightly-export pattern) is the documented follow-up if the cap must rise.
+
+### gRPC API addition (documents.v1)
+
+| Method | Permission | Notes |
+|---|---|---|
+| `ListAudit` | `audit:read` | interceptor map (#44); newest first, cursor-paginated, action/entity filters |
+| `ExportAudit` | `audit:read` | interceptor map (#44); bounded CSV bytes, newest 10 000 rows max |
 
 ## Notifications projection (#47)
 

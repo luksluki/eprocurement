@@ -43,6 +43,17 @@ service Documents {
   // export_not_succeeded); another tenant's run id is indistinguishable
   // from a missing one.
   rpc GetExportDownloadUrl(GetExportDownloadUrlRequest) returns (GetExportDownloadUrlResponse);
+  // ListAudit returns the caller tenant's audit log — one row per decision
+  // event (approve/reject/issue/post/match, PRD §14.7) — newest first with
+  // the same keyset cursor contract as ListEvents. Both audit methods
+  // re-check audit:read in the service-layer interceptor map (#44:
+  // viewer/admin only).
+  rpc ListAudit(ListAuditRequest) returns (ListAuditResponse);
+  // ExportAudit returns the tenant's audit log as RFC 4180 CSV (CRLF),
+  // capped at the newest 10 000 rows with bounded metadata columns only —
+  // no details/payload column, so the unary response stays well under the
+  // gRPC message limit (#44's three-layer export bound).
+  rpc ExportAudit(ExportAuditRequest) returns (ExportAuditResponse);
 }
 
 message Attachment {
@@ -109,10 +120,11 @@ message Event {
   int32 version = 4;         // payload schema version, 1 today
   string occurred_at = 5;    // RFC 3339
   string actor_id = 6;       // user id, empty when unknown
-  string trace_id = 7;       // propagated trace, empty when unknown
-  string entity_type = 8;    // aggregate kind, e.g. "requisition"
-  string entity_id = 9;
-  string payload_json = 10;  // raw JSON payload, never restructured
+  string actor_ip = 7;       // acting client IP (#44 envelope delta), empty on pre-#44 rows
+  string trace_id = 8;       // propagated trace, empty when unknown
+  string entity_type = 9;    // aggregate kind, e.g. "requisition"
+  string entity_id = 10;
+  string payload_json = 11;  // raw JSON payload, never restructured
 }
 
 message ListEventsRequest {
@@ -159,4 +171,42 @@ message GetExportDownloadUrlResponse {
   ExportRun run = 1;
   string download_url = 2; // presigned GET target on MinIO
   string expires_at = 3;   // RFC 3339
+}
+
+// AuditEntry is one audit_log row: the decision's actor, action, entity,
+// and trace (#44). Details (the raw payload JSON) is deliberately not on
+// this wire — the list and the export stay bounded; the same payload is
+// readable through ListEvents payload_json.
+message AuditEntry {
+  string event_id = 1;
+  string tenant_id = 2;
+  string actor_id = 3;     // user id, empty when unknown
+  string actor_ip = 4;     // acting client IP as the gateway resolved it, "" on pre-#44 rows
+  string action = 5;       // "approve" | "reject" | "issue" | "post" | "match"
+  string entity_type = 6;  // the decided aggregate, e.g. "requisition"
+  string entity_id = 7;
+  string trace_id = 8;     // propagated trace, empty when unknown
+  string occurred_at = 9;  // RFC 3339 — business time
+  string recorded_at = 10; // RFC 3339 — projection time
+}
+
+message ListAuditRequest {
+  // Optional filters: action must be one of the five audit actions; the
+  // entity pair must be both set or both empty.
+  string action = 1;
+  string entity_type = 2;
+  string entity_id = 3;
+  int32 limit = 4;         // default 20, max 100 (clamped)
+  string next_cursor = 5;  // keyset cursor from a previous response
+}
+
+message ListAuditResponse {
+  repeated AuditEntry entries = 1;  // newest first
+  string next_cursor = 2;           // empty on the last page
+}
+
+message ExportAuditRequest {}
+
+message ExportAuditResponse {
+  bytes csv = 1;  // RFC 4180, CRLF, bounded columns, newest 10 000 rows max
 }

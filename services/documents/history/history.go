@@ -29,6 +29,7 @@ var (
 	ErrPayloadInvalid  = errors.New("events_payload_invalid")
 	ErrFilterInvalid   = errors.New("events_filter_invalid")
 	ErrCursorInvalid   = errors.New("events_cursor_invalid")
+	ErrActionInvalid   = errors.New("audit_action_invalid")
 )
 
 // DefaultLimit and MaxLimit bound ListEvents pages. Limit normalization
@@ -44,7 +45,9 @@ const (
 // names are pinned in EventBSON and documented in docs/schema/documents.md;
 // note the type field is `type`, not `event_type`, matching the envelope
 // and the seed. PayloadJSON must be valid JSON (the outbox jsonb guarantee)
-// so consumers can parse it without trusting the producer.
+// so consumers can parse it without trusting the producer. ActorIP is the
+// documented §14.5 envelope extension of #44 (the acting client's IP as the
+// gateway resolved it); empty on events raised before it existed.
 type Event struct {
 	EventID     string
 	TenantID    string
@@ -52,6 +55,7 @@ type Event struct {
 	Version     int32
 	OccurredAt  time.Time
 	ActorID     string
+	ActorIP     string
 	TraceID     string
 	EntityType  string
 	EntityID    string
@@ -63,13 +67,14 @@ type Event struct {
 // writer does), and validates the result. The seed uses it so the seeded
 // documents can never drift from what Apply writes.
 func NewEvent(eventID, tenantID, eventType string, occurredAt time.Time,
-	actorID, traceID, entityType, entityID, payloadJSON string) (Event, error) {
+	actorID, actorIP, traceID, entityType, entityID, payloadJSON string) (Event, error) {
 	ev := Event{
 		EventID:     eventID,
 		TenantID:    tenantID,
 		Type:        eventType,
 		OccurredAt:  occurredAt,
 		ActorID:     actorID,
+		ActorIP:     actorIP,
 		TraceID:     traceID,
 		EntityType:  entityType,
 		EntityID:    entityID,
@@ -85,6 +90,7 @@ func (e Event) normalize() Event {
 	e.TenantID = strings.TrimSpace(e.TenantID)
 	e.Type = strings.TrimSpace(e.Type)
 	e.ActorID = strings.TrimSpace(e.ActorID)
+	e.ActorIP = strings.TrimSpace(e.ActorIP)
 	e.TraceID = strings.TrimSpace(e.TraceID)
 	e.EntityType = strings.TrimSpace(e.EntityType)
 	e.EntityID = strings.TrimSpace(e.EntityID)

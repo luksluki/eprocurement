@@ -54,6 +54,7 @@ func seedEvent(id, eventType, occurredAt string) *documentsv1.Event {
 		Version:     1,
 		OccurredAt:  occurredAt,
 		ActorId:     "user-1",
+		ActorIp:     "203.0.113.7",
 		TraceId:     "trace-" + id,
 		EntityType:  "requisition",
 		EntityId:    "r-1",
@@ -84,7 +85,7 @@ func TestListEventsReturnsEnvelopeAndCursor(t *testing.T) {
 	want := map[string]any{
 		"event_id": "ev-2", "tenant_id": "tenant-9", "type": "pr.approved",
 		"version": float64(1), "occurred_at": "2026-10-26T09:00:00Z",
-		"actor_id": "user-1", "trace_id": "trace-ev-2",
+		"actor_id": "user-1", "actor_ip": "203.0.113.7", "trace_id": "trace-ev-2",
 		"entity_type": "requisition", "entity_id": "r-1",
 		"payload_json": `{"status":"approved"}`,
 	}

@@ -69,6 +69,7 @@ type row struct {
 	Version     int32
 	Payload     []byte
 	ActorID     *string
+	ActorIP     string
 	TraceID     string
 	EntityType  string
 	EntityID    string
@@ -82,11 +83,11 @@ func loadRow(t *testing.T, db *pgxpool.Pool, id string) row {
 	err := tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
 		return tx.QueryRow(context.Background(), `
 			SELECT id, tenant_id::text, event_type, version, payload,
-			       actor_id::text, trace_id, entity_type, entity_id::text,
+			       actor_id::text, actor_ip, trace_id, entity_type, entity_id::text,
 			       occurred_at, published_at
 			FROM procurement.outbox WHERE id = $1`, id).Scan(
 			&r.ID, &r.TenantID, &r.EventType, &r.Version, &r.Payload,
-			&r.ActorID, &r.TraceID, &r.EntityType, &r.EntityID,
+			&r.ActorID, &r.ActorIP, &r.TraceID, &r.EntityType, &r.EntityID,
 			&r.OccurredAt, &r.PublishedAt)
 	})
 	if err != nil {
@@ -106,6 +107,7 @@ func TestAppendTxRoundTrip(t *testing.T) {
 		ID: "eeeeeeee-0000-0000-0000-0000000000aa", TenantID: tenantID,
 		EventType: "pr.step_approved", Payload: samplePayload{Number: "PR-000001", Decision: "approve"},
 		ActorID: "eeeeeeee-0000-0000-0000-0000000000bb", TraceID: "trace-31",
+		ActorIP:    "203.0.113.7", // #44: the acting client's IP rides the row
 		EntityType: "requisition", EntityID: "eeeeeeee-0000-0000-0000-0000000000cc",
 		OccurredAt: at,
 	}
@@ -118,6 +120,7 @@ func TestAppendTxRoundTrip(t *testing.T) {
 	r := loadRow(t, db, ev.ID)
 	if r.TenantID != tenantID || r.EventType != "pr.step_approved" || r.Version != 1 ||
 		r.ActorID == nil || *r.ActorID != ev.ActorID || r.TraceID != "trace-31" ||
+		r.ActorIP != "203.0.113.7" ||
 		r.EntityType != "requisition" || r.EntityID != ev.EntityID || r.PublishedAt != nil {
 		t.Fatalf("row = %+v", r)
 	}
@@ -127,6 +130,25 @@ func TestAppendTxRoundTrip(t *testing.T) {
 	var p samplePayload
 	if err := json.Unmarshal(r.Payload, &p); err != nil || p != (samplePayload{Number: "PR-000001", Decision: "approve"}) {
 		t.Fatalf("payload = %s (%v)", r.Payload, err)
+	}
+
+	// The publisher's read side carries actor_ip out with the row (#44) so
+	// the §14.5 envelope stays column-assembled, no payload parsing.
+	pending, err := Pending(ctx, db, 10)
+	if err != nil {
+		t.Fatalf("pending: %v", err)
+	}
+	found := false
+	for _, pe := range pending {
+		if pe.ID == ev.ID {
+			found = true
+			if pe.ActorIP != "203.0.113.7" {
+				t.Fatalf("Pending actor_ip = %q, want 203.0.113.7", pe.ActorIP)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("appended row not returned by Pending")
 	}
 }
 

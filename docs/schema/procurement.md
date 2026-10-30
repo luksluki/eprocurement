@@ -222,6 +222,7 @@ section below.
 | `payload` | jsonb NOT NULL | decision payload — see below |
 | `actor_id` | uuid NULL | **delta vs §13**: envelope `actor_id` (§14.5) as a column; the decider |
 | `trace_id` | text NOT NULL DEFAULT '' | **delta vs §13**: envelope `trace_id` (§14.5) as a column; the propagated REST `X-Trace-Id` |
+| `actor_ip` | text NOT NULL DEFAULT '' | **delta vs §14.5**: the acting client's IP (#44, migration 0013) — display/context data; `actor_id` stays the authoritative attribution |
 | `entity_type` / `entity_id` | text / uuid NOT NULL | **delta vs §13/§14.5**: filter keys for `GET /api/v1/events?entityType=&entityId=` (§15) and the timeline projection (#43); for decide events the entity is the **requisition**, the step rides in the payload |
 | `occurred_at` | timestamptz NOT NULL | **delta vs §13**: envelope `occurred_at` (§14.5) as a column |
 | `created_at` | timestamptz NOT NULL | |
@@ -1048,8 +1049,33 @@ missing (404 `requisition_not_found`).
 - #39: invoice model and create API (done — 0009 tables, vendor invoice numbers unique per (tenant, vendor), vendor/currency derived server-side from the locked PO, server-recomputed totals, the cumulative strict `inv_over_bill: …` guard with the dedicated REST renderer, `pending|matched|discrepancy` status CHECK with `match_result` reserved for #40, attachment entity + routes + embedded detail read, no outbox row on create). See the [Invoices](#invoices-39) section.
 - #40: three-way match with tolerance (done — 0010 `match_settings` (defaults 0%/0%), the pure integer engine with the cumulative upper-side qty guard and the symmetric price guard, the pinned `match_result` shape with `inv_over_bill_qty`/`inv_over_bill_price` reason lines, the transactional Match under the PO row lock with the `matched` re-run guard and exactly one `invoice.matched`/`invoice.discrepancy` outbox row per run, gRPC `MatchInvoice`/`GetMatchSettings`/`ReplaceMatchSettings`, REST `POST /api/v1/invoices/{id}/match` + admin-only `GET|PUT /api/v1/match-settings` behind `match:configure`, no attachment gate). See the [Three-way match](#three-way-match-40) section.
 - #41: invoice list endpoint + invoice UI with match result (done — `ListInvoices` at `invoice:read` behind `GET /api/v1/invoices` with the three-status `inv_status_invalid`/`inv_page_invalid` filter contract and header-only rows, 0012's `invoices_tenant_status_idx`, the `/app/invoices` list/detail screens with the MatchResultPanel rendering the #40 verdict + per-line diff, the client-side hard attachment gate on the Match button, the `/app/invoices/new?po=` create page, and the finance attachment upload — the demo flow's 'attachment required' obligation now lives in the UI). See the [Invoice list](#invoice-list--filters-pagination-query-plans-41) section below.
+- #44: decision audit log with actor IP and admin view (done — 0013 `outbox.actor_ip`, `x-actor-ip` gateway→interceptor→outbox propagation with fiber's trusted-proxy check (`GATEWAY_TRUSTED_PROXIES`), the §14.5 envelope delta `actor_ip` flowing to the Mongo projections, the audit read API `ListAudit`/`ExportAudit` at `audit:read` with the three-layer CSV export bound, and the `/app/audit` admin view; the audit_log decision set now covers all five PRD §14.7 verbs). See the [Migration 0013](#migration-0013--procurementoutbox_actor_ip-44) section.
 - Approvals read endpoints/queue #32-34 (M2–M3).
 - The timeline/event read path (#42/#43/#47, `GET /api/v1/events`) consumes the outbox's `entity_type`/`entity_id` columns; a tenant+entity index arrives with whichever issue first queries them.
+
+## Migration 0013 — `procurement.outbox.actor_ip` (#44)
+
+`ALTER TABLE procurement.outbox ADD COLUMN actor_ip text NOT NULL DEFAULT
+''` — the acting client's IP on every outbox row, the procurement half of
+#44's audit trail (PRD §14.7 "actor + trace"). It is a **conscious §14.5
+envelope delta** recorded here rather than claimed as PRD-conformant (the
+`entity_type`/`entity_id` precedent of #47): the PRD envelope names
+`actor_id`, not `actor_ip`.
+
+Propagation path: the web BFF forwards the browser request's
+`X-Forwarded-For` to the gateway (`lib/gateway.ts`); fiber resolves
+`c.IP()` under `EnableTrustedProxyCheck` + `TrustedProxies` from
+`GATEWAY_TRUSTED_PROXIES` (empty = trust nothing: every forwarded header
+is ignored and the socket peer is recorded); `forwardContext` appends it
+as `x-actor-ip` gRPC metadata (the `x-trace-id` pattern); the shared
+`TraceInterceptor` copies it into the request context
+(`logger.ActorIP`); every outbox writer (`Decide`, submit, conversion,
+lifecycle, GRN post, match) sets `ActorIP` on its `outbox.Event`, and the
+publisher's envelope carries it onto RabbitMQ and into the Mongo
+`events`/`audit_log` projections. See the actor_ip trust note in
+`docs/schema/documents.md` — `actor_id` (the JWT subject) stays the
+authoritative attribution; the IP is display/context data. No new index:
+`actor_ip` is never a query key.
 
 ## Vendor list — filters, pagination, query plans (#27)
 

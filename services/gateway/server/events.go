@@ -71,7 +71,8 @@ func eventError(c *fiber.Ctx, err error) error {
 }
 
 // eventJSON is the REST shape of one history event — the PRD §14.5 envelope
-// with payload_json verbatim (no restructuring, dev-note 042).
+// with payload_json verbatim (no restructuring, dev-note 042) and actor_ip
+// alongside actor_id (#44's envelope delta; empty on pre-#44 events).
 func eventJSON(ev *documentsv1.Event) fiber.Map {
 	return fiber.Map{
 		"event_id":     ev.GetEventId(),
@@ -80,6 +81,7 @@ func eventJSON(ev *documentsv1.Event) fiber.Map {
 		"version":      ev.GetVersion(),
 		"occurred_at":  ev.GetOccurredAt(),
 		"actor_id":     ev.GetActorId(),
+		"actor_ip":     ev.GetActorIp(),
 		"trace_id":     ev.GetTraceId(),
 		"entity_type":  ev.GetEntityType(),
 		"entity_id":    ev.GetEntityId(),

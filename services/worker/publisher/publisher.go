@@ -42,6 +42,8 @@ const dialTimeout = 10 * time.Second
 // row — the columns exist precisely so this needs no payload parsing.
 // EntityType/EntityID extend §14.5: the outbox columns already exist and
 // consumers (history validation, #47) require them to route the aggregate.
+// ActorIP extends it the same way (#44): the acting client's IP, recorded
+// on the audit trail; "" on rows written before migration 0013.
 type Envelope struct {
 	EventID    string          `json:"event_id"`
 	TenantID   string          `json:"tenant_id"`
@@ -51,6 +53,7 @@ type Envelope struct {
 	EntityID   string          `json:"entity_id"`
 	OccurredAt time.Time       `json:"occurred_at"`
 	ActorID    string          `json:"actor_id"`
+	ActorIP    string          `json:"actor_ip"`
 	TraceID    string          `json:"trace_id"`
 	Payload    json.RawMessage `json:"payload"`
 }
@@ -61,8 +64,8 @@ func EnvelopeFromRow(r outbox.PendingEvent) Envelope {
 	return Envelope{
 		EventID: r.ID, TenantID: r.TenantID, Type: r.EventType, Version: r.Version,
 		EntityType: r.EntityType, EntityID: r.EntityID,
-		OccurredAt: r.OccurredAt, ActorID: r.ActorID, TraceID: r.TraceID,
-		Payload: r.Payload,
+		OccurredAt: r.OccurredAt, ActorID: r.ActorID, ActorIP: r.ActorIP,
+		TraceID: r.TraceID, Payload: r.Payload,
 	}
 }
 

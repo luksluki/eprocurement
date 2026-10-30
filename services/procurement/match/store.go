@@ -183,6 +183,7 @@ func (s *Store) Match(ctx context.Context, tenantID, invoiceID, actor string) (i
 				Status: status, Lines: result.Lines, MatchedBy: actor,
 			},
 			ActorID:    actor,
+			ActorIP:    logger.ActorIP(ctx),
 			TraceID:    logger.TraceID(ctx),
 			EntityType: "invoice",
 			EntityID:   inv.ID,

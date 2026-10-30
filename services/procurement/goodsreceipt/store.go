@@ -187,6 +187,7 @@ func (s *Store) Post(ctx context.Context, tenantID string, in PostInput) (GoodsR
 				POStatus: loaded.Status, Items: items, ReceivedBy: in.Actor,
 			},
 			ActorID:    in.Actor,
+			ActorIP:    logger.ActorIP(ctx),
 			TraceID:    logger.TraceID(ctx),
 			EntityType: "purchase_order",
 			EntityID:   loaded.ID,

@@ -57,11 +57,12 @@ type ProcurementClient interface {
 }
 
 type gatewayOptions struct {
-	procurement ProcurementClient
-	documents   DocumentsClient
-	identity    IdentityClient
-	loginLimit  *loginLimiter
-	dlq         DLQAdmin
+	procurement    ProcurementClient
+	documents      DocumentsClient
+	identity       IdentityClient
+	loginLimit     *loginLimiter
+	dlq            DLQAdmin
+	trustedProxies []string
 }
 
 // WithProcurement proxies the procurement API under /api/v1/vendors,
@@ -98,6 +99,16 @@ func WithDLQ(admin DLQAdmin) Option {
 	return func(o *gatewayOptions) { o.dlq = admin }
 }
 
+// WithTrustedProxies pins whose X-Forwarded-For the gateway honors (#44).
+// The trusted-proxy check is always enabled: with no trusted proxies
+// (nil — the default when GATEWAY_TRUSTED_PROXIES is unset) every
+// X-Forwarded-* header is ignored and c.IP() reports the socket peer, so
+// a direct client cannot spoof its audit actor_ip. Entries are single IPs
+// or CIDR ranges (the demo compose stack sets the docker network range).
+func WithTrustedProxies(cidrs []string) Option {
+	return func(o *gatewayOptions) { o.trustedProxies = cidrs }
+}
+
 // New builds the fiber app.
 func New(log *slog.Logger, verifier *token.Verifier, opts ...Option) *fiber.App {
 	var o gatewayOptions
@@ -107,6 +118,15 @@ func New(log *slog.Logger, verifier *token.Verifier, opts ...Option) *fiber.App 
 
 	app := fiber.New(fiber.Config{
 		AppName: "eprocurement-gateway",
+		// #44: X-Forwarded-For is only honored from the configured trusted
+		// proxies — c.IP() (the audit trail's actor_ip source and the login
+		// limiter key) is otherwise the socket peer, never a spoofable
+		// header. ProxyHeader names the header trusted proxies may set;
+		// EnableTrustedProxyCheck gates who counts as trusted. See
+		// WithTrustedProxies.
+		EnableTrustedProxyCheck: true,
+		TrustedProxies:          o.trustedProxies,
+		ProxyHeader:             fiber.HeaderXForwardedFor,
 		ErrorHandler: func(c *fiber.Ctx, err error) error {
 			code := fiber.StatusInternalServerError
 			if e, ok := err.(*fiber.Error); ok {
@@ -144,6 +164,7 @@ func New(log *slog.Logger, verifier *token.Verifier, opts ...Option) *fiber.App 
 	if o.documents != nil {
 		registerEventRoutes(app, verifier, o.documents)
 		registerExportRoutes(app, verifier, o.documents)
+		registerAuditRoutes(app, verifier, o.documents)
 	}
 	if o.dlq != nil {
 		registerDLQRoutes(app, verifier, o.dlq)

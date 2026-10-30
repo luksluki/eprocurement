@@ -318,7 +318,7 @@ func appendSubmittedTx(ctx context.Context, tx pgx.Tx, r Requisition, actor stri
 			Currency: r.Currency, TotalCents: r.TotalCents,
 			SubmittedBy: actor, SubmittedAt: *r.SubmittedAt,
 		},
-		ActorID: actor, TraceID: logger.TraceID(ctx),
+		ActorID: actor, TraceID: logger.TraceID(ctx), ActorIP: logger.ActorIP(ctx),
 		EntityType: "requisition", EntityID: r.ID, OccurredAt: *r.SubmittedAt,
 	})
 }

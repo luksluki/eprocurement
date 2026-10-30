@@ -150,6 +150,35 @@ func TestTraceInterceptorGeneratesTraceID(t *testing.T) {
 	}
 }
 
+// TestTraceInterceptorPropagatesActorIP pins the #44 half of the
+// interceptor: x-actor-ip metadata lands in the handler context via
+// logger.ActorIP (the outbox writer's source for the actor_ip column) —
+// trimmed when present, empty when absent, and never generated (unlike the
+// trace id, an unknown IP must stay unknown, not invented).
+func TestTraceInterceptorPropagatesActorIP(t *testing.T) {
+	var ctx context.Context
+	handler := func(ctx2 context.Context, req any) (any, error) {
+		ctx = ctx2
+		return nil, nil
+	}
+
+	inCtx := metadata.NewIncomingContext(context.Background(),
+		metadata.Pairs("x-actor-ip", " 203.0.113.7 "))
+	if _, err := TraceInterceptor(inCtx, nil, &grpc.UnaryServerInfo{}, handler); err != nil {
+		t.Fatalf("interceptor: %v", err)
+	}
+	if got := logger.ActorIP(ctx); got != "203.0.113.7" {
+		t.Fatalf("actor ip = %q, want 203.0.113.7", got)
+	}
+
+	if _, err := TraceInterceptor(context.Background(), nil, &grpc.UnaryServerInfo{}, handler); err != nil {
+		t.Fatalf("interceptor: %v", err)
+	}
+	if got := logger.ActorIP(ctx); got != "" {
+		t.Fatalf("absent actor ip = %q, want empty", got)
+	}
+}
+
 func TestLoggingInterceptorLogsTraceIDAndCode(t *testing.T) {
 	var logBuf bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&logBuf, nil))

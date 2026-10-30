@@ -423,7 +423,7 @@ func appendDecisionEventsTx(ctx context.Context, tx pgx.Tx, tenantID string, req
 	}
 	base := outbox.Event{
 		TenantID: tenantID, Version: 1, Payload: payload,
-		ActorID: in.ActorID, TraceID: logger.TraceID(ctx),
+		ActorID: in.ActorID, TraceID: logger.TraceID(ctx), ActorIP: logger.ActorIP(ctx),
 		EntityType: "requisition", EntityID: req.ID, OccurredAt: *decided.DecidedAt,
 	}
 	events := []outbox.Event{base}

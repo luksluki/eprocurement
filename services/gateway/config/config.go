@@ -4,6 +4,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -18,6 +19,7 @@ type Config struct {
 	JWKSCacheTTL    time.Duration // JWKS_CACHE_TTL (default 5m)
 	LogLevel        string        // LOG_LEVEL (default "info")
 	LoginRatePerMin int           // GATEWAY_LOGIN_RATE_PER_MIN — per-IP login limiter budget (default 30)
+	TrustedProxies  []string      // GATEWAY_TRUSTED_PROXIES — comma-separated IPs/CIDRs whose X-Forwarded-For is honored (#44); empty trusts no proxy
 }
 
 // Load reads the configuration from the environment.
@@ -32,6 +34,7 @@ func Load() Config {
 		JWKSCacheTTL:    envDuration("JWKS_CACHE_TTL", 5*time.Minute),
 		LogLevel:        envOr("LOG_LEVEL", "info"),
 		LoginRatePerMin: envInt("GATEWAY_LOGIN_RATE_PER_MIN", 30),
+		TrustedProxies:  envCSV("GATEWAY_TRUSTED_PROXIES"),
 	}
 }
 
@@ -40,6 +43,22 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// envCSV reads a comma-separated list env var, trimming each entry; an
+// unset or empty variable yields nil (not [""]).
+func envCSV(key string) []string {
+	v := os.Getenv(key)
+	if v == "" {
+		return nil
+	}
+	out := []string{}
+	for _, item := range strings.Split(v, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func envDuration(key string, fallback time.Duration) time.Duration {

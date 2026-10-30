@@ -26,6 +26,26 @@ describe("dictionaries", () => {
     expect(dict.vendors.pagination.next.length).toBeGreaterThan(0);
   });
 
+  // #44: the audit admin view's copy exists in both locales — the nav entry,
+  // the page copy, and every table column (Dictionary's type enforces the
+  // key set at compile time; this pins non-empty values).
+  it.each(Object.keys(dictionaries) as Array<"id" | "en">)("%s dictionary covers the audit page", (locale) => {
+    const dict = getDictionary(locale);
+    expect(dict.nav.audit.length).toBeGreaterThan(0);
+    expect(dict.pages.audit.title.length).toBeGreaterThan(0);
+    expect(dict.pages.audit.description.length).toBeGreaterThan(0);
+    expect(dict.auditPage.columns.occurredAt.length).toBeGreaterThan(0);
+    expect(dict.auditPage.columns.actor.length).toBeGreaterThan(0);
+    expect(dict.auditPage.columns.action.length).toBeGreaterThan(0);
+    expect(dict.auditPage.columns.entity.length).toBeGreaterThan(0);
+    expect(dict.auditPage.columns.ip.length).toBeGreaterThan(0);
+    expect(dict.auditPage.columns.trace.length).toBeGreaterThan(0);
+    expect(dict.auditPage.filters.actionAll.length).toBeGreaterThan(0);
+    expect(dict.auditPage.pagination.next.length).toBeGreaterThan(0);
+    expect(dict.auditPage.exportCsv.length).toBeGreaterThan(0);
+    expect(dict.auditPage.forbidden.length).toBeGreaterThan(0);
+  });
+
   it("paginates the vendor summary with locale number formatting", () => {
     const range = { from: 1, to: 50, total: 100_000, page: 1, pageCount: 2000 };
     expect(getDictionary("en").vendors.pagination.summary(range)).toBe("Showing 1–50 of 100,000 vendors");

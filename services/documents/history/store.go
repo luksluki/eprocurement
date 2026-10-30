@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -97,6 +98,7 @@ func EventBSON(ev Event) bson.M {
 		"version":     ev.Version,
 		"occurred_at": ev.OccurredAt,
 		"actor_id":    ev.ActorID,
+		"actor_ip":    ev.ActorIP,
 		"trace_id":    ev.TraceID,
 		"entity_type": ev.EntityType,
 		"entity_id":   ev.EntityID,
@@ -109,6 +111,7 @@ func AuditBSON(a AuditEntry) bson.M {
 		"event_id":    a.EventID,
 		"tenant_id":   a.TenantID,
 		"actor_id":    a.ActorID,
+		"actor_ip":    a.ActorIP,
 		"action":      a.Action,
 		"entity_type": a.EntityType,
 		"entity_id":   a.EntityID,
@@ -129,6 +132,7 @@ type eventDoc struct {
 	Version     int32     `bson:"version"`
 	OccurredAt  time.Time `bson:"occurred_at"`
 	ActorID     string    `bson:"actor_id"`
+	ActorIP     string    `bson:"actor_ip"`
 	TraceID     string    `bson:"trace_id"`
 	EntityType  string    `bson:"entity_type"`
 	EntityID    string    `bson:"entity_id"`
@@ -138,8 +142,33 @@ type eventDoc struct {
 func (d eventDoc) toEvent() Event {
 	return Event{
 		EventID: d.EventID, TenantID: d.TenantID, Type: d.Type, Version: d.Version,
-		OccurredAt: d.OccurredAt, ActorID: d.ActorID, TraceID: d.TraceID,
+		OccurredAt: d.OccurredAt, ActorID: d.ActorID, ActorIP: d.ActorIP, TraceID: d.TraceID,
 		EntityType: d.EntityType, EntityID: d.EntityID, PayloadJSON: d.PayloadJSON,
+	}
+}
+
+// auditDoc decodes stored audit rows with the same missing-field tolerance
+// as eventDoc (rows written before actor_ip existed decode to "").
+type auditDoc struct {
+	EventID    string    `bson:"event_id"`
+	TenantID   string    `bson:"tenant_id"`
+	ActorID    string    `bson:"actor_id"`
+	ActorIP    string    `bson:"actor_ip"`
+	Action     string    `bson:"action"`
+	EntityType string    `bson:"entity_type"`
+	EntityID   string    `bson:"entity_id"`
+	Details    string    `bson:"details"`
+	TraceID    string    `bson:"trace_id"`
+	OccurredAt time.Time `bson:"occurred_at"`
+	RecordedAt time.Time `bson:"recorded_at"`
+}
+
+func (d auditDoc) toAuditEntry() AuditEntry {
+	return AuditEntry{
+		EventID: d.EventID, TenantID: d.TenantID, ActorID: d.ActorID, ActorIP: d.ActorIP,
+		Action: d.Action, EntityType: d.EntityType, EntityID: d.EntityID,
+		Details: d.Details, TraceID: d.TraceID,
+		OccurredAt: d.OccurredAt, RecordedAt: d.RecordedAt,
 	}
 }
 
@@ -304,4 +333,132 @@ func decodeCursor(cursor string) (time.Time, string, error) {
 		return time.Time{}, "", ErrCursorInvalid
 	}
 	return time.UnixMilli(millis).UTC(), parts[1], nil
+}
+
+// AuditFilter is the ListAudit query (#44): an optional action filter, an
+// optional aggregate filter (entity_type + entity_id, both or neither), and
+// a keyset cursor — the ListFilter conventions on the audit collection.
+type AuditFilter struct {
+	Action     string
+	EntityType string
+	EntityID   string
+	Limit      int
+	Cursor     string // opaque cursor from a previous response
+}
+
+// Validate normalizes the filter: the entity fields are trimmed and must be
+// both set or both empty, the action must be empty or one of AuditActions,
+// the limit is clamped, and the cursor — when present — must decode.
+func (f AuditFilter) Validate() (AuditFilter, error) {
+	f.Action = strings.TrimSpace(f.Action)
+	if f.Action != "" && !slices.Contains(AuditActions, f.Action) {
+		return f, ErrActionInvalid
+	}
+	f.EntityType = strings.TrimSpace(f.EntityType)
+	f.EntityID = strings.TrimSpace(f.EntityID)
+	if (f.EntityType == "") != (f.EntityID == "") {
+		return f, ErrFilterInvalid
+	}
+	if f.Limit < 1 {
+		f.Limit = DefaultLimit
+	}
+	if f.Limit > MaxLimit {
+		f.Limit = MaxLimit
+	}
+	if strings.TrimSpace(f.Cursor) != "" {
+		if _, _, err := decodeCursor(f.Cursor); err != nil {
+			return f, ErrCursorInvalid
+		}
+	}
+	return f, nil
+}
+
+// ListAudit returns one page of the tenant's audit rows, newest first —
+// occurred_at DESC with event_id DESC as the tiebreaker (the List order;
+// decision step + terminal pairs share occurred_at), keyset-paginated with
+// the same cursor codec. Tenant scoping is absolute: another tenant's rows
+// are invisible (empty result), the ListEvents convention.
+func (s *Store) ListAudit(ctx context.Context, tenantID string, f AuditFilter) (entries []AuditEntry, nextCursor string, err error) {
+	f, err = f.Validate()
+	if err != nil {
+		return nil, "", err
+	}
+	if strings.TrimSpace(tenantID) == "" {
+		return nil, "", ErrEventIncomplete
+	}
+
+	filter := bson.M{"tenant_id": tenantID}
+	if f.Action != "" {
+		filter["action"] = f.Action
+	}
+	if f.EntityType != "" {
+		filter["entity_type"] = f.EntityType
+		filter["entity_id"] = f.EntityID
+	}
+	var afterOccurredAt time.Time
+	var afterEventID string
+	if f.Cursor != "" {
+		afterOccurredAt, afterEventID, err = decodeCursor(f.Cursor)
+		if err != nil {
+			return nil, "", ErrCursorInvalid
+		}
+		filter["$or"] = bson.A{
+			bson.M{"occurred_at": bson.M{"$lt": afterOccurredAt}},
+			bson.M{"occurred_at": afterOccurredAt, "event_id": bson.M{"$lt": afterEventID}},
+		}
+	}
+
+	// Fetch one extra row to know whether another page exists.
+	cursor, err := s.audit.Find(ctx, filter, options.Find().
+		SetSort(bson.D{{Key: "occurred_at", Value: -1}, {Key: "event_id", Value: -1}}).
+		SetLimit(int64(f.Limit)+1))
+	if err != nil {
+		return nil, "", fmt.Errorf("history: list audit: %w", err)
+	}
+	defer cursor.Close(ctx)
+	for cursor.Next(ctx) {
+		var d auditDoc
+		if err := cursor.Decode(&d); err != nil {
+			return nil, "", fmt.Errorf("history: decode audit: %w", err)
+		}
+		entries = append(entries, d.toAuditEntry())
+	}
+	if err := cursor.Err(); err != nil {
+		return nil, "", fmt.Errorf("history: list audit: %w", err)
+	}
+	if len(entries) > f.Limit {
+		entries = entries[:f.Limit]
+		last := entries[f.Limit-1]
+		nextCursor = encodeCursor(last.OccurredAt, last.EventID)
+	}
+	return entries, nextCursor, nil
+}
+
+// ExportAudit reads the newest MaxAuditExportRows audit rows of the tenant
+// for the CSV export (#44) — the row cap of the export's three-layer bound
+// (bounded columns in AuditCSV, the gateway's raised gRPC receive limit,
+// and this cap). Read-only, tenant-scoped like every caller-facing query.
+func (s *Store) ExportAudit(ctx context.Context, tenantID string) ([]AuditEntry, error) {
+	if strings.TrimSpace(tenantID) == "" {
+		return nil, ErrEventIncomplete
+	}
+	cursor, err := s.audit.Find(ctx, bson.M{"tenant_id": tenantID}, options.Find().
+		SetSort(bson.D{{Key: "occurred_at", Value: -1}, {Key: "event_id", Value: -1}}).
+		SetLimit(MaxAuditExportRows))
+	if err != nil {
+		return nil, fmt.Errorf("history: export audit: %w", err)
+	}
+	defer cursor.Close(ctx)
+	entries := []AuditEntry{}
+	for cursor.Next(ctx) {
+		var d auditDoc
+		if err := cursor.Decode(&d); err != nil {
+			return nil, fmt.Errorf("history: decode audit: %w", err)
+		}
+		entries = append(entries, d.toAuditEntry())
+	}
+	if err := cursor.Err(); err != nil {
+		return nil, fmt.Errorf("history: export audit: %w", err)
+	}
+	return entries, nil
 }

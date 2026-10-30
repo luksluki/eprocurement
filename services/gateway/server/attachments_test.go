@@ -54,6 +54,13 @@ type fakeDocumentsClient struct {
 	exportDownloadReq  *documentsv1.GetExportDownloadUrlRequest
 	exportDownloadResp *documentsv1.GetExportDownloadUrlResponse
 	exportDownloadErr  error
+
+	listAuditReq  *documentsv1.ListAuditRequest
+	listAuditResp *documentsv1.ListAuditResponse
+	listAuditErr  error
+
+	exportAuditResp *documentsv1.ExportAuditResponse
+	exportAuditErr  error
 }
 
 func (f *fakeDocumentsClient) CreateUpload(ctx context.Context, in *documentsv1.CreateUploadRequest, opts ...grpc.CallOption) (*documentsv1.CreateUploadResponse, error) {
@@ -110,6 +117,22 @@ func (f *fakeDocumentsClient) GetExportDownloadUrl(ctx context.Context, in *docu
 		return nil, f.exportDownloadErr
 	}
 	return f.exportDownloadResp, nil
+}
+
+func (f *fakeDocumentsClient) ListAudit(ctx context.Context, in *documentsv1.ListAuditRequest, opts ...grpc.CallOption) (*documentsv1.ListAuditResponse, error) {
+	f.lastCtx, f.listAuditReq = ctx, in
+	if f.listAuditErr != nil {
+		return nil, f.listAuditErr
+	}
+	return f.listAuditResp, nil
+}
+
+func (f *fakeDocumentsClient) ExportAudit(ctx context.Context, in *documentsv1.ExportAuditRequest, opts ...grpc.CallOption) (*documentsv1.ExportAuditResponse, error) {
+	f.lastCtx = ctx
+	if f.exportAuditErr != nil {
+		return nil, f.exportAuditErr
+	}
+	return f.exportAuditResp, nil
 }
 
 // attachmentTestApp wires vendor + attachment routes against fakes and
