@@ -308,6 +308,68 @@ func (a *api) GetExportDownloadUrl(ctx context.Context, req *documentsv1.GetExpo
 	}, nil
 }
 
+// ListAudit returns the caller tenant's audit log, newest first, with
+// keyset pagination (#44, PRD §14.7). action filters one of the five audit
+// verbs; the entity pair must be both set or both empty; the cursor is the
+// opaque continuation token. The interceptor map already enforced
+// audit:read (viewer/admin); the store scopes every query by the caller's
+// tenant.
+func (a *api) ListAudit(ctx context.Context, req *documentsv1.ListAuditRequest) (*documentsv1.ListAuditResponse, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	entries, nextCursor, err := a.events.ListAudit(ctx, auth.TenantID, history.AuditFilter{
+		Action:     req.GetAction(),
+		EntityType: req.GetEntityType(),
+		EntityID:   req.GetEntityId(),
+		Limit:      int(req.GetLimit()),
+		Cursor:     req.GetNextCursor(),
+	})
+	if err != nil {
+		return nil, mapHistoryError(err)
+	}
+	out := &documentsv1.ListAuditResponse{NextCursor: nextCursor}
+	for _, e := range entries {
+		out.Entries = append(out.Entries, auditEntryPB(e))
+	}
+	return out, nil
+}
+
+// ExportAudit returns the tenant's audit log as CSV (#44): the newest
+// 10 000 rows, bounded metadata columns only (no details — the raw payload
+// stays out of the export so the unary response cannot blow past the gRPC
+// message limit; the gateway sets an explicit 16 MiB MaxCallRecvMsgSize as
+// the second bound). audit:read is enforced by the interceptor map.
+func (a *api) ExportAudit(ctx context.Context, req *documentsv1.ExportAuditRequest) (*documentsv1.ExportAuditResponse, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := a.events.ExportAudit(ctx, auth.TenantID)
+	if err != nil {
+		return nil, mapHistoryError(err)
+	}
+	return &documentsv1.ExportAuditResponse{Csv: history.AuditCSV(entries)}, nil
+}
+
+// auditEntryPB maps a stored audit row to the wire message. Timestamps are
+// RFC 3339; details never crosses this wire (bounded list/export, #44).
+func auditEntryPB(e history.AuditEntry) *documentsv1.AuditEntry {
+	return &documentsv1.AuditEntry{
+		EventId:    e.EventID,
+		TenantId:   e.TenantID,
+		ActorId:    e.ActorID,
+		ActorIp:    e.ActorIP,
+		Action:     e.Action,
+		EntityType: e.EntityType,
+		EntityId:   e.EntityID,
+		TraceId:    e.TraceID,
+		OccurredAt: e.OccurredAt.UTC().Format(time.RFC3339Nano),
+		RecordedAt: e.RecordedAt.UTC().Format(time.RFC3339Nano),
+	}
+}
+
 // mapExportError keeps the machine code intact: malformed id →
 // InvalidArgument, missing/cross-tenant → NotFound.
 func mapExportError(err error) error {
@@ -344,6 +406,7 @@ func mapHistoryError(err error) error {
 	switch {
 	case errors.Is(err, history.ErrFilterInvalid),
 		errors.Is(err, history.ErrCursorInvalid),
+		errors.Is(err, history.ErrActionInvalid),
 		errors.Is(err, history.ErrEventIDInvalid),
 		errors.Is(err, history.ErrEventIncomplete),
 		errors.Is(err, history.ErrPayloadInvalid):
@@ -364,6 +427,7 @@ func eventPB(ev history.Event) *documentsv1.Event {
 		Version:     ev.Version,
 		OccurredAt:  ev.OccurredAt.UTC().Format(time.RFC3339Nano),
 		ActorId:     ev.ActorID,
+		ActorIp:     ev.ActorIP,
 		TraceId:     ev.TraceID,
 		EntityType:  ev.EntityType,
 		EntityId:    ev.EntityID,

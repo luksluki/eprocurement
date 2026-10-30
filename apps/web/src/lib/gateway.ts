@@ -213,7 +213,7 @@ export type GatewayResult<T> = { ok: true; data: T } | GatewayFailure;
 async function callGateway<T>(
   accessToken: string,
   path: string,
-  init?: { method?: string; body?: unknown; idempotencyKey?: string },
+  init?: { method?: string; body?: unknown; idempotencyKey?: string; forwardedFor?: string },
 ): Promise<GatewayResult<T>> {
   try {
     const headers: Record<string, string> = { authorization: `Bearer ${accessToken}` };
@@ -224,6 +224,13 @@ async function callGateway<T>(
     }
     if (init?.idempotencyKey) {
       headers["idempotency-key"] = init.idempotencyKey;
+    }
+    // #44: forward the caller's X-Forwarded-For so the gateway (behind its
+    // trusted-proxy check) records the real client IP as the audit
+    // actor_ip on decision events — without it the gateway would see only
+    // the BFF's address.
+    if (init?.forwardedFor) {
+      headers["x-forwarded-for"] = init.forwardedFor;
     }
     const res = await fetch(`${gatewayUrl()}${path}`, {
       method: init?.method ?? "GET",
@@ -347,18 +354,22 @@ export function submitRequisition(
 // non-blank reason ≤ 1000 chars — both re-validated at the edge
 // (services/gateway/server/approvals.go). The optional idempotency key names
 // the decision; a replay on the same step returns the requisition's current
-// state. The response is the updated requisition aggregate.
+// state. The response is the updated requisition aggregate. forwardedFor is
+// the caller's X-Forwarded-For, forwarded so the decision's audit row
+// records the real client IP (#44).
 export function decideApprovalStep(
   accessToken: string,
   stepId: string,
   decision: "approve" | "reject",
   reason: string,
   idempotencyKey?: string,
+  forwardedFor?: string,
 ): Promise<GatewayResult<RequisitionDetail>> {
   return callGateway(accessToken, `/api/v1/approvals/${encodeURIComponent(stepId)}/decide`, {
     method: "POST",
     body: { decision, reason },
     idempotencyKey,
+    forwardedFor,
   });
 }
 
@@ -511,18 +522,30 @@ export function getPurchaseOrder(accessToken: string, id: string): Promise<Gatew
 }
 
 // issuePurchaseOrder moves a draft PO to issued (po:write — buyer/admin at
-// the gateway; the response is the updated PO).
-export function issuePurchaseOrder(accessToken: string, id: string): Promise<GatewayResult<PurchaseOrderDetail>> {
-  return callGateway(accessToken, `/api/v1/purchase-orders/${encodeURIComponent(id)}/issue`, { method: "POST" });
+// the gateway; the response is the updated PO). forwardedFor carries the
+// caller's X-Forwarded-For for the po.issued audit row's actor_ip (#44).
+export function issuePurchaseOrder(
+  accessToken: string,
+  id: string,
+  forwardedFor?: string,
+): Promise<GatewayResult<PurchaseOrderDetail>> {
+  return callGateway(accessToken, `/api/v1/purchase-orders/${encodeURIComponent(id)}/issue`, {
+    method: "POST",
+    forwardedFor,
+  });
 }
 
-// acknowledgePurchaseOrder moves an issued PO to acknowledged.
+// acknowledgePurchaseOrder moves an issued PO to acknowledged. Not an audit
+// decision (PRD §14.7 lists no acknowledge verb) but forwarded anyway so
+// its outbox row stays uniform with the other lifecycle events.
 export function acknowledgePurchaseOrder(
   accessToken: string,
   id: string,
+  forwardedFor?: string,
 ): Promise<GatewayResult<PurchaseOrderDetail>> {
   return callGateway(accessToken, `/api/v1/purchase-orders/${encodeURIComponent(id)}/acknowledge`, {
     method: "POST",
+    forwardedFor,
   });
 }
 
@@ -551,15 +574,19 @@ export type GoodsReceiptPosted = {
 // (grn:post — buyer/admin). A 409 grn_over_receipt carries the pinned detail
 // line in `error` ("grn_over_receipt: po_item=… received=… requested=…
 // ordered=…"), which the dedicated gateway renderer preserved verbatim.
+// forwardedFor carries the caller's X-Forwarded-For for the grn.posted
+// audit row's actor_ip (#44).
 export function postGoodsReceipt(
   accessToken: string,
   poId: string,
   items: GoodsReceiptItemWire[],
   notes: string,
+  forwardedFor?: string,
 ): Promise<GatewayResult<GoodsReceiptPosted>> {
   return callGateway(accessToken, `/api/v1/purchase-orders/${encodeURIComponent(poId)}/goods-receipts`, {
     method: "POST",
     body: { items, notes },
+    forwardedFor,
   });
 }
 
@@ -677,9 +704,18 @@ export function createInvoice(
 
 // matchInvoice runs the three-way match on one invoice (invoice:write —
 // finance/admin; #40). The response is the updated invoice: status
-// matched/discrepancy with match_result_json filled.
-export function matchInvoice(accessToken: string, id: string): Promise<GatewayResult<InvoiceDetail>> {
-  return callGateway(accessToken, `/api/v1/invoices/${encodeURIComponent(id)}/match`, { method: "POST" });
+// matched/discrepancy with match_result_json filled. forwardedFor carries
+// the caller's X-Forwarded-For for the invoice.matched/discrepancy audit
+// row's actor_ip (#44).
+export function matchInvoice(
+  accessToken: string,
+  id: string,
+  forwardedFor?: string,
+): Promise<GatewayResult<InvoiceDetail>> {
+  return callGateway(accessToken, `/api/v1/invoices/${encodeURIComponent(id)}/match`, {
+    method: "POST",
+    forwardedFor,
+  });
 }
 
 // declareInvoiceAttachment asks the gateway for a presigned PUT URL bound to
@@ -786,4 +822,81 @@ export type ExportDownload = ExportRunEntry & {
 // export_not_succeeded; another tenant's run id answers 404.
 export function getExportDownloadUrl(accessToken: string, runId: string): Promise<GatewayResult<ExportDownload>> {
   return callGateway(accessToken, `/api/v1/exports/runs/${encodeURIComponent(runId)}/download-url`);
+}
+
+// ---------------------------------------------------------------------------
+// Audit log (#44). Both calls are audit:read (viewer/admin); the BFF routes
+// keep the token server-side like every other proxy.
+
+// AuditEntryWire is one row of the decision audit log as the gateway
+// renders it — the bounded column set (details/payload never crosses; the
+// timeline's payload_json carries the same payload for one event).
+export type AuditEntryWire = {
+  event_id: string;
+  tenant_id: string;
+  actor_id: string;
+  actor_ip: string;
+  action: string; // approve | reject | issue | post | match
+  entity_type: string;
+  entity_id: string;
+  trace_id: string;
+  occurred_at: string;
+  recorded_at: string;
+};
+
+// AuditPage is the GET /api/v1/audit envelope. Pagination is keyset (the
+// events convention): next_cursor is opaque and empty on the last page.
+export type AuditPage = {
+  entries: AuditEntryWire[];
+  next_cursor: string;
+};
+
+export type AuditResult =
+  | { ok: true; data: AuditPage }
+  | { ok: false; status: number; code?: string };
+
+// listAudit fetches one keyset page of the tenant's audit log. `query` is
+// the already-canonicalized filter string (action/entityType/entityId/
+// limit/cursor). 401 is discriminated for the refresh dance; 400 carries
+// the gateway's machine code (audit_action_invalid, events_*).
+export async function listAudit(accessToken: string, query: string): Promise<AuditResult> {
+  try {
+    const target = `${gatewayUrl()}/api/v1/audit${query ? `?${query}` : ""}`;
+    const res = await fetch(target, {
+      headers: { authorization: `Bearer ${accessToken}` },
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      if (res.status === 400) {
+        const body = (await res.json().catch(() => ({}))) as { code?: string };
+        return { ok: false, status: 400, code: body.code };
+      }
+      return { ok: false, status: res.status };
+    }
+    return { ok: true, data: (await res.json()) as AuditPage };
+  } catch {
+    return { ok: false, status: 502 };
+  }
+}
+
+// exportAuditCsv streams the tenant's audit log as text/csv (bounded: the
+// newest 10 000 rows, metadata columns only — #44's export bounds). The
+// body is buffered (a few MB at worst by contract) so the BFF route can
+// re-serve it with the attachment headers.
+export async function exportAuditCsv(
+  accessToken: string,
+): Promise<{ ok: true; csv: string } | { ok: false; status: number; code?: string }> {
+  try {
+    const res = await fetch(`${gatewayUrl()}/api/v1/audit/export`, {
+      headers: { authorization: `Bearer ${accessToken}` },
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { code?: string };
+      return { ok: false, status: res.status, code: body.code };
+    }
+    return { ok: true, csv: await res.text() };
+  } catch {
+    return { ok: false, status: 502, code: "gateway_unavailable" };
+  }
 }

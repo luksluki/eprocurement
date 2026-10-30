@@ -560,17 +560,20 @@ func (x *GetDownloadUrlResponse) GetExpiresAt() string {
 // Event is one stored domain event (the PRD §14.5 envelope) as projected
 // into MongoDB by the history consumer.
 type Event struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	EventId       string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
-	TenantId      string                 `protobuf:"bytes,2,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
-	Type          string                 `protobuf:"bytes,3,opt,name=type,proto3" json:"type,omitempty"`                               // catalog name, e.g. "pr.approved"
-	Version       int32                  `protobuf:"varint,4,opt,name=version,proto3" json:"version,omitempty"`                        // payload schema version, 1 today
-	OccurredAt    string                 `protobuf:"bytes,5,opt,name=occurred_at,json=occurredAt,proto3" json:"occurred_at,omitempty"` // RFC 3339
-	ActorId       string                 `protobuf:"bytes,6,opt,name=actor_id,json=actorId,proto3" json:"actor_id,omitempty"`          // user id, empty when unknown
-	TraceId       string                 `protobuf:"bytes,7,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`          // propagated trace, empty when unknown
-	EntityType    string                 `protobuf:"bytes,8,opt,name=entity_type,json=entityType,proto3" json:"entity_type,omitempty"` // aggregate kind, e.g. "requisition"
-	EntityId      string                 `protobuf:"bytes,9,opt,name=entity_id,json=entityId,proto3" json:"entity_id,omitempty"`
-	PayloadJson   string                 `protobuf:"bytes,10,opt,name=payload_json,json=payloadJson,proto3" json:"payload_json,omitempty"` // raw JSON payload, never restructured
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	EventId     string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	TenantId    string                 `protobuf:"bytes,2,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
+	Type        string                 `protobuf:"bytes,3,opt,name=type,proto3" json:"type,omitempty"`                               // catalog name, e.g. "pr.approved"
+	Version     int32                  `protobuf:"varint,4,opt,name=version,proto3" json:"version,omitempty"`                        // payload schema version, 1 today
+	OccurredAt  string                 `protobuf:"bytes,5,opt,name=occurred_at,json=occurredAt,proto3" json:"occurred_at,omitempty"` // RFC 3339
+	ActorId     string                 `protobuf:"bytes,6,opt,name=actor_id,json=actorId,proto3" json:"actor_id,omitempty"`          // user id, empty when unknown
+	TraceId     string                 `protobuf:"bytes,7,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`          // propagated trace, empty when unknown
+	EntityType  string                 `protobuf:"bytes,8,opt,name=entity_type,json=entityType,proto3" json:"entity_type,omitempty"` // aggregate kind, e.g. "requisition"
+	EntityId    string                 `protobuf:"bytes,9,opt,name=entity_id,json=entityId,proto3" json:"entity_id,omitempty"`
+	PayloadJson string                 `protobuf:"bytes,10,opt,name=payload_json,json=payloadJson,proto3" json:"payload_json,omitempty"` // raw JSON payload, never restructured
+	// actor_ip is appended at the NEXT free number (11): renumbering already
+	// released fields breaks wire compatibility for mixed-version deploys.
+	ActorIp       string `protobuf:"bytes,11,opt,name=actor_ip,json=actorIp,proto3" json:"actor_ip,omitempty"` // acting client IP (#44 envelope delta), empty on pre-#44 rows
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -671,6 +674,13 @@ func (x *Event) GetEntityId() string {
 func (x *Event) GetPayloadJson() string {
 	if x != nil {
 		return x.PayloadJson
+	}
+	return ""
+}
+
+func (x *Event) GetActorIp() string {
+	if x != nil {
+		return x.ActorIp
 	}
 	return ""
 }
@@ -1099,6 +1109,336 @@ func (x *GetExportDownloadUrlResponse) GetExpiresAt() string {
 	return ""
 }
 
+// AuditEntry is one audit_log row: the decision's actor, action, entity,
+// and trace (#44). Details (the raw payload JSON) is deliberately not on
+// this wire — the list and the export stay bounded; the same payload is
+// readable through ListEvents payload_json.
+type AuditEntry struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	EventId       string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	TenantId      string                 `protobuf:"bytes,2,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
+	ActorId       string                 `protobuf:"bytes,3,opt,name=actor_id,json=actorId,proto3" json:"actor_id,omitempty"`          // user id, empty when unknown
+	ActorIp       string                 `protobuf:"bytes,4,opt,name=actor_ip,json=actorIp,proto3" json:"actor_ip,omitempty"`          // acting client IP as the gateway resolved it, "" on pre-#44 rows
+	Action        string                 `protobuf:"bytes,5,opt,name=action,proto3" json:"action,omitempty"`                           // "approve" | "reject" | "issue" | "post" | "match"
+	EntityType    string                 `protobuf:"bytes,6,opt,name=entity_type,json=entityType,proto3" json:"entity_type,omitempty"` // the decided aggregate, e.g. "requisition"
+	EntityId      string                 `protobuf:"bytes,7,opt,name=entity_id,json=entityId,proto3" json:"entity_id,omitempty"`
+	TraceId       string                 `protobuf:"bytes,8,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`           // propagated trace, empty when unknown
+	OccurredAt    string                 `protobuf:"bytes,9,opt,name=occurred_at,json=occurredAt,proto3" json:"occurred_at,omitempty"`  // RFC 3339 — business time
+	RecordedAt    string                 `protobuf:"bytes,10,opt,name=recorded_at,json=recordedAt,proto3" json:"recorded_at,omitempty"` // RFC 3339 — projection time
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AuditEntry) Reset() {
+	*x = AuditEntry{}
+	mi := &file_documents_v1_documents_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AuditEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AuditEntry) ProtoMessage() {}
+
+func (x *AuditEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_documents_v1_documents_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AuditEntry.ProtoReflect.Descriptor instead.
+func (*AuditEntry) Descriptor() ([]byte, []int) {
+	return file_documents_v1_documents_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *AuditEntry) GetEventId() string {
+	if x != nil {
+		return x.EventId
+	}
+	return ""
+}
+
+func (x *AuditEntry) GetTenantId() string {
+	if x != nil {
+		return x.TenantId
+	}
+	return ""
+}
+
+func (x *AuditEntry) GetActorId() string {
+	if x != nil {
+		return x.ActorId
+	}
+	return ""
+}
+
+func (x *AuditEntry) GetActorIp() string {
+	if x != nil {
+		return x.ActorIp
+	}
+	return ""
+}
+
+func (x *AuditEntry) GetAction() string {
+	if x != nil {
+		return x.Action
+	}
+	return ""
+}
+
+func (x *AuditEntry) GetEntityType() string {
+	if x != nil {
+		return x.EntityType
+	}
+	return ""
+}
+
+func (x *AuditEntry) GetEntityId() string {
+	if x != nil {
+		return x.EntityId
+	}
+	return ""
+}
+
+func (x *AuditEntry) GetTraceId() string {
+	if x != nil {
+		return x.TraceId
+	}
+	return ""
+}
+
+func (x *AuditEntry) GetOccurredAt() string {
+	if x != nil {
+		return x.OccurredAt
+	}
+	return ""
+}
+
+func (x *AuditEntry) GetRecordedAt() string {
+	if x != nil {
+		return x.RecordedAt
+	}
+	return ""
+}
+
+type ListAuditRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Optional filters: action must be one of the five audit actions; the
+	// entity pair must be both set or both empty.
+	Action        string `protobuf:"bytes,1,opt,name=action,proto3" json:"action,omitempty"`
+	EntityType    string `protobuf:"bytes,2,opt,name=entity_type,json=entityType,proto3" json:"entity_type,omitempty"`
+	EntityId      string `protobuf:"bytes,3,opt,name=entity_id,json=entityId,proto3" json:"entity_id,omitempty"`
+	Limit         int32  `protobuf:"varint,4,opt,name=limit,proto3" json:"limit,omitempty"`                            // default 20, max 100 (clamped)
+	NextCursor    string `protobuf:"bytes,5,opt,name=next_cursor,json=nextCursor,proto3" json:"next_cursor,omitempty"` // keyset cursor from a previous response
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListAuditRequest) Reset() {
+	*x = ListAuditRequest{}
+	mi := &file_documents_v1_documents_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListAuditRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListAuditRequest) ProtoMessage() {}
+
+func (x *ListAuditRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_documents_v1_documents_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListAuditRequest.ProtoReflect.Descriptor instead.
+func (*ListAuditRequest) Descriptor() ([]byte, []int) {
+	return file_documents_v1_documents_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *ListAuditRequest) GetAction() string {
+	if x != nil {
+		return x.Action
+	}
+	return ""
+}
+
+func (x *ListAuditRequest) GetEntityType() string {
+	if x != nil {
+		return x.EntityType
+	}
+	return ""
+}
+
+func (x *ListAuditRequest) GetEntityId() string {
+	if x != nil {
+		return x.EntityId
+	}
+	return ""
+}
+
+func (x *ListAuditRequest) GetLimit() int32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+func (x *ListAuditRequest) GetNextCursor() string {
+	if x != nil {
+		return x.NextCursor
+	}
+	return ""
+}
+
+type ListAuditResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Entries       []*AuditEntry          `protobuf:"bytes,1,rep,name=entries,proto3" json:"entries,omitempty"`                         // newest first
+	NextCursor    string                 `protobuf:"bytes,2,opt,name=next_cursor,json=nextCursor,proto3" json:"next_cursor,omitempty"` // empty on the last page
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListAuditResponse) Reset() {
+	*x = ListAuditResponse{}
+	mi := &file_documents_v1_documents_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListAuditResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListAuditResponse) ProtoMessage() {}
+
+func (x *ListAuditResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_documents_v1_documents_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListAuditResponse.ProtoReflect.Descriptor instead.
+func (*ListAuditResponse) Descriptor() ([]byte, []int) {
+	return file_documents_v1_documents_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *ListAuditResponse) GetEntries() []*AuditEntry {
+	if x != nil {
+		return x.Entries
+	}
+	return nil
+}
+
+func (x *ListAuditResponse) GetNextCursor() string {
+	if x != nil {
+		return x.NextCursor
+	}
+	return ""
+}
+
+type ExportAuditRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExportAuditRequest) Reset() {
+	*x = ExportAuditRequest{}
+	mi := &file_documents_v1_documents_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExportAuditRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExportAuditRequest) ProtoMessage() {}
+
+func (x *ExportAuditRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_documents_v1_documents_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExportAuditRequest.ProtoReflect.Descriptor instead.
+func (*ExportAuditRequest) Descriptor() ([]byte, []int) {
+	return file_documents_v1_documents_proto_rawDescGZIP(), []int{19}
+}
+
+type ExportAuditResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Csv           []byte                 `protobuf:"bytes,1,opt,name=csv,proto3" json:"csv,omitempty"` // RFC 4180, CRLF, bounded columns, newest 10 000 rows max
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExportAuditResponse) Reset() {
+	*x = ExportAuditResponse{}
+	mi := &file_documents_v1_documents_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExportAuditResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExportAuditResponse) ProtoMessage() {}
+
+func (x *ExportAuditResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_documents_v1_documents_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExportAuditResponse.ProtoReflect.Descriptor instead.
+func (*ExportAuditResponse) Descriptor() ([]byte, []int) {
+	return file_documents_v1_documents_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *ExportAuditResponse) GetCsv() []byte {
+	if x != nil {
+		return x.Csv
+	}
+	return nil
+}
+
 var File_documents_v1_documents_proto protoreflect.FileDescriptor
 
 const file_documents_v1_documents_proto_rawDesc = "" +
@@ -1160,7 +1500,7 @@ const file_documents_v1_documents_proto_rawDesc = "" +
 	"attachment\x12!\n" +
 	"\fdownload_url\x18\x02 \x01(\tR\vdownloadUrl\x12\x1d\n" +
 	"\n" +
-	"expires_at\x18\x03 \x01(\tR\texpiresAt\"\xa5\x02\n" +
+	"expires_at\x18\x03 \x01(\tR\texpiresAt\"\xc0\x02\n" +
 	"\x05Event\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x1b\n" +
 	"\ttenant_id\x18\x02 \x01(\tR\btenantId\x12\x12\n" +
@@ -1174,7 +1514,8 @@ const file_documents_v1_documents_proto_rawDesc = "" +
 	"entityType\x12\x1b\n" +
 	"\tentity_id\x18\t \x01(\tR\bentityId\x12!\n" +
 	"\fpayload_json\x18\n" +
-	" \x01(\tR\vpayloadJson\"\x88\x01\n" +
+	" \x01(\tR\vpayloadJson\x12\x19\n" +
+	"\bactor_ip\x18\v \x01(\tR\aactorIp\"\x88\x01\n" +
 	"\x11ListEventsRequest\x12\x1f\n" +
 	"\ventity_type\x18\x01 \x01(\tR\n" +
 	"entityType\x12\x1b\n" +
@@ -1208,7 +1549,38 @@ const file_documents_v1_documents_proto_rawDesc = "" +
 	"\x03run\x18\x01 \x01(\v2\x17.documents.v1.ExportRunR\x03run\x12!\n" +
 	"\fdownload_url\x18\x02 \x01(\tR\vdownloadUrl\x12\x1d\n" +
 	"\n" +
-	"expires_at\x18\x03 \x01(\tR\texpiresAt2\x8d\x05\n" +
+	"expires_at\x18\x03 \x01(\tR\texpiresAt\"\xad\x02\n" +
+	"\n" +
+	"AuditEntry\x12\x19\n" +
+	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x1b\n" +
+	"\ttenant_id\x18\x02 \x01(\tR\btenantId\x12\x19\n" +
+	"\bactor_id\x18\x03 \x01(\tR\aactorId\x12\x19\n" +
+	"\bactor_ip\x18\x04 \x01(\tR\aactorIp\x12\x16\n" +
+	"\x06action\x18\x05 \x01(\tR\x06action\x12\x1f\n" +
+	"\ventity_type\x18\x06 \x01(\tR\n" +
+	"entityType\x12\x1b\n" +
+	"\tentity_id\x18\a \x01(\tR\bentityId\x12\x19\n" +
+	"\btrace_id\x18\b \x01(\tR\atraceId\x12\x1f\n" +
+	"\voccurred_at\x18\t \x01(\tR\n" +
+	"occurredAt\x12\x1f\n" +
+	"\vrecorded_at\x18\n" +
+	" \x01(\tR\n" +
+	"recordedAt\"\x9f\x01\n" +
+	"\x10ListAuditRequest\x12\x16\n" +
+	"\x06action\x18\x01 \x01(\tR\x06action\x12\x1f\n" +
+	"\ventity_type\x18\x02 \x01(\tR\n" +
+	"entityType\x12\x1b\n" +
+	"\tentity_id\x18\x03 \x01(\tR\bentityId\x12\x14\n" +
+	"\x05limit\x18\x04 \x01(\x05R\x05limit\x12\x1f\n" +
+	"\vnext_cursor\x18\x05 \x01(\tR\n" +
+	"nextCursor\"h\n" +
+	"\x11ListAuditResponse\x122\n" +
+	"\aentries\x18\x01 \x03(\v2\x18.documents.v1.AuditEntryR\aentries\x12\x1f\n" +
+	"\vnext_cursor\x18\x02 \x01(\tR\n" +
+	"nextCursor\"\x14\n" +
+	"\x12ExportAuditRequest\"'\n" +
+	"\x13ExportAuditResponse\x12\x10\n" +
+	"\x03csv\x18\x01 \x01(\fR\x03csv2\xaf\x06\n" +
 	"\tDocuments\x12U\n" +
 	"\fCreateUpload\x12!.documents.v1.CreateUploadRequest\x1a\".documents.v1.CreateUploadResponse\x12O\n" +
 	"\x0eCompleteUpload\x12#.documents.v1.CompleteUploadRequest\x1a\x18.documents.v1.Attachment\x12^\n" +
@@ -1217,7 +1589,9 @@ const file_documents_v1_documents_proto_rawDesc = "" +
 	"\n" +
 	"ListEvents\x12\x1f.documents.v1.ListEventsRequest\x1a .documents.v1.ListEventsResponse\x12[\n" +
 	"\x0eListExportRuns\x12#.documents.v1.ListExportRunsRequest\x1a$.documents.v1.ListExportRunsResponse\x12m\n" +
-	"\x14GetExportDownloadUrl\x12).documents.v1.GetExportDownloadUrlRequest\x1a*.documents.v1.GetExportDownloadUrlResponseBBZ@github.com/luksluki/eprocurement/gen/go/documents/v1;documentsv1b\x06proto3"
+	"\x14GetExportDownloadUrl\x12).documents.v1.GetExportDownloadUrlRequest\x1a*.documents.v1.GetExportDownloadUrlResponse\x12L\n" +
+	"\tListAudit\x12\x1e.documents.v1.ListAuditRequest\x1a\x1f.documents.v1.ListAuditResponse\x12R\n" +
+	"\vExportAudit\x12 .documents.v1.ExportAuditRequest\x1a!.documents.v1.ExportAuditResponseBBZ@github.com/luksluki/eprocurement/gen/go/documents/v1;documentsv1b\x06proto3"
 
 var (
 	file_documents_v1_documents_proto_rawDescOnce sync.Once
@@ -1231,7 +1605,7 @@ func file_documents_v1_documents_proto_rawDescGZIP() []byte {
 	return file_documents_v1_documents_proto_rawDescData
 }
 
-var file_documents_v1_documents_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_documents_v1_documents_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
 var file_documents_v1_documents_proto_goTypes = []any{
 	(*Attachment)(nil),                   // 0: documents.v1.Attachment
 	(*CreateUploadRequest)(nil),          // 1: documents.v1.CreateUploadRequest
@@ -1249,6 +1623,11 @@ var file_documents_v1_documents_proto_goTypes = []any{
 	(*ListExportRunsResponse)(nil),       // 13: documents.v1.ListExportRunsResponse
 	(*GetExportDownloadUrlRequest)(nil),  // 14: documents.v1.GetExportDownloadUrlRequest
 	(*GetExportDownloadUrlResponse)(nil), // 15: documents.v1.GetExportDownloadUrlResponse
+	(*AuditEntry)(nil),                   // 16: documents.v1.AuditEntry
+	(*ListAuditRequest)(nil),             // 17: documents.v1.ListAuditRequest
+	(*ListAuditResponse)(nil),            // 18: documents.v1.ListAuditResponse
+	(*ExportAuditRequest)(nil),           // 19: documents.v1.ExportAuditRequest
+	(*ExportAuditResponse)(nil),          // 20: documents.v1.ExportAuditResponse
 }
 var file_documents_v1_documents_proto_depIdxs = []int32{
 	0,  // 0: documents.v1.CreateUploadResponse.attachment:type_name -> documents.v1.Attachment
@@ -1257,25 +1636,30 @@ var file_documents_v1_documents_proto_depIdxs = []int32{
 	8,  // 3: documents.v1.ListEventsResponse.events:type_name -> documents.v1.Event
 	11, // 4: documents.v1.ListExportRunsResponse.runs:type_name -> documents.v1.ExportRun
 	11, // 5: documents.v1.GetExportDownloadUrlResponse.run:type_name -> documents.v1.ExportRun
-	1,  // 6: documents.v1.Documents.CreateUpload:input_type -> documents.v1.CreateUploadRequest
-	3,  // 7: documents.v1.Documents.CompleteUpload:input_type -> documents.v1.CompleteUploadRequest
-	4,  // 8: documents.v1.Documents.ListAttachments:input_type -> documents.v1.ListAttachmentsRequest
-	6,  // 9: documents.v1.Documents.GetDownloadUrl:input_type -> documents.v1.GetDownloadUrlRequest
-	9,  // 10: documents.v1.Documents.ListEvents:input_type -> documents.v1.ListEventsRequest
-	12, // 11: documents.v1.Documents.ListExportRuns:input_type -> documents.v1.ListExportRunsRequest
-	14, // 12: documents.v1.Documents.GetExportDownloadUrl:input_type -> documents.v1.GetExportDownloadUrlRequest
-	2,  // 13: documents.v1.Documents.CreateUpload:output_type -> documents.v1.CreateUploadResponse
-	0,  // 14: documents.v1.Documents.CompleteUpload:output_type -> documents.v1.Attachment
-	5,  // 15: documents.v1.Documents.ListAttachments:output_type -> documents.v1.ListAttachmentsResponse
-	7,  // 16: documents.v1.Documents.GetDownloadUrl:output_type -> documents.v1.GetDownloadUrlResponse
-	10, // 17: documents.v1.Documents.ListEvents:output_type -> documents.v1.ListEventsResponse
-	13, // 18: documents.v1.Documents.ListExportRuns:output_type -> documents.v1.ListExportRunsResponse
-	15, // 19: documents.v1.Documents.GetExportDownloadUrl:output_type -> documents.v1.GetExportDownloadUrlResponse
-	13, // [13:20] is the sub-list for method output_type
-	6,  // [6:13] is the sub-list for method input_type
-	6,  // [6:6] is the sub-list for extension type_name
-	6,  // [6:6] is the sub-list for extension extendee
-	0,  // [0:6] is the sub-list for field type_name
+	16, // 6: documents.v1.ListAuditResponse.entries:type_name -> documents.v1.AuditEntry
+	1,  // 7: documents.v1.Documents.CreateUpload:input_type -> documents.v1.CreateUploadRequest
+	3,  // 8: documents.v1.Documents.CompleteUpload:input_type -> documents.v1.CompleteUploadRequest
+	4,  // 9: documents.v1.Documents.ListAttachments:input_type -> documents.v1.ListAttachmentsRequest
+	6,  // 10: documents.v1.Documents.GetDownloadUrl:input_type -> documents.v1.GetDownloadUrlRequest
+	9,  // 11: documents.v1.Documents.ListEvents:input_type -> documents.v1.ListEventsRequest
+	12, // 12: documents.v1.Documents.ListExportRuns:input_type -> documents.v1.ListExportRunsRequest
+	14, // 13: documents.v1.Documents.GetExportDownloadUrl:input_type -> documents.v1.GetExportDownloadUrlRequest
+	17, // 14: documents.v1.Documents.ListAudit:input_type -> documents.v1.ListAuditRequest
+	19, // 15: documents.v1.Documents.ExportAudit:input_type -> documents.v1.ExportAuditRequest
+	2,  // 16: documents.v1.Documents.CreateUpload:output_type -> documents.v1.CreateUploadResponse
+	0,  // 17: documents.v1.Documents.CompleteUpload:output_type -> documents.v1.Attachment
+	5,  // 18: documents.v1.Documents.ListAttachments:output_type -> documents.v1.ListAttachmentsResponse
+	7,  // 19: documents.v1.Documents.GetDownloadUrl:output_type -> documents.v1.GetDownloadUrlResponse
+	10, // 20: documents.v1.Documents.ListEvents:output_type -> documents.v1.ListEventsResponse
+	13, // 21: documents.v1.Documents.ListExportRuns:output_type -> documents.v1.ListExportRunsResponse
+	15, // 22: documents.v1.Documents.GetExportDownloadUrl:output_type -> documents.v1.GetExportDownloadUrlResponse
+	18, // 23: documents.v1.Documents.ListAudit:output_type -> documents.v1.ListAuditResponse
+	20, // 24: documents.v1.Documents.ExportAudit:output_type -> documents.v1.ExportAuditResponse
+	16, // [16:25] is the sub-list for method output_type
+	7,  // [7:16] is the sub-list for method input_type
+	7,  // [7:7] is the sub-list for extension type_name
+	7,  // [7:7] is the sub-list for extension extendee
+	0,  // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_documents_v1_documents_proto_init() }
@@ -1289,7 +1673,7 @@ func file_documents_v1_documents_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_documents_v1_documents_proto_rawDesc), len(file_documents_v1_documents_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   16,
+			NumMessages:   21,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

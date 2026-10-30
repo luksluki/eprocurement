@@ -55,6 +55,23 @@ func TraceID(ctx context.Context) string {
 	return id
 }
 
+type actorIPKey struct{}
+
+// WithActorIP stores the acting client's IP in the context (#44). It rides
+// the same propagation path as the trace id: gateway metadata (x-actor-ip)
+// -> gRPC interceptor -> context, so outbox writers can record it next to
+// the trace without another per-call parameter. Empty means unknown.
+func WithActorIP(ctx context.Context, ip string) context.Context {
+	return context.WithValue(ctx, actorIPKey{}, ip)
+}
+
+// ActorIP returns the acting client's IP from the context, or "" when
+// absent.
+func ActorIP(ctx context.Context) string {
+	ip, _ := ctx.Value(actorIPKey{}).(string)
+	return ip
+}
+
 // FromContext returns a logger that includes the context trace id when present.
 func FromContext(ctx context.Context, base *slog.Logger) *slog.Logger {
 	if id := TraceID(ctx); id != "" {

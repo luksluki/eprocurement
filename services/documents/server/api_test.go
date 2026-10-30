@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -539,7 +540,7 @@ func seedHistory(t *testing.T, store *history.Store) {
 	}
 	for _, sp := range specs {
 		ev, err := history.NewEvent(sp.id, sp.tenant, sp.eventType, sp.at,
-			gUser, "trace-42", "requisition", sp.entity, `{"number":"PR-000001"}`)
+			gUser, "203.0.113.7", "trace-42", "requisition", sp.entity, `{"number":"PR-000001"}`)
 		if err != nil {
 			t.Fatalf("NewEvent %s: %v", sp.id, err)
 		}
@@ -697,6 +698,144 @@ func TestListEventsRBAC(t *testing.T) {
 	// A least-privileged matrix role (viewer) reads fine.
 	if _, err := client.ListEvents(viewerCtx(), &documentsv1.ListEventsRequest{Limit: 1}); err != nil {
 		t.Fatalf("viewer ListEvents: %v", err)
+	}
+}
+
+// TestListAuditAndExport pins the audit API (#44): viewer (audit:read)
+// walks the tenant's audit rows — the decision projection now covers all
+// five verbs with actor_ip round-tripping — the action filter narrows, the
+// export returns bounded CSV without a details column, cross-tenant rows
+// are invisible, and typed validation failures keep their machine codes.
+func TestListAuditAndExport(t *testing.T) {
+	client, store, stop := startDocumentsEvents(t)
+	defer stop()
+	seedAudit(t, store)
+
+	// Newest first; field fidelity of the top row (invoice.matched → match).
+	resp, err := client.ListAudit(viewerCtx(), &documentsv1.ListAuditRequest{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListAudit: %v", err)
+	}
+	ids := make([]string, 0, len(resp.GetEntries()))
+	for _, e := range resp.GetEntries() {
+		ids = append(ids, e.GetEventId())
+	}
+	if !equalStrings(ids, []string{"a5", "a4", "a3", "a2", "a1"}) {
+		t.Fatalf("ListAudit order = %v, want a5..a1", ids)
+	}
+	top := resp.GetEntries()[0]
+	if top.GetAction() != "match" || top.GetActorId() != gUser ||
+		top.GetActorIp() != "203.0.113.5" || top.GetTraceId() != "trace-44" ||
+		top.GetOccurredAt() == "" || top.GetRecordedAt() == "" {
+		t.Fatalf("audit row fidelity: %+v", top)
+	}
+
+	// Action filter: the single approve row.
+	resp, err = client.ListAudit(viewerCtx(), &documentsv1.ListAuditRequest{Action: "approve", Limit: 10})
+	if err != nil {
+		t.Fatalf("ListAudit filtered: %v", err)
+	}
+	if len(resp.GetEntries()) != 1 || resp.GetEntries()[0].GetEventId() != "a1" ||
+		resp.GetEntries()[0].GetAction() != "approve" {
+		t.Fatalf("approve filter = %d rows", len(resp.GetEntries()))
+	}
+
+	// Cross-tenant denial: tenant B (viewer) sees none of tenant A's rows.
+	resp, err = client.ListAudit(callerCtx(gTenantB, rbac.RoleViewer), &documentsv1.ListAuditRequest{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListAudit tenant B: %v", err)
+	}
+	if n := len(resp.GetEntries()); n != 0 {
+		t.Fatalf("tenant B sees %d audit rows, want 0", n)
+	}
+
+	// Export: bounded CSV columns, newest first, no details leak.
+	exportResp, err := client.ExportAudit(viewerCtx(), &documentsv1.ExportAuditRequest{})
+	if err != nil {
+		t.Fatalf("ExportAudit: %v", err)
+	}
+	csv := string(exportResp.GetCsv())
+	if !strings.HasPrefix(csv, "event_id,occurred_at,recorded_at,actor_id,actor_ip,action,entity_type,entity_id,trace_id\r\n") {
+		t.Fatalf("export header = %q", strings.SplitN(csv, "\n", 2)[0])
+	}
+	if !strings.Contains(csv, "a5") || strings.Contains(csv, "PR-000001") {
+		t.Fatalf("export csv must carry ids but not details")
+	}
+
+	// Typed validation failures keep their machine codes.
+	for name, req := range map[string]*documentsv1.ListAuditRequest{
+		history.ErrActionInvalid.Error(): {Action: "decide"},
+		history.ErrFilterInvalid.Error(): {EntityType: "requisition"},
+		history.ErrCursorInvalid.Error(): {NextCursor: "not-a-cursor"},
+	} {
+		_, err := client.ListAudit(viewerCtx(), req)
+		st, _ := status.FromError(err)
+		if st.Code() != codes.InvalidArgument || st.Message() != name {
+			t.Fatalf("%s: error = %v, want InvalidArgument %q", name, err, name)
+		}
+	}
+}
+
+// TestListAuditRBAC pins the audit permission mapping (#44): audit:read is
+// viewer/admin only, so a buyer is denied while a viewer reads; a call
+// without caller metadata is Unauthenticated.
+func TestListAuditRBAC(t *testing.T) {
+	client, store, stop := startDocumentsEvents(t)
+	defer stop()
+	seedAudit(t, store)
+
+	// Buyer does not hold audit:read → PermissionDenied with the permission
+	// named, the interceptor's pinned format.
+	_, err := client.ListAudit(buyerCtx(), &documentsv1.ListAuditRequest{})
+	if st, _ := status.FromError(err); st.Code() != codes.PermissionDenied ||
+		st.Message() != "permission_denied: requires audit:read" {
+		t.Fatalf("buyer error = %v, want PermissionDenied requires audit:read", err)
+	}
+	_, err = client.ExportAudit(buyerCtx(), &documentsv1.ExportAuditRequest{})
+	if st, _ := status.FromError(err); st.Code() != codes.PermissionDenied {
+		t.Fatalf("buyer export error = %v, want PermissionDenied", err)
+	}
+
+	// No caller metadata at all → Unauthenticated.
+	_, err = client.ListAudit(context.Background(), &documentsv1.ListAuditRequest{})
+	if st, _ := status.FromError(err); st.Code() != codes.Unauthenticated {
+		t.Fatalf("anonymous error = %v, want Unauthenticated", err)
+	}
+
+	// Viewer (the least-privileged holder) and admin both read fine.
+	if _, err := client.ListAudit(viewerCtx(), &documentsv1.ListAuditRequest{Limit: 1}); err != nil {
+		t.Fatalf("viewer ListAudit: %v", err)
+	}
+	if _, err := client.ListAudit(callerCtx(gTenantA, rbac.RoleAdmin), &documentsv1.ListAuditRequest{Limit: 1}); err != nil {
+		t.Fatalf("admin ListAudit: %v", err)
+	}
+}
+
+// seedAudit applies five decision events — one per audit verb — plus a
+// non-decision, in tenant A with distinct timestamps.
+func seedAudit(t *testing.T, store *history.Store) {
+	t.Helper()
+	base := time.Date(2026, 10, 24, 8, 0, 0, 0, time.UTC)
+	specs := []struct {
+		id, eventType string
+		at            time.Time
+	}{
+		{"a1", "pr.approved", base},
+		{"a2", "pr.rejected", base.Add(1 * time.Second)},
+		{"a3", "po.issued", base.Add(2 * time.Second)},
+		{"a4", "grn.posted", base.Add(3 * time.Second)},
+		{"a5", "invoice.matched", base.Add(4 * time.Second)},
+		{"a6", "po.acknowledged", base.Add(5 * time.Second)}, // not a decision
+	}
+	for i, sp := range specs {
+		ev, err := history.NewEvent(sp.id, gTenantA, sp.eventType, sp.at,
+			gUser, fmt.Sprintf("203.0.113.%d", i+1), "trace-44", "requisition", "r-1", `{"number":"PR-000001"}`)
+		if err != nil {
+			t.Fatalf("NewEvent %s: %v", sp.id, err)
+		}
+		if _, err := store.Apply(t.Context(), ev); err != nil {
+			t.Fatalf("Apply %s: %v", sp.id, err)
+		}
 	}
 }
 

@@ -28,6 +28,7 @@ type Event struct {
 	Version    int32
 	Payload    any // marshalled to the jsonb column
 	ActorID    string
+	ActorIP    string // the acting client's IP as the gateway resolved it (#44); "" when unknown
 	TraceID    string
 	EntityType string
 	EntityID   string
@@ -51,11 +52,11 @@ func AppendTx(ctx context.Context, tx pgx.Tx, ev Event) error {
 	}
 	_, err = tx.Exec(ctx, `
 		INSERT INTO procurement.outbox
-			(id, tenant_id, event_type, version, payload, actor_id, trace_id,
+			(id, tenant_id, event_type, version, payload, actor_id, actor_ip, trace_id,
 			 entity_type, entity_id, occurred_at)
-		VALUES ($1, $2, $3, $4, $5, NULLIF($6, '')::uuid, $7, $8, $9, $10)`,
+		VALUES ($1, $2, $3, $4, $5, NULLIF($6, '')::uuid, $7, $8, $9, $10, $11)`,
 		ev.ID, ev.TenantID, ev.EventType, ev.Version, payload,
-		ev.ActorID, ev.TraceID, ev.EntityType, ev.EntityID, ev.OccurredAt)
+		ev.ActorID, ev.ActorIP, ev.TraceID, ev.EntityType, ev.EntityID, ev.OccurredAt)
 	if err != nil {
 		return fmt.Errorf("outbox: append: %w", err)
 	}

@@ -26,6 +26,8 @@ const (
 	Documents_ListEvents_FullMethodName           = "/documents.v1.Documents/ListEvents"
 	Documents_ListExportRuns_FullMethodName       = "/documents.v1.Documents/ListExportRuns"
 	Documents_GetExportDownloadUrl_FullMethodName = "/documents.v1.Documents/GetExportDownloadUrl"
+	Documents_ListAudit_FullMethodName            = "/documents.v1.Documents/ListAudit"
+	Documents_ExportAudit_FullMethodName          = "/documents.v1.Documents/ExportAudit"
 )
 
 // DocumentsClient is the client API for Documents service.
@@ -71,6 +73,17 @@ type DocumentsClient interface {
 	// export_not_succeeded); another tenant's run id is indistinguishable
 	// from a missing one.
 	GetExportDownloadUrl(ctx context.Context, in *GetExportDownloadUrlRequest, opts ...grpc.CallOption) (*GetExportDownloadUrlResponse, error)
+	// ListAudit returns the caller tenant's audit log — one row per decision
+	// event (approve/reject/issue/post/match, PRD §14.7) — newest first with
+	// the same keyset cursor contract as ListEvents. Both audit methods
+	// re-check audit:read in the service-layer interceptor map (#44:
+	// viewer/admin only).
+	ListAudit(ctx context.Context, in *ListAuditRequest, opts ...grpc.CallOption) (*ListAuditResponse, error)
+	// ExportAudit returns the tenant's audit log as RFC 4180 CSV (CRLF),
+	// capped at the newest 10 000 rows with bounded metadata columns only —
+	// no details/payload column, so the unary response stays well under the
+	// gRPC message limit (#44's three-layer export bound).
+	ExportAudit(ctx context.Context, in *ExportAuditRequest, opts ...grpc.CallOption) (*ExportAuditResponse, error)
 }
 
 type documentsClient struct {
@@ -151,6 +164,26 @@ func (c *documentsClient) GetExportDownloadUrl(ctx context.Context, in *GetExpor
 	return out, nil
 }
 
+func (c *documentsClient) ListAudit(ctx context.Context, in *ListAuditRequest, opts ...grpc.CallOption) (*ListAuditResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListAuditResponse)
+	err := c.cc.Invoke(ctx, Documents_ListAudit_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *documentsClient) ExportAudit(ctx context.Context, in *ExportAuditRequest, opts ...grpc.CallOption) (*ExportAuditResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExportAuditResponse)
+	err := c.cc.Invoke(ctx, Documents_ExportAudit_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DocumentsServer is the server API for Documents service.
 // All implementations must embed UnimplementedDocumentsServer
 // for forward compatibility.
@@ -194,6 +227,17 @@ type DocumentsServer interface {
 	// export_not_succeeded); another tenant's run id is indistinguishable
 	// from a missing one.
 	GetExportDownloadUrl(context.Context, *GetExportDownloadUrlRequest) (*GetExportDownloadUrlResponse, error)
+	// ListAudit returns the caller tenant's audit log — one row per decision
+	// event (approve/reject/issue/post/match, PRD §14.7) — newest first with
+	// the same keyset cursor contract as ListEvents. Both audit methods
+	// re-check audit:read in the service-layer interceptor map (#44:
+	// viewer/admin only).
+	ListAudit(context.Context, *ListAuditRequest) (*ListAuditResponse, error)
+	// ExportAudit returns the tenant's audit log as RFC 4180 CSV (CRLF),
+	// capped at the newest 10 000 rows with bounded metadata columns only —
+	// no details/payload column, so the unary response stays well under the
+	// gRPC message limit (#44's three-layer export bound).
+	ExportAudit(context.Context, *ExportAuditRequest) (*ExportAuditResponse, error)
 	mustEmbedUnimplementedDocumentsServer()
 }
 
@@ -224,6 +268,12 @@ func (UnimplementedDocumentsServer) ListExportRuns(context.Context, *ListExportR
 }
 func (UnimplementedDocumentsServer) GetExportDownloadUrl(context.Context, *GetExportDownloadUrlRequest) (*GetExportDownloadUrlResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetExportDownloadUrl not implemented")
+}
+func (UnimplementedDocumentsServer) ListAudit(context.Context, *ListAuditRequest) (*ListAuditResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListAudit not implemented")
+}
+func (UnimplementedDocumentsServer) ExportAudit(context.Context, *ExportAuditRequest) (*ExportAuditResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ExportAudit not implemented")
 }
 func (UnimplementedDocumentsServer) mustEmbedUnimplementedDocumentsServer() {}
 func (UnimplementedDocumentsServer) testEmbeddedByValue()                   {}
@@ -372,6 +422,42 @@ func _Documents_GetExportDownloadUrl_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Documents_ListAudit_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListAuditRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DocumentsServer).ListAudit(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Documents_ListAudit_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DocumentsServer).ListAudit(ctx, req.(*ListAuditRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Documents_ExportAudit_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExportAuditRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DocumentsServer).ExportAudit(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Documents_ExportAudit_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DocumentsServer).ExportAudit(ctx, req.(*ExportAuditRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Documents_ServiceDesc is the grpc.ServiceDesc for Documents service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -406,6 +492,14 @@ var Documents_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetExportDownloadUrl",
 			Handler:    _Documents_GetExportDownloadUrl_Handler,
+		},
+		{
+			MethodName: "ListAudit",
+			Handler:    _Documents_ListAudit_Handler,
+		},
+		{
+			MethodName: "ExportAudit",
+			Handler:    _Documents_ExportAudit_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

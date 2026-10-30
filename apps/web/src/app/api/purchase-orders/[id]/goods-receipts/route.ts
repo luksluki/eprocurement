@@ -11,9 +11,11 @@ const MAX_NOTES_LEN = 1000;
 // The access token stays in the httpOnly cookie. The request shape is
 // re-validated here as a mirror of the edge (non-empty lines, whole qty > 0,
 // unique po_item_ids, notes ≤ 1000) so garbage never reaches the gateway;
-// gateway 4xx bodies ride through verbatim — a 409 grn_over_receipt carries
-// the pinned detail line in `error`, which the form parses for its inline
-// numbers. 401 stays the refresh-dance signal; anything else becomes 502.
+// the caller's X-Forwarded-For is forwarded so the grn.posted audit row
+// records the real client IP (#44); gateway 4xx bodies ride through
+// verbatim — a 409 grn_over_receipt carries the pinned detail line in
+// `error`, which the form parses for its inline numbers. 401 stays the
+// refresh-dance signal; anything else becomes 502.
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const tokenOr401 = await accessTokenOr401();
   if (isNextResponse(tokenOr401)) {
@@ -54,6 +56,6 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     po_item_id: (it.po_item_id ?? "").trim(),
     qty_received: it.qty_received as number,
   }));
-  const result = await postGoodsReceipt(tokenOr401, id, items, notes);
+  const result = await postGoodsReceipt(tokenOr401, id, items, notes, request.headers.get("x-forwarded-for") ?? undefined);
   return forwardGatewayResult(result, 201);
 }

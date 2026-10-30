@@ -161,17 +161,26 @@ func (s *Server) refreshReadiness(ctx context.Context) {
 }
 
 // TraceInterceptor propagates the inbound trace id from gRPC metadata into
-// the request context, generating one when the caller did not send it.
+// the request context, generating one when the caller did not send it. It
+// also propagates the inbound x-actor-ip metadata (#44) — the acting
+// client's IP as the gateway resolved it (trusted-proxy-checked there) — so
+// outbox writers can record it next to the trace. Unlike the trace id it is
+// never generated: absent metadata means an unknown IP, stored as "".
 func TraceInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 	traceID := ""
+	actorIP := ""
 	if md, ok := metadata.FromIncomingContext(ctx); ok {
 		if vals := md.Get("x-trace-id"); len(vals) > 0 {
 			traceID = strings.TrimSpace(vals[0])
+		}
+		if vals := md.Get("x-actor-ip"); len(vals) > 0 {
+			actorIP = strings.TrimSpace(vals[0])
 		}
 	}
 	if traceID == "" || len(traceID) > 64 {
 		traceID = logger.NewTraceID()
 	}
+	ctx = logger.WithActorIP(ctx, actorIP)
 	return handler(logger.WithTraceID(ctx, traceID), req)
 }
 

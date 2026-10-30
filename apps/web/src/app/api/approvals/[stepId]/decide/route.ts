@@ -9,10 +9,12 @@ export const dynamic = "force-dynamic";
 // access token stays in the httpOnly cookie; the client only ever talks to
 // this route. The optional Idempotency-Key header (1–64 chars after
 // trimming, same convention as the submit route) names the decision so a
-// double-click can never record two. Gateway 4xx bodies ride through
-// verbatim (409 approval_step_not_current, 403 approval_self_forbidden /
-// approval_role_forbidden, …) so the UI can map machine codes to messages;
-// 401 stays the refresh-dance signal; anything else becomes 502.
+// double-click can never record two. The caller's X-Forwarded-For is
+// forwarded so the decision's audit row records the real client IP (#44).
+// Gateway 4xx bodies ride through verbatim (409 approval_step_not_current,
+// 403 approval_self_forbidden / approval_role_forbidden, …) so the UI can
+// map machine codes to messages; 401 stays the refresh-dance signal;
+// anything else becomes 502.
 export async function POST(request: Request, { params }: { params: Promise<{ stepId: string }> }) {
   const tokenOr401 = await accessTokenOr401();
   if (isNextResponse(tokenOr401)) {
@@ -30,6 +32,13 @@ export async function POST(request: Request, { params }: { params: Promise<{ ste
       { status: 400 },
     );
   }
-  const result = await decideApprovalStep(tokenOr401, stepId, body.decision, body.reason ?? "", key?.trim() || undefined);
+  const result = await decideApprovalStep(
+    tokenOr401,
+    stepId,
+    body.decision,
+    body.reason ?? "",
+    key?.trim() || undefined,
+    request.headers.get("x-forwarded-for") ?? undefined,
+  );
   return forwardGatewayResult(result);
 }

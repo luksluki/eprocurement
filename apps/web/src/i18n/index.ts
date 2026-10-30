@@ -35,6 +35,7 @@ export type Dictionary = {
     vendors: string;
     invoices: string;
     reports: string;
+    audit: string;
     admin: string;
     users: string;
     settings: string;
@@ -378,8 +379,30 @@ export type Dictionary = {
     purchaseOrders: PageCopy;
     invoices: PageCopy;
     reports: PageCopy;
+    audit: PageCopy;
     users: PageCopy;
     settings: PageCopy;
+  };
+  // Audit page copy (#44): the decision log's table, filters, keyset
+  // pagination, and CSV export — all rendered by the server component.
+  auditPage: {
+    caption: string;
+    unavailable: string;
+    forbidden: string;
+    empty: string;
+    emptyHint: string;
+    columns: {
+      occurredAt: string;
+      actor: string;
+      action: string;
+      entity: string;
+      ip: string;
+      trace: string;
+    };
+    filters: { actionLabel: string; actionAll: string; apply: string };
+    pagination: { next: string; first: string };
+    exportCsv: string;
+    exportHint: string;
   };
   // ExportRunsTable copy (#49): passed as props by the reports page —
   // client components never import the dictionaries (the Timeline pattern).
@@ -407,6 +430,7 @@ const id: Dictionary = {
     vendors: "Pemasok",
     invoices: "Faktur",
     reports: "Laporan",
+    audit: "Log Audit",
     admin: "Admin",
     users: "Pengguna",
     settings: "Pengaturan",
@@ -867,6 +891,12 @@ const id: Dictionary = {
       description: "Ekspor, pekerjaan terjadwal, dan riwayat eksekusi (ekspor CSV malam hari per tenant ke MinIO).",
       milestone: "M4 — ekspor & pekerjaan",
     },
+    audit: {
+      title: "Log Audit",
+      description:
+        "Jejak keputusan apa adanya: setiap aksi setuju/tolak/terbit/terima/pencocokan tercatat dengan aktor, IP klien, dan trace.",
+      milestone: "M4 — audit",
+    },
     users: {
       title: "Pengguna",
       description: "Administrasi pengguna dan peran untuk tenant ini.",
@@ -888,6 +918,25 @@ const id: Dictionary = {
     downloading: "Menyiapkan…",
     downloadFailed: "Gagal menyiapkan tautan unduhan.",
   },
+  auditPage: {
+    caption: "Log audit keputusan — hanya tambah, tanpa ubah/hapus",
+    unavailable: "Gagal memuat log audit — gateway mungkin tidak terjangkau.",
+    forbidden: "Log audit memerlukan izin audit:read (viewer atau admin).",
+    empty: "Belum ada keputusan tercatat",
+    emptyHint: "Setiap aksi setuju/tolak/terbit/terima/pencocokan muncul di sini begitu terjadi.",
+    columns: {
+      occurredAt: "Waktu",
+      actor: "Aktor",
+      action: "Aksi",
+      entity: "Entitas",
+      ip: "IP",
+      trace: "Trace",
+    },
+    filters: { actionLabel: "Aksi", actionAll: "Semua aksi", apply: "Terapkan" },
+    pagination: { next: "Berikutnya", first: "Terbaru" },
+    exportCsv: "Ekspor CSV",
+    exportHint: "Hanya kolom metadata; maksimum 10.000 baris terbaru.",
+  },
   localeNames: { id: "Bahasa Indonesia", en: "English" },
 };
 
@@ -902,6 +951,7 @@ const en: Dictionary = {
     vendors: "Vendors",
     invoices: "Invoices",
     reports: "Reports",
+    audit: "Audit Log",
     admin: "Admin",
     users: "Users",
     settings: "Settings",
@@ -1359,6 +1409,12 @@ const en: Dictionary = {
       description: "Exports, scheduled jobs, and run history (nightly CSV export per tenant to MinIO).",
       milestone: "M4 — exports & jobs",
     },
+    audit: {
+      title: "Audit Log",
+      description:
+        "The decision trail as it happened: every approve/reject/issue/post/match action with its actor, client IP, and trace.",
+      milestone: "M4 — audit",
+    },
     users: {
       title: "Users",
       description: "Users and roles administration for this tenant.",
@@ -1379,6 +1435,25 @@ const en: Dictionary = {
     download: "Download CSV",
     downloading: "Preparing…",
     downloadFailed: "Failed to prepare the download link.",
+  },
+  auditPage: {
+    caption: "Decision audit log — append-only, no edits or deletes",
+    unavailable: "Failed to load the audit log — the gateway may be unreachable.",
+    forbidden: "The audit log requires the audit:read permission (viewer or admin).",
+    empty: "No decisions recorded yet",
+    emptyHint: "Every approve/reject/issue/post/match action appears here as it happens.",
+    columns: {
+      occurredAt: "When",
+      actor: "Actor",
+      action: "Action",
+      entity: "Entity",
+      ip: "IP",
+      trace: "Trace",
+    },
+    filters: { actionLabel: "Action", actionAll: "All actions", apply: "Apply" },
+    pagination: { next: "Older", first: "Newest" },
+    exportCsv: "Export CSV",
+    exportHint: "Metadata columns only; the newest 10,000 rows at most.",
   },
   localeNames: { id: "Bahasa Indonesia", en: "English" },
 };

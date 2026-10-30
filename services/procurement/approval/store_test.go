@@ -536,6 +536,7 @@ type outboxRow struct {
 	Version    int32
 	Payload    []byte
 	ActorID    *string
+	ActorIP    string
 	TraceID    string
 	EntityType string
 	EntityID   string
@@ -552,7 +553,7 @@ func outboxRows(t *testing.T, db *pgxpool.Pool, requisitionID string) []outboxRo
 	_ = tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
 		rs, err := tx.Query(context.Background(), `
 			SELECT id::text, event_type, version, payload, actor_id::text,
-			       trace_id, entity_type, entity_id::text, published_at
+			       actor_ip, trace_id, entity_type, entity_id::text, published_at
 			FROM procurement.outbox
 			WHERE entity_id = $1
 			  AND event_type IN ($2, $3, $4, $5)
@@ -566,7 +567,7 @@ func outboxRows(t *testing.T, db *pgxpool.Pool, requisitionID string) []outboxRo
 			var r outboxRow
 			var published any
 			if err := rs.Scan(&r.ID, &r.EventType, &r.Version, &r.Payload,
-				&r.ActorID, &r.TraceID, &r.EntityType, &r.EntityID, &published); err != nil {
+				&r.ActorID, &r.ActorIP, &r.TraceID, &r.EntityType, &r.EntityID, &published); err != nil {
 				return err
 			}
 			rows = append(rows, r)
@@ -598,9 +599,10 @@ func TestStoreDecideIdempotencyAndOutbox(t *testing.T) {
 	s, reqs := NewStore(db), requisition.NewStore(db)
 	t.Cleanup(func() { cleanupApprovals(t, db) })
 	cleanupApprovals(t, db)
-	// The trace id rides the context exactly as the TraceInterceptor puts
-	// it there for gRPC calls.
-	ctx := logger.WithTraceID(context.Background(), "trace-31-store")
+	// The trace id and the client IP ride the context exactly as the
+	// TraceInterceptor puts them there for gRPC calls (the #44 actor_ip
+	// column's source).
+	ctx := logger.WithActorIP(logger.WithTraceID(context.Background(), "trace-31-store"), "203.0.113.7")
 
 	submitted, steps := submittedPR(t, ctx, s, reqs, userReq, "key-31-sub-a")
 
@@ -618,7 +620,8 @@ func TestStoreDecideIdempotencyAndOutbox(t *testing.T) {
 	rows := outboxRows(t, db, submitted.ID)
 	if len(rows) != 1 || rows[0].EventType != OutboxStepApproved ||
 		rows[0].ActorID == nil || *rows[0].ActorID != userApp ||
-		rows[0].TraceID != "trace-31-store" || rows[0].Version != 1 ||
+		rows[0].TraceID != "trace-31-store" || rows[0].ActorIP != "203.0.113.7" ||
+		rows[0].Version != 1 ||
 		rows[0].EntityType != "requisition" || rows[0].EntityID != submitted.ID ||
 		rows[0].Published != nil {
 		t.Fatalf("mid-flow outbox rows = %+v", rows)

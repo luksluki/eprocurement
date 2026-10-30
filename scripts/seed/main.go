@@ -467,10 +467,12 @@ func seedEvents(ctx context.Context, cfg config, rng *rand.Rand, reqs []requisit
 		}
 		// The constructors of the history package pin the document shapes —
 		// the seed writes exactly what the service's Apply writes, and the
-		// deterministic RNG keeps event_id stable across reruns.
+		// deterministic RNG keeps event_id stable across reruns. The actor
+		// IP draws from the same RNG (deterministic private-address ranges),
+		// so the audit view shows populated actor_ip columns on demo data.
 		ev, err := history.NewEvent(
 			newUUID(rng), r.tenantID, eventType, occurredAt,
-			r.requesterID, strings.ReplaceAll(newUUID(rng), "-", ""),
+			r.requesterID, seedActorIP(rng), strings.ReplaceAll(newUUID(rng), "-", ""),
 			"requisition", r.id, string(payloadJSON))
 		if err != nil {
 			fatalf("build event: %v", err)
@@ -544,6 +546,13 @@ func newUUID(rng *rand.Rand) string {
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// seedActorIP draws a deterministic documentation-range IPv4 address
+// (RFC 5737 TEST-NET style but inside 10.x so it reads as an office VPN):
+// the same rng stream, so reseeding reproduces identical values.
+func seedActorIP(rng *rand.Rand) string {
+	return fmt.Sprintf("10.%d.%d.%d", rng.Intn(4), rng.Intn(256), 1+rng.Intn(254))
 }
 
 func loadDotEnv(path string) {

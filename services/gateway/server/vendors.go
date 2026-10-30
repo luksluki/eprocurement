@@ -46,13 +46,20 @@ func registerVendorRoutes(app *fiber.App, verifier *token.Verifier, client Vendo
 
 // forwardContext attaches the verified claims as outgoing gRPC metadata —
 // procurement scopes every query by this tenant and audits this user — and
-// propagates the request's trace id (X-Trace-Id, generated when absent) as
-// x-trace-id, so outbox rows and service logs share the REST trace
-// (PRD §18; the TraceInterceptor reads it on the other side).
+// propagates two request-scoped values: the trace id (X-Trace-Id, generated
+// when absent) as x-trace-id, and the client IP (c.IP(), the
+// trusted-proxy-checked address) as x-actor-ip, so outbox rows and service
+// logs share the REST trace and the audit trail records where the actor
+// called from (PRD §14.7/§18; the TraceInterceptor reads both on the other
+// side). With no trusted proxies configured c.IP() is the socket peer and
+// an X-Forwarded-For header cannot spoof it.
 func forwardContext(c *fiber.Ctx, claims auth.AccessClaims) context.Context {
 	ctx := rbac.OutgoingContext(c.UserContext(), claims.Sub, claims.TenantID, claims.Roles)
 	if trace := traceIDFrom(c); trace != "" {
 		ctx = metadata.AppendToOutgoingContext(ctx, "x-trace-id", trace)
+	}
+	if ip := c.IP(); ip != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, "x-actor-ip", ip)
 	}
 	return ctx
 }

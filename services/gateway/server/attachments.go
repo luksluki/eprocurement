@@ -26,6 +26,8 @@ type DocumentsClient interface {
 	ListEvents(ctx context.Context, in *documentsv1.ListEventsRequest, opts ...grpc.CallOption) (*documentsv1.ListEventsResponse, error)
 	ListExportRuns(ctx context.Context, in *documentsv1.ListExportRunsRequest, opts ...grpc.CallOption) (*documentsv1.ListExportRunsResponse, error)
 	GetExportDownloadUrl(ctx context.Context, in *documentsv1.GetExportDownloadUrlRequest, opts ...grpc.CallOption) (*documentsv1.GetExportDownloadUrlResponse, error)
+	ListAudit(ctx context.Context, in *documentsv1.ListAuditRequest, opts ...grpc.CallOption) (*documentsv1.ListAuditResponse, error)
+	ExportAudit(ctx context.Context, in *documentsv1.ExportAuditRequest, opts ...grpc.CallOption) (*documentsv1.ExportAuditResponse, error)
 }
 
 // Attachment owner kinds the gateway routes for (documents owns the full

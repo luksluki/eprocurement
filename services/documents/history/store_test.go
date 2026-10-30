@@ -1,6 +1,7 @@
 package history
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -62,7 +63,7 @@ func TestApplyIdempotent(t *testing.T) {
 
 	// A non-decision event writes no audit row at all.
 	plain, err := NewEvent("eeeeeeee-0000-0000-0000-000000000002", ev.TenantID,
-		"pr.submitted", testBase.Add(time.Second), "user-1", "trace-1",
+		"pr.submitted", testBase.Add(time.Second), "user-1", "203.0.113.8", "trace-1",
 		"requisition", ev.EntityID, `{"number":"PR-000001"}`)
 	if err != nil {
 		t.Fatalf("NewEvent: %v", err)
@@ -148,7 +149,7 @@ func appliedSeed(t *testing.T, s *Store, tenant string) []Event {
 	events := make([]Event, 0, len(specs))
 	for _, sp := range specs {
 		ev, err := NewEvent(sp.id, tenant, sp.eventType, sp.at,
-			"user-1", "trace-1", "requisition", sp.entity, `{"number":"PR-000001"}`)
+			"user-1", "203.0.113.7", "trace-1", "requisition", sp.entity, `{"number":"PR-000001"}`)
 		if err != nil {
 			t.Fatalf("NewEvent %s: %v", sp.id, err)
 		}
@@ -242,7 +243,7 @@ func TestListEntityFilterAndCrossTenant(t *testing.T) {
 	s := newStore(t)
 	appliedSeed(t, s, "t-a")
 	other, err := NewEvent("f1", "t-b", "pr.created", testBase.Add(time.Hour),
-		"user-b", "trace-b", "requisition", "r-1", `{"number":"PR-000009"}`)
+		"user-b", "198.51.100.9", "trace-b", "requisition", "r-1", `{"number":"PR-000009"}`)
 	if err != nil {
 		t.Fatalf("NewEvent tenant B: %v", err)
 	}
@@ -275,6 +276,186 @@ func TestListEntityFilterAndCrossTenant(t *testing.T) {
 	}
 	if _, _, err := s.List(t.Context(), "t-a", ListFilter{Cursor: "junk"}); err != ErrCursorInvalid {
 		t.Fatalf("bad cursor error = %v, want ErrCursorInvalid", err)
+	}
+}
+
+// auditSeed applies one decision event of each of the five verbs plus one
+// non-decision, with distinct occurred_at stamps, and returns the ids in
+// expected newest-first order. Tenant t-a; actor ips alternate so the
+// actor_ip round trip is assertable.
+func auditSeed(t *testing.T, s *Store) {
+	t.Helper()
+	specs := []struct {
+		id, eventType, actorIP string
+		at                     time.Time
+	}{
+		{"a1", "pr.approved", "203.0.113.1", testBase},
+		{"a2", "pr.step_rejected", "203.0.113.2", testBase.Add(1 * time.Second)},
+		{"a3", "po.issued", "203.0.113.3", testBase.Add(2 * time.Second)},
+		{"a4", "grn.posted", "203.0.113.4", testBase.Add(3 * time.Second)},
+		{"a5", "invoice.matched", "203.0.113.5", testBase.Add(4 * time.Second)},
+		{"a6", "invoice.discrepancy", "203.0.113.6", testBase.Add(5 * time.Second)},
+		{"a7", "po.acknowledged", "203.0.113.7", testBase.Add(6 * time.Second)}, // not a decision
+	}
+	for _, sp := range specs {
+		ev, err := NewEvent(sp.id, "t-a", sp.eventType, sp.at,
+			"user-1", sp.actorIP, "trace-44", "requisition", "r-1", `{"number":"PR-000001"}`)
+		if err != nil {
+			t.Fatalf("NewEvent %s: %v", sp.id, err)
+		}
+		if _, err := s.Apply(t.Context(), ev); err != nil {
+			t.Fatalf("Apply %s: %v", sp.id, err)
+		}
+	}
+}
+
+// TestListAudit pins the audit read side (#44): the decision projection now
+// covers all five verbs, actor_ip round-trips into the rows, ordering is
+// newest-first with the event_id tiebreaker, and the action filter narrows.
+func TestListAudit(t *testing.T) {
+	s := newStore(t)
+	auditSeed(t, s)
+
+	entries, next, err := s.ListAudit(t.Context(), "t-a", AuditFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListAudit: %v", err)
+	}
+	// a7 (po.acknowledged) is not a decision: six audit rows, newest first.
+	want := []string{"a6", "a5", "a4", "a3", "a2", "a1"}
+	got := make([]string, 0, len(entries))
+	for _, e := range entries {
+		got = append(got, e.EventID)
+	}
+	if !equalIDs(got, want) {
+		t.Fatalf("ListAudit order = %v, want %v", got, want)
+	}
+	if next != "" {
+		t.Fatalf("next cursor on the last page = %q", next)
+	}
+	// Field fidelity: the newest row is the match discrepancy with its IP.
+	newest := entries[0]
+	if newest.Action != "match" || newest.ActorID != "user-1" || newest.ActorIP != "203.0.113.6" ||
+		newest.TraceID != "trace-44" || newest.TenantID != "t-a" ||
+		newest.EntityType != "requisition" || newest.EntityID != "r-1" ||
+		newest.Details != `{"number":"PR-000001"}` {
+		t.Fatalf("audit row fidelity: %+v", newest)
+	}
+	if newest.RecordedAt.IsZero() || newest.OccurredAt.IsZero() {
+		t.Fatalf("audit row timestamps: %+v", newest)
+	}
+
+	// Action filter: only the two match rows, newest first.
+	entries, _, err = s.ListAudit(t.Context(), "t-a", AuditFilter{Action: "match", Limit: 10})
+	if err != nil {
+		t.Fatalf("ListAudit filtered: %v", err)
+	}
+	if !equalIDs([]string{entries[0].EventID, entries[1].EventID}, []string{"a6", "a5"}) {
+		t.Fatalf("match filter = %v", eventIDsAudit(entries))
+	}
+
+	// Keyset pagination walks every row exactly once.
+	walked := []string{}
+	cursor := ""
+	pages := 0
+	for {
+		page, nextCursor, err := s.ListAudit(t.Context(), "t-a", AuditFilter{Limit: 2, Cursor: cursor})
+		if err != nil {
+			t.Fatalf("ListAudit page %d: %v", pages+1, err)
+		}
+		walked = append(walked, eventIDsAudit(page)...)
+		pages++
+		if nextCursor == "" {
+			break
+		}
+		cursor = nextCursor
+	}
+	if !equalIDs(walked, want) {
+		t.Fatalf("walked pages = %v, want %v", walked, want)
+	}
+	if pages != 3 {
+		t.Fatalf("pages = %d, want 3", pages)
+	}
+}
+
+func eventIDsAudit(entries []AuditEntry) []string {
+	ids := make([]string, 0, len(entries))
+	for _, e := range entries {
+		ids = append(ids, e.EventID)
+	}
+	return ids
+}
+
+// TestListAuditCrossTenantAndInvalid pins the absolute tenant scoping (the
+// other tenant's audit rows are invisible) and the typed filter failures.
+func TestListAuditCrossTenantAndInvalid(t *testing.T) {
+	s := newStore(t)
+	auditSeed(t, s)
+	other, err := NewEvent("b1", "t-b", "pr.approved", testBase.Add(time.Hour),
+		"user-b", "198.51.100.9", "trace-b", "requisition", "r-1", `{"number":"PR-000009"}`)
+	if err != nil {
+		t.Fatalf("NewEvent tenant B: %v", err)
+	}
+	if _, err := s.Apply(t.Context(), other); err != nil {
+		t.Fatalf("seed tenant B: %v", err)
+	}
+
+	// Cross-tenant denial: tenant B sees none of tenant A's audit rows.
+	entries, _, err := s.ListAudit(t.Context(), "t-b", AuditFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListAudit tenant B: %v", err)
+	}
+	if len(entries) != 1 || entries[0].TenantID != "t-b" {
+		t.Fatalf("tenant B sees %v, want only its own row", eventIDsAudit(entries))
+	}
+
+	// Typed failures, the ListEvents convention.
+	if _, _, err := s.ListAudit(t.Context(), "t-a", AuditFilter{Action: "decide"}); err != ErrActionInvalid {
+		t.Fatalf("unknown action = %v, want ErrActionInvalid", err)
+	}
+	if _, _, err := s.ListAudit(t.Context(), "t-a", AuditFilter{EntityType: "requisition"}); err != ErrFilterInvalid {
+		t.Fatalf("half filter = %v, want ErrFilterInvalid", err)
+	}
+	if _, _, err := s.ListAudit(t.Context(), "t-a", AuditFilter{Cursor: "junk"}); err != ErrCursorInvalid {
+		t.Fatalf("bad cursor = %v, want ErrCursorInvalid", err)
+	}
+}
+
+// TestExportAudit pins the export read: the newest MaxAuditExportRows rows
+// of the tenant only, bounded columns rendered by AuditCSV (pinned in
+// history_test.go), and tenant scoping.
+func TestExportAudit(t *testing.T) {
+	s := newStore(t)
+	auditSeed(t, s)
+	other, err := NewEvent("b1", "t-b", "pr.approved", testBase.Add(time.Hour),
+		"user-b", "198.51.100.9", "trace-b", "requisition", "r-1", `{"number":"PR-000009"}`)
+	if err != nil {
+		t.Fatalf("NewEvent tenant B: %v", err)
+	}
+	if _, err := s.Apply(t.Context(), other); err != nil {
+		t.Fatalf("seed tenant B: %v", err)
+	}
+
+	entries, err := s.ExportAudit(t.Context(), "t-a")
+	if err != nil {
+		t.Fatalf("ExportAudit: %v", err)
+	}
+	if len(entries) != 6 {
+		t.Fatalf("export rows = %d, want 6", len(entries))
+	}
+	if entries[0].EventID != "a6" || entries[0].Action != "match" {
+		t.Fatalf("export order = %s, want a6 (the newest decision) first", entries[0].EventID)
+	}
+	if csv := string(AuditCSV(entries)); !strings.Contains(csv, "a6") || strings.Contains(csv, "PR-000001") {
+		t.Fatalf("export csv missing newest row or leaking details")
+	}
+
+	// Tenant scoping: tenant B exports only its own single row.
+	entries, err = s.ExportAudit(t.Context(), "t-b")
+	if err != nil {
+		t.Fatalf("ExportAudit tenant B: %v", err)
+	}
+	if len(entries) != 1 || entries[0].EventID != "b1" {
+		t.Fatalf("tenant B export = %v, want [b1]", eventIDsAudit(entries))
 	}
 }
 

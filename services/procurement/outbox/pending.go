@@ -34,6 +34,7 @@ type PendingEvent struct {
 	Version    int32
 	Payload    json.RawMessage
 	ActorID    string // "" when the row's actor_id is NULL
+	ActorIP    string // the acting client's IP (#44); "" when unknown
 	TraceID    string
 	EntityType string
 	EntityID   string
@@ -55,7 +56,7 @@ func Pending(ctx context.Context, db *pgxpool.Pool, limit int) ([]PendingEvent, 
 	err := tenant.WithBypass(ctx, db, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
 			SELECT id::text, tenant_id::text, event_type, version, payload,
-			       coalesce(actor_id::text, ''), trace_id, entity_type, entity_id::text,
+			       coalesce(actor_id::text, ''), actor_ip, trace_id, entity_type, entity_id::text,
 			       occurred_at, created_at
 			FROM procurement.outbox
 			WHERE published_at IS NULL
@@ -68,7 +69,7 @@ func Pending(ctx context.Context, db *pgxpool.Pool, limit int) ([]PendingEvent, 
 		for rows.Next() {
 			var ev PendingEvent
 			if err := rows.Scan(&ev.ID, &ev.TenantID, &ev.EventType, &ev.Version,
-				&ev.Payload, &ev.ActorID, &ev.TraceID, &ev.EntityType, &ev.EntityID,
+				&ev.Payload, &ev.ActorID, &ev.ActorIP, &ev.TraceID, &ev.EntityType, &ev.EntityID,
 				&ev.OccurredAt, &ev.CreatedAt); err != nil {
 				return err
 			}

@@ -25,7 +25,9 @@ const ServiceName = "documents"
 // tenant role (rbac matrix), so the whole tenant can read its timeline
 // while a method missing from this map would pass through unprotected
 // (see rbac.UnaryInterceptor). The export methods map to export:run
-// (#49) — finance/admin only, the permission's first real consumer.
+// (#49) — finance/admin only, the permission's first real consumer. The
+// audit methods map to audit:read (#44) — viewer/admin only, the audit
+// listing's audience per the maintainer decision (issue #44 comments).
 //
 // The attachment methods are deliberately NOT in this map: their permission
 // depends on the attachment's entity type (vendor:read/write vs
@@ -37,6 +39,8 @@ var methodPermissions = rbac.MethodPermissions{
 	"/documents.v1.Documents/ListEvents":           rbac.RequisitionRead,
 	"/documents.v1.Documents/ListExportRuns":       rbac.ExportRun,
 	"/documents.v1.Documents/GetExportDownloadUrl": rbac.ExportRun,
+	"/documents.v1.Documents/ListAudit":            rbac.AuditRead,
+	"/documents.v1.Documents/ExportAudit":          rbac.AuditRead,
 }
 
 // New returns a grpcserver.Server with the documents API registered.

@@ -83,7 +83,7 @@ func Decode(body []byte) (publisher.Envelope, error) {
 // packages).
 func Event(env publisher.Envelope) (history.Event, error) {
 	ev, err := history.NewEvent(env.EventID, env.TenantID, env.Type, env.OccurredAt,
-		env.ActorID, env.TraceID, env.EntityType, env.EntityID, string(env.Payload))
+		env.ActorID, env.ActorIP, env.TraceID, env.EntityType, env.EntityID, string(env.Payload))
 	if err != nil {
 		return history.Event{}, fmt.Errorf("%w: %v", ErrEnvelopeInvalid, err)
 	}

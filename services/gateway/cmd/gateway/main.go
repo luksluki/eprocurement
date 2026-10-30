@@ -63,7 +63,13 @@ func run() error {
 	defer func() { _ = procurementConn.Close() }()
 
 	documentsConn, err := grpc.NewClient(cfg.DocumentsAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		// #44: the audit CSV export rides one unary response (bounded by
+		// documents at the newest 10 000 rows, metadata columns only — a few
+		// MB at worst). The gRPC default receive limit is 4 MiB, so the dial
+		// raises it explicitly to 16 MiB rather than relying on the default.
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(16<<20)),
+	)
 	if err != nil {
 		return fmt.Errorf("dial documents %s: %w", cfg.DocumentsAddr, err)
 	}
@@ -73,6 +79,10 @@ func run() error {
 		server.WithIdentity(identityv1.NewIdentityClient(conn), cfg.LoginRatePerMin),
 		server.WithProcurement(procurementv1.NewProcurementClient(procurementConn)),
 		server.WithDocuments(documentsv1.NewDocumentsClient(documentsConn)),
+		// #44: whose X-Forwarded-For the gateway honors for c.IP() (the
+		// audit actor_ip source). Empty = trust no proxy: every forwarded
+		// header is ignored and the socket peer is recorded.
+		server.WithTrustedProxies(cfg.TrustedProxies),
 		// The admin DLQ surface (#48): the gateway's own small AMQP client
 		// over procurement.dlq (maintainer option A, 2026-10-28). It dials
 		// per request; a broker that is down fails those requests with 503
@@ -80,7 +90,8 @@ func run() error {
 		server.WithDLQ(dlq.New(cfg.RabbitMQURL, topology.Default)))
 	log.Info("starting gateway", "port", cfg.Port,
 		"identity_addr", cfg.IdentityAddr, "procurement_addr", cfg.ProcurementAddr,
-		"documents_addr", cfg.DocumentsAddr, "login_rate_per_min", cfg.LoginRatePerMin)
+		"documents_addr", cfg.DocumentsAddr, "login_rate_per_min", cfg.LoginRatePerMin,
+		"trusted_proxies", len(cfg.TrustedProxies))
 
 	go func() {
 		<-ctx.Done()

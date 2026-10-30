@@ -101,8 +101,17 @@ func row(id, tenantID, eventType string) outbox.PendingEvent {
 	}
 }
 
+// rowIP is row with the #44 actor_ip column populated (decision traffic).
+func rowIP(id, tenantID, eventType, actorID, actorIP string) outbox.PendingEvent {
+	r := row(id, tenantID, eventType)
+	r.ActorID = actorID
+	r.ActorIP = actorIP
+	return r
+}
+
 // Envelope is assembled 1:1 from the row columns: the §14.5 field set plus
-// entity_type/entity_id (required by consumers, see #47).
+// entity_type/entity_id (required by consumers, see #47) and actor_ip (the
+// #44 audit extension — "" on rows written before migration 0013).
 func TestEnvelopeFromRow(t *testing.T) {
 	env := EnvelopeFromRow(row("ev-1", "t-1", "pr.submitted"))
 	body, err := json.Marshal(env)
@@ -111,10 +120,16 @@ func TestEnvelopeFromRow(t *testing.T) {
 	}
 	want := `{"event_id":"ev-1","tenant_id":"t-1","type":"pr.submitted","version":1,` +
 		`"entity_type":"requisition","entity_id":"eeeeeeee-0000-0000-0000-0000000000cc",` +
-		`"occurred_at":"2026-10-25T08:00:00Z","actor_id":"","trace_id":"trace-45",` +
+		`"occurred_at":"2026-10-25T08:00:00Z","actor_id":"","actor_ip":"","trace_id":"trace-45",` +
 		`"payload":{"number":"PR-000001"}}`
 	if string(body) != want {
 		t.Fatalf("envelope =\n%s\nwant\n%s", body, want)
+	}
+
+	// A decision row carries its actor and the client IP end-to-end (#44).
+	env = EnvelopeFromRow(rowIP("ev-2", "t-1", "pr.approved", "user-1", "203.0.113.7"))
+	if env.ActorID != "user-1" || env.ActorIP != "203.0.113.7" {
+		t.Fatalf("decision envelope actor = (%q, %q)", env.ActorID, env.ActorIP)
 	}
 }
 

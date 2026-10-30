@@ -22,6 +22,10 @@ export const dynamic = "force-dynamic";
 export default async function AppShellLayout({ children }: { children: ReactNode }) {
   const [{ claims }, locale, dict] = await Promise.all([requireSession("/app/dashboard"), getLocale(), getDictionary()]);
   const isAdmin = claims.roles.includes("admin");
+  // audit:read holders see the audit log entry (viewer + admin — the rbac
+  // matrix; #44's maintainer decision). The Admin group renders for admins
+  // only, so the audit page rides in mainNav behind this condition instead.
+  const canReadAudit = isAdmin || claims.roles.includes("viewer");
   const demoTenants = parseDemoTenants(process.env.DEMO_TENANTS);
 
   const mainNav: NavItem[] = [
@@ -32,6 +36,7 @@ export default async function AppShellLayout({ children }: { children: ReactNode
     { href: "/app/vendors", label: dict.nav.vendors },
     { href: "/app/invoices", label: dict.nav.invoices },
     { href: "/app/reports", label: dict.nav.reports },
+    ...(canReadAudit ? [{ href: "/app/audit", label: dict.nav.audit }] : []),
   ];
   const adminNav: NavItem[] = [
     { href: "/admin/users", label: dict.nav.users },
