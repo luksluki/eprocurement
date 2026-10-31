@@ -75,7 +75,20 @@ export async function gatewayFetch<T>(
     },
   });
   const text = await res.text();
-  const data = (text ? JSON.parse(text) : {}) as T & { error?: string; code?: string };
+  let data: T & { error?: string; code?: string };
+  if (!text) {
+    data = {} as T & { error?: string; code?: string };
+  } else {
+    try {
+      data = JSON.parse(text) as T & { error?: string; code?: string };
+    } catch {
+      throw new GatewayError(
+        res.status,
+        "body_not_json",
+        `non-JSON ${init.method ?? "GET"} ${path} answered ${res.status}: ${text.slice(0, 120)}`,
+      );
+    }
+  }
   return { status: res.status, data };
 }
 

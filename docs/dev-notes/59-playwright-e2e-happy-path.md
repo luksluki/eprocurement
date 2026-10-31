@@ -184,10 +184,10 @@ service healthy per `docker compose ps`):
   `@eprocurement/e2e`), `pnpm test` (6/6) — all green.
 - `python -c "yaml.safe_load(.github/workflows/ci.yml)"` — jobs
   `[go, web, e2e]`, `e2e.needs == [go, web]`, `timeout-minutes == 45`.
-- **Not run here:** the GitHub Actions job itself — first execution
-  happens on the PR push (no local runner available); the job mirrors the
-  verified local sequence plus `docker compose up -d --wait` on a fresh
-  runner.
+- **First CI execution:** the job ran on this PR's push and passed
+  (“E2E · Playwright happy path” — 5m 01s), which closes the loop on the
+  “e2e passes on CI” acceptance criterion; the job mirrors the verified
+  local sequence plus `docker compose up -d --wait` on a fresh runner.
 
 ## Follow-ups
 
