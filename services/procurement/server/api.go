@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -15,6 +16,7 @@ import (
 	procurementv1 "github.com/luksluki/eprocurement/gen/go/procurement/v1"
 	"github.com/luksluki/eprocurement/internal/platform/rbac"
 	"github.com/luksluki/eprocurement/services/procurement/approval"
+	"github.com/luksluki/eprocurement/services/procurement/dashboard"
 	"github.com/luksluki/eprocurement/services/procurement/goodsreceipt"
 	"github.com/luksluki/eprocurement/services/procurement/invoice"
 	"github.com/luksluki/eprocurement/services/procurement/match"
@@ -38,6 +40,7 @@ type api struct {
 	goodsReceipts  *goodsreceipt.Store
 	invoices       *invoice.Store
 	matches        *match.Store
+	dashboards     *dashboard.Store
 	log            *slog.Logger
 }
 
@@ -957,6 +960,68 @@ func (a *api) ReplaceMatchSettings(ctx context.Context, req *procurementv1.Repla
 
 func matchSettingsPB(s match.Settings) *procurementv1.MatchSettings {
 	return &procurementv1.MatchSettings{QtyPct: s.QtyPct, PricePct: s.PricePct}
+}
+
+// GetDashboard serves the FR-09 summary (dashboard:read — every role,
+// tenant-wide; #52): pending approvals, spend per vendor over the trailing
+// 30/90-day windows, and the PO status distribution — all three widgets from
+// one store round trip inside one tenant transaction, so they describe one
+// consistent snapshot. The read has no request validation (the request is
+// empty and the clock is the server's); IO failures map to Internal like
+// every other read mapper's default arm.
+func (a *api) GetDashboard(ctx context.Context, _ *procurementv1.GetDashboardRequest) (*procurementv1.DashboardSummary, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	summary, err := a.dashboards.Summary(ctx, auth.TenantID, time.Now().UTC())
+	if err != nil {
+		a.log.Error("dashboard summary failed", "tenant_id", auth.TenantID, "error", err.Error())
+		return nil, status.Error(codes.Internal, "internal error")
+	}
+	return dashboardPB(summary), nil
+}
+
+// dashboardPB renders the summary for the wire: the pending first page with
+// each row's requisition header and current step, the bounded spend rows,
+// the per-currency spend totals, and the seven-status distribution in
+// canonical order (zeros included).
+func dashboardPB(s dashboard.Summary) *procurementv1.DashboardSummary {
+	items := make([]*procurementv1.PendingApproval, 0, len(s.Pending.Items))
+	for _, p := range s.Pending.Items {
+		items = append(items, &procurementv1.PendingApproval{
+			RequisitionId: p.RequisitionID, Number: p.Number, Currency: p.Currency,
+			TotalCents: p.TotalCents, SubmittedAt: p.SubmittedAt.UTC().Format(time.RFC3339),
+			StepId: p.StepID, StepNo: p.StepNo, RoleRequired: p.RoleRequired,
+		})
+	}
+	spend := make([]*procurementv1.VendorSpend, 0, len(s.SpendByVendor))
+	for _, v := range s.SpendByVendor {
+		spend = append(spend, &procurementv1.VendorSpend{
+			VendorId: v.VendorID, VendorName: v.VendorName, Currency: v.Currency,
+			ThirtyDayCents: v.SpendCents30d, NinetyDayCents: v.SpendCents90d,
+		})
+	}
+	totals := make([]*procurementv1.CurrencySpend, 0, len(s.SpendTotals))
+	for _, c := range s.SpendTotals {
+		totals = append(totals, &procurementv1.CurrencySpend{
+			Currency: c.Currency, ThirtyDayCents: c.ThirtyDayCents, NinetyDayCents: c.NinetyDayCents,
+		})
+	}
+	dist := make([]*procurementv1.PurchaseOrderStatusCount, 0, len(s.POStatusDistribution))
+	for _, d := range s.POStatusDistribution {
+		dist = append(dist, &procurementv1.PurchaseOrderStatusCount{
+			Status: d.Status, Count: int32(d.Count),
+		})
+	}
+	return &procurementv1.DashboardSummary{
+		PendingApprovals: &procurementv1.PendingApprovals{
+			Total: int32(s.Pending.Total), Items: items,
+		},
+		SpendByVendor:         spend,
+		PoStatusDistribution: dist,
+		SpendTotals:           totals,
+	}
 }
 
 func vendorPB(v vendor.Vendor) *procurementv1.Vendor {

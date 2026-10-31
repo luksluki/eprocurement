@@ -28,6 +28,7 @@ Fixed catalog (seeded in `identity.roles`): **admin, requester, approver, buyer,
 | `audit:read` | | | | | ✓ |
 | `users:manage` | | | | | |
 | `dlq:manage` | | | | | |
+| `dashboard:read` | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 Read permissions are broad by design (everyone in the tenant sees the flow they participate in); writes are narrow. Ownership rules are domain checks on top of RBAC, enforced inside the owning service. Reads are tenant-wide: `requisition:read` (#32 list, #33 detail) has no ownership check — another same-tenant user's draft is readable, while its edits/submit are not. Landed so far:
 
@@ -47,6 +48,8 @@ Read permissions are broad by design (everyone in the tenant sees the flow they 
 - **Invoice reads + UI (#41)** — `GET /api/v1/invoices` and its gRPC twin `ListInvoices` join the broad `invoice:read` (every role, tenant-wide; header-only rows — no lines, no match_result). The `/app/invoices` screens gate purely client-side through `apps/web/src/lib/invoice-eligibility.ts` (the #38 po-eligibility pattern): the Match button renders for `invoice:write` holders on a pending/discrepancy invoice and — per the maintainer decision 2026-10-29 — stays **disabled until an attachment reaches `ready` state** (a hard client-side gate; the server deliberately never checks, #40's decision), and the Create-invoice link from the PO detail renders for `invoice:write` holders on an invoicable PO. The gateway, the interceptor, and the domain still enforce every gate on the actual calls; the BFF proxies keep the token server-side.
 
 - **Audit log (#44)** — `GET /api/v1/audit` and `GET /api/v1/audit/export` are **`audit:read` at both layers** (gateway `RequirePermission` + documents' `MethodPermissions` on `ListAudit`/`ExportAudit`) — **viewer + admin only**, the permission's first real consumer, per the maintainer decision on issue #44. No ownership rule — a tenant's decision log belongs to the tenant; the store scopes every query by `tenant_id`, so cross-tenant reads are invisible (empty result). The audit surface is read-only over an append-only collection (PRD §17). The web nav entry renders only for `audit:read` holders (`layout.tsx`), and the page itself answers the gateway's 403 with a dedicated sentence for anyone reaching it by URL.
+
+- **Dashboard (#52)** — `GET /api/v1/dashboard/summary` and its gRPC twin `GetDashboard` are the broad **`dashboard:read`** — every role, tenant-wide. The widget aggregates only reads the roles already hold (pending approval steps over submitted requisitions, the PO register behind the spend windows, the PO status distribution — all behind `requisition:read`/`po:read` individually), so the landing page (PRD §11) is as broad as its ingredients; no ownership rule applies. The store scopes every query by tenant (RLS via `WithTenant`), so a cross-tenant dashboard is an empty snapshot, not a leak.
 
 ## Enforcement layers (defense in depth)
 

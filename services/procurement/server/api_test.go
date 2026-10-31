@@ -27,6 +27,7 @@ import (
 	"github.com/luksluki/eprocurement/internal/platform/rbac"
 	"github.com/luksluki/eprocurement/internal/platform/tenant"
 	"github.com/luksluki/eprocurement/services/procurement/approval"
+	"github.com/luksluki/eprocurement/services/procurement/dashboard"
 	"github.com/luksluki/eprocurement/services/procurement/goodsreceipt"
 	"github.com/luksluki/eprocurement/services/procurement/invoice"
 	"github.com/luksluki/eprocurement/services/procurement/match"
@@ -69,7 +70,7 @@ func startProcurement(t *testing.T) (procurementv1.ProcurementClient, *pgxpool.P
 	}
 
 	log := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
-	srv := New(log, db, vendor.NewStore(db), requisition.NewStore(db), approval.NewStore(db), purchaseorder.NewStore(db), goodsreceipt.NewStore(db), invoice.NewStore(db), match.NewStore(db))
+	srv := New(log, db, vendor.NewStore(db), requisition.NewStore(db), approval.NewStore(db), purchaseorder.NewStore(db), goodsreceipt.NewStore(db), invoice.NewStore(db), match.NewStore(db), dashboard.NewStore(db))
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -2905,5 +2906,146 @@ func TestPurchaseOrderGRPCListAndGet(t *testing.T) {
 	if _, err := client.ListPurchaseOrders(context.Background(),
 		&procurementv1.ListPurchaseOrdersRequest{}); status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("anonymous list: code = %v, want Unauthenticated", status.Code(err))
+	}
+}
+
+// grpcDashboardVendorCode namespaces the dashboard test's vendors so its
+// cleanup can target them exactly.
+const grpcDashboardVendorCode = "DASH-52-GRPC"
+
+// TestDashboardGRPC covers the #52 summary through the full gRPC wiring:
+// the broad dashboard:read at the interceptor, the envelope's three widgets
+// against the real domain flow, cross-tenant emptiness, and the
+// Unauthenticated/PermissionDenied gates.
+func TestDashboardGRPC(t *testing.T) {
+	client, db, cleanup := startProcurement(t)
+	defer cleanup()
+	grpcCleanupRequisition(t, db)
+	grpcCleanupVendor(t, db, grpcDashboardVendorCode)
+	t.Cleanup(func() {
+		grpcCleanupRequisition(t, db)
+		grpcCleanupVendor(t, db, grpcDashboardVendorCode)
+	})
+
+	// One vendor, one submitted requisition (2 materialized steps, current =
+	// step 1), and one approved+converted+issued PO for the spend window.
+	v, err := client.CreateVendor(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.CreateVendorRequest{Code: grpcDashboardVendorCode, Name: "PT Dashboard"})
+	if err != nil {
+		t.Fatalf("create vendor: %v", err)
+	}
+	if _, err := client.ReplaceApprovalRules(callerCtx(gTenantA, rbac.RoleAdmin),
+		&procurementv1.ReplaceApprovalRulesRequest{Rules: testRules()[:1]}); err != nil {
+		t.Fatalf("configure rules: %v", err)
+	}
+	pending, err := client.CreateRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.CreateRequisitionRequest{Currency: "IDR", Items: testItems()})
+	if err != nil {
+		t.Fatalf("create pending requisition: %v", err)
+	}
+	if _, err := client.SubmitRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.SubmitRequisitionRequest{Id: pending.GetId()}); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	convertible, err := client.CreateRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.CreateRequisitionRequest{Currency: "IDR", Items: testItems()})
+	if err != nil {
+		t.Fatalf("create convertible requisition: %v", err)
+	}
+	if _, err := client.SubmitRequisition(callerCtx(gTenantA, rbac.RoleRequester),
+		&procurementv1.SubmitRequisitionRequest{Id: convertible.GetId()}); err != nil {
+		t.Fatalf("submit convertible: %v", err)
+	}
+	steps, err := client.GetRequisition(callerCtx(gTenantA, rbac.RoleViewer),
+		&procurementv1.GetRequisitionRequest{Id: convertible.GetId()})
+	if err != nil {
+		t.Fatalf("get requisition: %v", err)
+	}
+	if _, err := client.DecideApproval(callerCtxAs(gUserB, gTenantA, rbac.RoleApprover),
+		&procurementv1.DecideApprovalRequest{StepId: steps.GetApprovalSteps()[0].GetId(), Decision: "approve"}); err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	po, err := client.CreatePurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.CreatePurchaseOrderRequest{RequisitionId: convertible.GetId(), VendorId: v.GetId()})
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	if _, err := client.IssuePurchaseOrder(callerCtx(gTenantA, rbac.RoleBuyer),
+		&procurementv1.IssuePurchaseOrderRequest{Id: po.GetPurchaseOrder().GetId()}); err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+
+	// A viewer holds dashboard:read (the broad landing-page read).
+	summary, err := client.GetDashboard(callerCtx(gTenantA, rbac.RoleViewer),
+		&procurementv1.GetDashboardRequest{})
+	if err != nil {
+		t.Fatalf("get dashboard: %v", err)
+	}
+
+	// Approvals: total 1 (the one submitted requisition's current step),
+	// first page carrying the requisition header and step identity.
+	if summary.GetPendingApprovals().GetTotal() != 1 || len(summary.GetPendingApprovals().GetItems()) != 1 {
+		t.Fatalf("pending = %+v, want total 1 with the first page", summary.GetPendingApprovals())
+	}
+	item := summary.GetPendingApprovals().GetItems()[0]
+	if item.GetRequisitionId() != pending.GetId() || item.GetNumber() != pending.GetNumber() ||
+		item.GetStepNo() != 1 || item.GetRoleRequired() != "approver" || item.GetStepId() == "" ||
+		item.GetSubmittedAt() == "" || item.GetTotalCents() != pending.GetTotalCents() {
+		t.Fatalf("pending item = %+v, want the submitted requisition's current step with its header", item)
+	}
+
+	// Spend: the issued PO (now) is inside both windows.
+	if len(summary.GetSpendByVendor()) != 1 {
+		t.Fatalf("spend rows = %+v, want the one vendor with issued spend", summary.GetSpendByVendor())
+	}
+	row := summary.GetSpendByVendor()[0]
+	if row.GetVendorId() != v.GetId() || row.GetVendorName() != v.GetName() ||
+		row.GetCurrency() != "IDR" || row.GetThirtyDayCents() != po.GetPurchaseOrder().GetTotalCents() ||
+		row.GetNinetyDayCents() != po.GetPurchaseOrder().GetTotalCents() {
+		t.Fatalf("spend row = %+v, want the issued PO in both windows", row)
+	}
+	if len(summary.GetSpendTotals()) != 1 ||
+		summary.GetSpendTotals()[0].GetThirtyDayCents() != po.GetPurchaseOrder().GetTotalCents() {
+		t.Fatalf("spend totals = %+v, want the IDR unbounded sums", summary.GetSpendTotals())
+	}
+
+	// Distribution: all seven statuses, one issued PO, zeros elsewhere.
+	if len(summary.GetPoStatusDistribution()) != 7 {
+		t.Fatalf("distribution = %d rows, want all 7 statuses", len(summary.GetPoStatusDistribution()))
+	}
+	distSum, issued := int32(0), int32(0)
+	for _, d := range summary.GetPoStatusDistribution() {
+		if d.GetStatus() == "issued" {
+			issued = d.GetCount()
+		}
+		distSum += d.GetCount()
+	}
+	if issued != 1 || distSum != 1 {
+		t.Fatalf("distribution: issued=%d sum=%d, want 1/1", issued, distSum)
+	}
+
+	// Cross-tenant: tenant B's summary is an empty snapshot, not a leak.
+	other, err := client.GetDashboard(callerCtx(gTenantB, rbac.RoleViewer),
+		&procurementv1.GetDashboardRequest{})
+	if err != nil {
+		t.Fatalf("get dashboard tenant B: %v", err)
+	}
+	if other.GetPendingApprovals().GetTotal() != 0 || len(other.GetSpendByVendor()) != 0 {
+		t.Fatalf("cross-tenant summary = %+v, want empty", other)
+	}
+
+	// Anonymous: the interceptor's map entry rejects metadata-less calls.
+	if _, err := client.GetDashboard(context.Background(),
+		&procurementv1.GetDashboardRequest{}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("anonymous: code = %v, want Unauthenticated", status.Code(err))
+	}
+	// A role that holds nothing (an unknown role grants no permission; every
+	// catalog role holds the broad dashboard:read) is denied by the
+	// interceptor's re-check.
+	noRead := metadata.NewOutgoingContext(context.Background(),
+		metadata.Pairs(rbac.MDTenantID, gTenantA, rbac.MDUserID, gUser, rbac.MDRole, "ghost"))
+	if _, err := client.GetDashboard(noRead,
+		&procurementv1.GetDashboardRequest{}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("unknown role: code = %v, want PermissionDenied", status.Code(err))
 	}
 }

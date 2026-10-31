@@ -900,3 +900,86 @@ export async function exportAuditCsv(
     return { ok: false, status: 502, code: "gateway_unavailable" };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Dashboard (#52). The summary is one round trip: the whole FR-09 snapshot
+// (pending approvals, spend per vendor, PO status distribution) arrives in
+// one body, so the page keeps a single data-or-null fetch (the listVendors
+// convention for server-rendered pages).
+
+// PendingApprovalWire is one row of the approvals widget: the current pending
+// step (the smallest pending step_no of a submitted requisition) with the
+// requisition header it blocks — requisition_id links to the detail view.
+export type PendingApprovalWire = {
+  requisition_id: string;
+  number: string;
+  currency: string;
+  total_cents: number;
+  submitted_at: string;
+  step_id: string;
+  step_no: number;
+  role_required: string;
+};
+
+// VendorSpendWire is one vendor+currency row of the spend widget (issued POs
+// only: status not draft/cancelled — the #49 register basis).
+export type VendorSpendWire = {
+  vendor_id: string;
+  vendor_name: string;
+  currency: string;
+  thirty_day_cents: number;
+  ninety_day_cents: number;
+};
+
+// POStatusCountWire is one FR-06 status with its live row count; the summary
+// carries all seven, zeros included, in canonical lifecycle order.
+export type POStatusCountWire = {
+  status: string;
+  count: number;
+};
+
+// CurrencySpendWire is one currency's unbounded window sum — the KPI cards'
+// spend numbers (money never mixes currencies: a tenant may hold IDR and USD
+// side by side, so the totals stay per currency).
+export type CurrencySpendWire = {
+  currency: string;
+  thirty_day_cents: number;
+  ninety_day_cents: number;
+};
+
+// DashboardSummaryWire is the GET /api/v1/dashboard/summary body: the KPI
+// spend totals are the unbounded per-currency sums over every vendor (the
+// spend_by_vendor rows are bounded to the top vendors).
+export type DashboardSummaryWire = {
+  pending_approvals: { total: number; items: PendingApprovalWire[] };
+  spend_by_vendor: VendorSpendWire[];
+  po_status_distribution: POStatusCountWire[];
+  spend_totals: CurrencySpendWire[];
+};
+
+// getDashboardSummary loads the tenant's dashboard snapshot. Returns null on
+// any failure so the page can render its error state instead of crashing.
+export async function getDashboardSummary(accessToken: string): Promise<DashboardSummaryWire | null> {
+  try {
+    const res = await fetch(`${gatewayUrl()}/api/v1/dashboard/summary`, {
+      headers: { authorization: `Bearer ${accessToken}` },
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      return null;
+    }
+    const body = (await res.json()) as Partial<DashboardSummaryWire>;
+    if (
+      !body.pending_approvals ||
+      !Array.isArray(body.pending_approvals.items) ||
+      !Array.isArray(body.spend_by_vendor) ||
+      !Array.isArray(body.po_status_distribution) ||
+      !Array.isArray(body.spend_totals)
+    ) {
+      return null;
+    }
+    return body as DashboardSummaryWire;
+  } catch {
+    return null;
+  }
+}

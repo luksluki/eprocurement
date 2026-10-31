@@ -21,6 +21,7 @@ var wantPermission = map[string][]string{
 	AuditRead:         {RoleViewer},
 	UsersManage:       {},
 	DLQManage:         {},
+	DashboardRead:     {RoleRequester, RoleApprover, RoleBuyer, RoleFinance, RoleViewer},
 }
 
 // TestMatrixCoversEveryPermission guards against a permission that exists in

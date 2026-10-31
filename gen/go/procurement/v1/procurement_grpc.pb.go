@@ -46,6 +46,7 @@ const (
 	Procurement_MatchInvoice_FullMethodName             = "/procurement.v1.Procurement/MatchInvoice"
 	Procurement_GetMatchSettings_FullMethodName         = "/procurement.v1.Procurement/GetMatchSettings"
 	Procurement_ReplaceMatchSettings_FullMethodName     = "/procurement.v1.Procurement/ReplaceMatchSettings"
+	Procurement_GetDashboard_FullMethodName             = "/procurement.v1.Procurement/GetDashboard"
 )
 
 // ProcurementClient is the client API for Procurement service.
@@ -231,6 +232,14 @@ type ProcurementClient interface {
 	// (match:configure, admin-only). Values apply to match runs that start
 	// after the commit; stored match results are immutable history.
 	ReplaceMatchSettings(ctx context.Context, in *ReplaceMatchSettingsRequest, opts ...grpc.CallOption) (*MatchSettings, error)
+	// GetDashboard returns the operational-health summary (FR-09) of the
+	// caller's tenant in one round trip: the count and first page of pending
+	// approvals (the current pending step — the smallest pending step_no — of
+	// each submitted requisition, oldest-submitted first), the spend per
+	// vendor+currency over trailing 30- and 90-day windows (issued POs only:
+	// status not draft/cancelled, the #49 register basis), and the purchase
+	// order status distribution over all seven FR-06 statuses including zeros.
+	GetDashboard(ctx context.Context, in *GetDashboardRequest, opts ...grpc.CallOption) (*DashboardSummary, error)
 }
 
 type procurementClient struct {
@@ -511,6 +520,16 @@ func (c *procurementClient) ReplaceMatchSettings(ctx context.Context, in *Replac
 	return out, nil
 }
 
+func (c *procurementClient) GetDashboard(ctx context.Context, in *GetDashboardRequest, opts ...grpc.CallOption) (*DashboardSummary, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DashboardSummary)
+	err := c.cc.Invoke(ctx, Procurement_GetDashboard_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ProcurementServer is the server API for Procurement service.
 // All implementations must embed UnimplementedProcurementServer
 // for forward compatibility.
@@ -694,6 +713,14 @@ type ProcurementServer interface {
 	// (match:configure, admin-only). Values apply to match runs that start
 	// after the commit; stored match results are immutable history.
 	ReplaceMatchSettings(context.Context, *ReplaceMatchSettingsRequest) (*MatchSettings, error)
+	// GetDashboard returns the operational-health summary (FR-09) of the
+	// caller's tenant in one round trip: the count and first page of pending
+	// approvals (the current pending step — the smallest pending step_no — of
+	// each submitted requisition, oldest-submitted first), the spend per
+	// vendor+currency over trailing 30- and 90-day windows (issued POs only:
+	// status not draft/cancelled, the #49 register basis), and the purchase
+	// order status distribution over all seven FR-06 statuses including zeros.
+	GetDashboard(context.Context, *GetDashboardRequest) (*DashboardSummary, error)
 	mustEmbedUnimplementedProcurementServer()
 }
 
@@ -784,6 +811,9 @@ func (UnimplementedProcurementServer) GetMatchSettings(context.Context, *GetMatc
 }
 func (UnimplementedProcurementServer) ReplaceMatchSettings(context.Context, *ReplaceMatchSettingsRequest) (*MatchSettings, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ReplaceMatchSettings not implemented")
+}
+func (UnimplementedProcurementServer) GetDashboard(context.Context, *GetDashboardRequest) (*DashboardSummary, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetDashboard not implemented")
 }
 func (UnimplementedProcurementServer) mustEmbedUnimplementedProcurementServer() {}
 func (UnimplementedProcurementServer) testEmbeddedByValue()                     {}
@@ -1292,6 +1322,24 @@ func _Procurement_ReplaceMatchSettings_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Procurement_GetDashboard_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetDashboardRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProcurementServer).GetDashboard(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Procurement_GetDashboard_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProcurementServer).GetDashboard(ctx, req.(*GetDashboardRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Procurement_ServiceDesc is the grpc.ServiceDesc for Procurement service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1406,6 +1454,10 @@ var Procurement_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReplaceMatchSettings",
 			Handler:    _Procurement_ReplaceMatchSettings_Handler,
+		},
+		{
+			MethodName: "GetDashboard",
+			Handler:    _Procurement_GetDashboard_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
