@@ -1,6 +1,12 @@
 packages:
   - "apps/*"
   - "packages/*"
+  # Playwright e2e suite (#59): a workspace package so the lockfile owns its
+  # dependencies, but it deliberately defines NO build/test scripts — the
+  # turbo gates (pnpm build / pnpm test) stay Go+web only; the suite runs
+  # via `pnpm --filter @eprocurement/e2e e2e` (or `make e2e`) against a live
+  # compose stack.
+  - "e2e"
 
 # Build-script review (pnpm 11+ allowBuilds). unrs-resolver (pulled in via
 # eslint-config-next) ships prebuilt platform bindings as optionalDependencies;

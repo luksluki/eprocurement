@@ -125,3 +125,82 @@ jobs:
 
       - name: Test
         run: pnpm test
+
+  # ADR-0002 stage 5: Playwright against the compose stack. Self-contained —
+  # it builds the five service images (no layer cache on the runner, hence
+  # the much longer timeout than the go/web jobs), runs the web app with
+  # `next start`, and installs its own chromium. Screenshots/traces are
+  # uploaded on failure AND cancellation (concurrency cancel-in-progress is
+  # active above, and a cancelled run must still carry its artifacts).
+  e2e:
+    name: E2E · Playwright happy path
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: [go, web]
+    env:
+      # The spec logs in repeatedly (UI logins + tenant switches + the API
+      # convert call; retries replay the story — budget table in
+      # docs/dev-notes/59-playwright-e2e-happy-path.md). Identity's 5/min
+      # per-email default is the tight one: compose interpolates this from
+      # the project environment (compose.yaml), so no compose change. The
+      # gateway's 30/min per-IP default (its GATEWAY_LOGIN_RATE_PER_MIN is
+      # not wired into compose) stays comfortably above the ~12-login worst
+      # case.
+      IDENTITY_LOGIN_RATE_PER_MIN: "60"
+      # The web app env for `next start` (the apps/web/.env.example set —
+      # the runner has no .env.local). Without DEMO_ADMIN_PASSWORD the
+      # tenant switcher degrades to a /login redirect and the switch step
+      # cannot pass. Values are the e2e fixtures from e2e/support/fixtures.ts
+      # (throwaway CI stack credentials, not secrets).
+      GATEWAY_URL: http://localhost:8080
+      DEMO_TENANTS: acme=e2e-admin@acme.example,glow=e2e-admin@glow.example
+      DEMO_ADMIN_PASSWORD: e2e-happy-path-59
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build web
+        run: pnpm --filter @eprocurement/web build
+
+      - name: Install Playwright chromium
+        run: pnpm --filter @eprocurement/e2e exec playwright install --with-deps chromium
+
+      - name: Start compose stack
+        run: docker compose up -d --wait
+
+      - name: Run e2e
+        run: pnpm --filter @eprocurement/e2e e2e
+
+      - name: Stack health (diagnostics)
+        if: failure() || cancelled()
+        run: docker compose ps
+
+      - name: Upload Playwright report
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            e2e/playwright-report
+            e2e/test-results
+          retention-days: 7
+          if-no-files-found: warn
