@@ -70,8 +70,36 @@ export type Dictionary = {
   adminGate: { message: string };
   dashboard: {
     title: string;
-    kpi: ReadonlyArray<{ label: string; note: string }>;
-    chartNote: string;
+    description: string;
+    unavailable: string;
+    kpi: {
+      pending: string;
+      spend30: string;
+      spend90: string;
+      poTotal: string;
+      pendingNote: string;
+      spend30Note: string;
+      spend90Note: string;
+      poTotalNote: string;
+    };
+    approvals: {
+      heading: string;
+      caption: string;
+      empty: string;
+      hidden: (hidden: number) => string;
+      columns: { number: string; submitted: string; total: string; step: string; role: string };
+    };
+    spend: {
+      heading: string;
+      caption: string;
+      empty: string;
+      columns: { vendor: string; thirty: string; ninety: string };
+    };
+    distribution: {
+      heading: string;
+      caption: string;
+      total: string;
+    };
   };
   vendors: {
     title: string;
@@ -465,13 +493,43 @@ const id: Dictionary = {
   adminGate: { message: "Hanya administrator." },
   dashboard: {
     title: "Dasbor",
-    kpi: [
-      { label: "Permintaan terbuka", note: "tiba bersama UI permintaan" },
-      { label: "Persetujuan tertunda", note: "tiba bersama antrean persetujuan" },
-      { label: "Pesanan pembelian aktif", note: "tiba bersama layar PO" },
-      { label: "Belanja bulan ini", note: "tiba bersama laporan" },
-    ],
-    chartNote: "Grafik belanja dan daftar persetujuan tertunda tiba bersama tonggak analitik.",
+    description:
+      "Kesehatan operasional tenant: antrean persetujuan, belanja per pemasok, dan distribusi status pesanan pembelian.",
+    unavailable: "Gagal memuat ringkasan dasbor — apakah gateway berjalan dan token akses valid?",
+    kpi: {
+      pending: "Persetujuan tertunda",
+      spend30: "Belanja 30 hari",
+      spend90: "Belanja 90 hari",
+      poTotal: "Total pesanan pembelian",
+      pendingNote: "langkah persetujuan berjalan saat ini",
+      spend30Note: "PO terbit 30 hari terakhir",
+      spend90Note: "PO terbit 90 hari terakhir",
+      poTotalNote: "seluruh status FR-06",
+    },
+    approvals: {
+      heading: "Persetujuan tertunda",
+      caption: "Antrean persetujuan tertunda, terlama dikirim lebih dulu",
+      empty: "Tidak ada persetujuan tertunda.",
+      hidden: (hidden) => `+ ${hidden.toLocaleString("id-ID")} lainnya di antrean`,
+      columns: {
+        number: "Nomor",
+        submitted: "Dikirim",
+        total: "Total",
+        step: "Langkah",
+        role: "Peran penyetuju",
+      },
+    },
+    spend: {
+      heading: "Belanja per pemasok",
+      caption: "Total PO terbit per pemasok dan mata uang",
+      empty: "Belum ada belanja PO terbit dalam 90 hari terakhir.",
+      columns: { vendor: "Pemasok", thirty: "30 hari", ninety: "90 hari" },
+    },
+    distribution: {
+      heading: "Distribusi status PO",
+      caption: "Hitungan pesanan pembelian per status FR-06",
+      total: "Total",
+    },
   },
   vendors: {
     title: "Pemasok",
@@ -986,13 +1044,43 @@ const en: Dictionary = {
   adminGate: { message: "Administrators only." },
   dashboard: {
     title: "Dashboard",
-    kpi: [
-      { label: "Open requisitions", note: "arrives with the requisition UI" },
-      { label: "Pending approvals", note: "arrives with the approval queue" },
-      { label: "Active purchase orders", note: "arrives with the PO screens" },
-      { label: "Spend this month", note: "arrives with reports" },
-    ],
-    chartNote: "Spend chart and pending-approval list land with the analytics milestone.",
+    description:
+      "The tenant's operational health: the approval queue, spend per vendor, and the purchase-order status distribution.",
+    unavailable: "Failed to load the dashboard summary — is the gateway running and the access token valid?",
+    kpi: {
+      pending: "Pending approvals",
+      spend30: "30-day spend",
+      spend90: "90-day spend",
+      poTotal: "Purchase orders",
+      pendingNote: "current pending approval steps",
+      spend30Note: "POs issued in the last 30 days",
+      spend90Note: "POs issued in the last 90 days",
+      poTotalNote: "across all FR-06 statuses",
+    },
+    approvals: {
+      heading: "Pending approvals",
+      caption: "Pending approval queue, oldest submission first",
+      empty: "No pending approvals.",
+      hidden: (hidden) => `+ ${hidden.toLocaleString("en-US")} more in the queue`,
+      columns: {
+        number: "Number",
+        submitted: "Submitted",
+        total: "Total",
+        step: "Step",
+        role: "Approver role",
+      },
+    },
+    spend: {
+      heading: "Spend by vendor",
+      caption: "Issued PO totals per vendor and currency",
+      empty: "No issued-PO spend in the last 90 days yet.",
+      columns: { vendor: "Vendor", thirty: "30 days", ninety: "90 days" },
+    },
+    distribution: {
+      heading: "PO status distribution",
+      caption: "Purchase-order counts per FR-06 status",
+      total: "Total",
+    },
   },
   vendors: {
     title: "Vendors",

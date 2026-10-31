@@ -1,4 +1,9 @@
 // Command seed generates the deterministic demo dataset for the local stack.
+// The dataset is anchored on a trailing window: every timestamp hangs from
+// now - 120 days (seedBase) and the requisitions are spread evenly across
+// that window, so trailing-window analytics (the #52 dashboard's 30/90-day
+// spend) hold data on every reseed. The RNG stream and the document ordering
+// are deterministic; only the anchor follows the clock.
 //
 // Usage:
 //
@@ -234,10 +239,31 @@ func seedReferenceData(ctx context.Context, db *pgxpool.Pool, rng *rand.Rand, cf
 	return tenants, users, vendors
 }
 
+// seedWindowDays is the trailing window the demo dataset spans: the base is
+// now - 120 days and the N requisitions are spread evenly across it (the
+// maintainer decision on issue #52, option (a) as amended), so the 30/90-day
+// trailing windows of the dashboard's spend widget (~25% / ~75% of the data)
+// fill on every reseed. The RNG stream and the document ordering stay
+// deterministic; only the anchor follows the clock.
+const seedWindowDays = 120
+
+// seedBase is the anchor every generated timestamp hangs from: now minus the
+// 120-day window, truncated to the hour so consecutive runs inside one hour
+// produce identical relative timestamps.
+func seedBase() time.Time {
+	return time.Now().UTC().Add(-seedWindowDays * 24 * time.Hour).Truncate(time.Hour)
+}
+
 func seedProcurementData(ctx context.Context, db *pgxpool.Pool, rng *rand.Rand, cfg config, users []userSeed, vendors []vendorSeed) ([]requisitionSeed, []poSeed, []grnSeed, []invoiceSeed) {
 	statuses := []string{"approved", "approved", "approved", "approved", "approved", "submitted", "submitted", "rejected", "closed"}
 	poStatuses := []string{"issued", "acknowledged", "partially_received", "received", "closed"}
-	base := time.Date(2026, 1, 1, 8, 0, 0, 0, time.UTC)
+	base := seedBase()
+	// Even spread over the window: each requisition sits at base + i*spacing
+	// (at the 100k default ≈ 1.73 minutes apart), so the last lands at the
+	// window's end and the trailing 30/90-day windows both hold data (the
+	// amended option-(a) arithmetic: a literal 1-minute spacing would end the
+	// data ~50 days back and leave the 30-day window empty).
+	spacing := (seedWindowDays * 24 * time.Hour) / time.Duration(cfg.requisitions)
 
 	requisitions := make([]requisitionSeed, 0, cfg.requisitions)
 	pos := make([]poSeed, 0, cfg.requisitions)
@@ -249,7 +275,7 @@ func seedProcurementData(ctx context.Context, db *pgxpool.Pool, rng *rand.Rand, 
 		v := vendors[rng.Intn(len(vendors))]
 		status := statuses[rng.Intn(len(statuses))]
 		total := int64(250000 + rng.Intn(50000000))
-		submitted := base.Add(time.Duration(i) * time.Minute)
+		submitted := base.Add(time.Duration(i) * spacing)
 
 		r := requisitionSeed{
 			id:          newUUID(rng),
@@ -432,7 +458,7 @@ func seedEvents(ctx context.Context, cfg config, rng *rand.Rand, reqs []requisit
 	}
 
 	types := []string{"pr.created", "pr.submitted", "pr.approved", "po.issued", "po.acknowledged", "grn.posted", "invoice.matched", "pr.rejected", "po.closed", "notification.sent"}
-	base := time.Date(2026, 1, 1, 8, 0, 0, 0, time.UTC)
+	base := seedBase()
 
 	const batchSize = 5000
 	seeded := 0

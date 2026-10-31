@@ -3138,6 +3138,479 @@ func (x *ReplaceMatchSettingsRequest) GetPricePct() int32 {
 	return 0
 }
 
+// GetDashboardRequest is empty: the caller's tenant comes from the auth
+// metadata and every window is anchored on the server clock.
+type GetDashboardRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetDashboardRequest) Reset() {
+	*x = GetDashboardRequest{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[47]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetDashboardRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetDashboardRequest) ProtoMessage() {}
+
+func (x *GetDashboardRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[47]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetDashboardRequest.ProtoReflect.Descriptor instead.
+func (*GetDashboardRequest) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{47}
+}
+
+// DashboardSummary is the FR-09 operational-health snapshot, all three
+// widgets from one round trip. The numbers reconcile with the list reads by
+// construction (same tables, same tenant scoping).
+type DashboardSummary struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	PendingApprovals *PendingApprovals      `protobuf:"bytes,1,opt,name=pending_approvals,json=pendingApprovals,proto3" json:"pending_approvals,omitempty"`
+	// Top vendors by 90-day spend, vendor+currency granularity. Vendors with
+	// no issued PO in the 90-day window are absent (they have nothing to
+	// show); the 30-day arm of a listed vendor may be zero.
+	SpendByVendor []*VendorSpend `protobuf:"bytes,2,rep,name=spend_by_vendor,json=spendByVendor,proto3" json:"spend_by_vendor,omitempty"`
+	// All seven FR-06 statuses in canonical lifecycle order, zeros included.
+	PoStatusDistribution []*PurchaseOrderStatusCount `protobuf:"bytes,3,rep,name=po_status_distribution,json=poStatusDistribution,proto3" json:"po_status_distribution,omitempty"`
+	// The spend KPI totals per currency over ALL vendors (spend_by_vendor is
+	// bounded to the top rows; these are the unbounded sums the KPI cards
+	// render). One row per currency with issued spend in the 90-day window,
+	// ordered by the 90-day sum descending.
+	SpendTotals   []*CurrencySpend `protobuf:"bytes,4,rep,name=spend_totals,json=spendTotals,proto3" json:"spend_totals,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DashboardSummary) Reset() {
+	*x = DashboardSummary{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[48]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DashboardSummary) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DashboardSummary) ProtoMessage() {}
+
+func (x *DashboardSummary) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[48]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DashboardSummary.ProtoReflect.Descriptor instead.
+func (*DashboardSummary) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{48}
+}
+
+func (x *DashboardSummary) GetPendingApprovals() *PendingApprovals {
+	if x != nil {
+		return x.PendingApprovals
+	}
+	return nil
+}
+
+func (x *DashboardSummary) GetSpendByVendor() []*VendorSpend {
+	if x != nil {
+		return x.SpendByVendor
+	}
+	return nil
+}
+
+func (x *DashboardSummary) GetPoStatusDistribution() []*PurchaseOrderStatusCount {
+	if x != nil {
+		return x.PoStatusDistribution
+	}
+	return nil
+}
+
+func (x *DashboardSummary) GetSpendTotals() []*CurrencySpend {
+	if x != nil {
+		return x.SpendTotals
+	}
+	return nil
+}
+
+// PendingApprovals is the approvals widget: the total count of current
+// pending steps across the tenant's submitted requisitions plus the first
+// page of them, oldest-submitted first.
+type PendingApprovals struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Total         int32                  `protobuf:"varint,1,opt,name=total,proto3" json:"total,omitempty"` // current pending steps across all submitted requisitions
+	Items         []*PendingApproval     `protobuf:"bytes,2,rep,name=items,proto3" json:"items,omitempty"`  // first page, oldest-submitted first
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PendingApprovals) Reset() {
+	*x = PendingApprovals{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[49]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PendingApprovals) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PendingApprovals) ProtoMessage() {}
+
+func (x *PendingApprovals) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[49]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PendingApprovals.ProtoReflect.Descriptor instead.
+func (*PendingApprovals) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{49}
+}
+
+func (x *PendingApprovals) GetTotal() int32 {
+	if x != nil {
+		return x.Total
+	}
+	return 0
+}
+
+func (x *PendingApprovals) GetItems() []*PendingApproval {
+	if x != nil {
+		return x.Items
+	}
+	return nil
+}
+
+// PendingApproval is one current pending step with the requisition header it
+// blocks: the requisition id links to the detail view, the step fields say
+// who may decide. Only the smallest pending step_no of a submitted
+// requisition appears — the same step the decide API accepts.
+type PendingApproval struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RequisitionId string                 `protobuf:"bytes,1,opt,name=requisition_id,json=requisitionId,proto3" json:"requisition_id,omitempty"`
+	Number        string                 `protobuf:"bytes,2,opt,name=number,proto3" json:"number,omitempty"`                              // requisition number, e.g. "PR-000042"
+	Currency      string                 `protobuf:"bytes,3,opt,name=currency,proto3" json:"currency,omitempty"`                          // IDR | USD
+	TotalCents    int64                  `protobuf:"varint,4,opt,name=total_cents,json=totalCents,proto3" json:"total_cents,omitempty"`   // the requisition's server-computed total
+	SubmittedAt   string                 `protobuf:"bytes,5,opt,name=submitted_at,json=submittedAt,proto3" json:"submitted_at,omitempty"` // RFC 3339
+	StepId        string                 `protobuf:"bytes,6,opt,name=step_id,json=stepId,proto3" json:"step_id,omitempty"`                // the decide API's {stepId}
+	StepNo        int32                  `protobuf:"varint,7,opt,name=step_no,json=stepNo,proto3" json:"step_no,omitempty"`
+	RoleRequired  string                 `protobuf:"bytes,8,opt,name=role_required,json=roleRequired,proto3" json:"role_required,omitempty"` // the role a decider must hold
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PendingApproval) Reset() {
+	*x = PendingApproval{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[50]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PendingApproval) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PendingApproval) ProtoMessage() {}
+
+func (x *PendingApproval) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[50]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PendingApproval.ProtoReflect.Descriptor instead.
+func (*PendingApproval) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{50}
+}
+
+func (x *PendingApproval) GetRequisitionId() string {
+	if x != nil {
+		return x.RequisitionId
+	}
+	return ""
+}
+
+func (x *PendingApproval) GetNumber() string {
+	if x != nil {
+		return x.Number
+	}
+	return ""
+}
+
+func (x *PendingApproval) GetCurrency() string {
+	if x != nil {
+		return x.Currency
+	}
+	return ""
+}
+
+func (x *PendingApproval) GetTotalCents() int64 {
+	if x != nil {
+		return x.TotalCents
+	}
+	return 0
+}
+
+func (x *PendingApproval) GetSubmittedAt() string {
+	if x != nil {
+		return x.SubmittedAt
+	}
+	return ""
+}
+
+func (x *PendingApproval) GetStepId() string {
+	if x != nil {
+		return x.StepId
+	}
+	return ""
+}
+
+func (x *PendingApproval) GetStepNo() int32 {
+	if x != nil {
+		return x.StepNo
+	}
+	return 0
+}
+
+func (x *PendingApproval) GetRoleRequired() string {
+	if x != nil {
+		return x.RoleRequired
+	}
+	return ""
+}
+
+// VendorSpend is one vendor+currency row of the spend widget: the sum of
+// purchase_orders.total_cents over POs with issued_at inside each trailing
+// window and status neither draft nor cancelled (the #49 register basis
+// minus issued-then-cancelled POs).
+type VendorSpend struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	VendorId       string                 `protobuf:"bytes,1,opt,name=vendor_id,json=vendorId,proto3" json:"vendor_id,omitempty"`
+	VendorName     string                 `protobuf:"bytes,2,opt,name=vendor_name,json=vendorName,proto3" json:"vendor_name,omitempty"`
+	Currency       string                 `protobuf:"bytes,3,opt,name=currency,proto3" json:"currency,omitempty"`                                      // IDR | USD
+	ThirtyDayCents int64                  `protobuf:"varint,4,opt,name=thirty_day_cents,json=thirtyDayCents,proto3" json:"thirty_day_cents,omitempty"` // issued_at >= now - 30 days
+	NinetyDayCents int64                  `protobuf:"varint,5,opt,name=ninety_day_cents,json=ninetyDayCents,proto3" json:"ninety_day_cents,omitempty"` // issued_at >= now - 90 days
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *VendorSpend) Reset() {
+	*x = VendorSpend{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[51]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VendorSpend) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VendorSpend) ProtoMessage() {}
+
+func (x *VendorSpend) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[51]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VendorSpend.ProtoReflect.Descriptor instead.
+func (*VendorSpend) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{51}
+}
+
+func (x *VendorSpend) GetVendorId() string {
+	if x != nil {
+		return x.VendorId
+	}
+	return ""
+}
+
+func (x *VendorSpend) GetVendorName() string {
+	if x != nil {
+		return x.VendorName
+	}
+	return ""
+}
+
+func (x *VendorSpend) GetCurrency() string {
+	if x != nil {
+		return x.Currency
+	}
+	return ""
+}
+
+func (x *VendorSpend) GetThirtyDayCents() int64 {
+	if x != nil {
+		return x.ThirtyDayCents
+	}
+	return 0
+}
+
+func (x *VendorSpend) GetNinetyDayCents() int64 {
+	if x != nil {
+		return x.NinetyDayCents
+	}
+	return 0
+}
+
+// CurrencySpend is one currency's unbounded window sum — the KPI cards'
+// spend numbers (money never mixes currencies: a tenant may hold IDR and
+// USD side by side, so the totals stay per currency and the cards render
+// each row, the largest first).
+type CurrencySpend struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Currency       string                 `protobuf:"bytes,1,opt,name=currency,proto3" json:"currency,omitempty"` // IDR | USD
+	ThirtyDayCents int64                  `protobuf:"varint,2,opt,name=thirty_day_cents,json=thirtyDayCents,proto3" json:"thirty_day_cents,omitempty"`
+	NinetyDayCents int64                  `protobuf:"varint,3,opt,name=ninety_day_cents,json=ninetyDayCents,proto3" json:"ninety_day_cents,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *CurrencySpend) Reset() {
+	*x = CurrencySpend{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[52]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CurrencySpend) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CurrencySpend) ProtoMessage() {}
+
+func (x *CurrencySpend) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[52]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CurrencySpend.ProtoReflect.Descriptor instead.
+func (*CurrencySpend) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{52}
+}
+
+func (x *CurrencySpend) GetCurrency() string {
+	if x != nil {
+		return x.Currency
+	}
+	return ""
+}
+
+func (x *CurrencySpend) GetThirtyDayCents() int64 {
+	if x != nil {
+		return x.ThirtyDayCents
+	}
+	return 0
+}
+
+func (x *CurrencySpend) GetNinetyDayCents() int64 {
+	if x != nil {
+		return x.NinetyDayCents
+	}
+	return 0
+}
+
+// PurchaseOrderStatusCount is one FR-06 status with its live row count.
+type PurchaseOrderStatusCount struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Status        string                 `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"` // draft | issued | acknowledged | partially_received | received | closed | cancelled
+	Count         int32                  `protobuf:"varint,2,opt,name=count,proto3" json:"count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PurchaseOrderStatusCount) Reset() {
+	*x = PurchaseOrderStatusCount{}
+	mi := &file_procurement_v1_procurement_proto_msgTypes[53]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PurchaseOrderStatusCount) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PurchaseOrderStatusCount) ProtoMessage() {}
+
+func (x *PurchaseOrderStatusCount) ProtoReflect() protoreflect.Message {
+	mi := &file_procurement_v1_procurement_proto_msgTypes[53]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PurchaseOrderStatusCount.ProtoReflect.Descriptor instead.
+func (*PurchaseOrderStatusCount) Descriptor() ([]byte, []int) {
+	return file_procurement_v1_procurement_proto_rawDescGZIP(), []int{53}
+}
+
+func (x *PurchaseOrderStatusCount) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *PurchaseOrderStatusCount) GetCount() int32 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
 var File_procurement_v1_procurement_proto protoreflect.FileDescriptor
 
 const file_procurement_v1_procurement_proto_rawDesc = "" +
@@ -3385,7 +3858,40 @@ const file_procurement_v1_procurement_proto_rawDesc = "" +
 	"\x17GetMatchSettingsRequest\"S\n" +
 	"\x1bReplaceMatchSettingsRequest\x12\x17\n" +
 	"\aqty_pct\x18\x01 \x01(\x05R\x06qtyPct\x12\x1b\n" +
-	"\tprice_pct\x18\x02 \x01(\x05R\bpricePct2\xce\x13\n" +
+	"\tprice_pct\x18\x02 \x01(\x05R\bpricePct\"\x15\n" +
+	"\x13GetDashboardRequest\"\xc8\x02\n" +
+	"\x10DashboardSummary\x12M\n" +
+	"\x11pending_approvals\x18\x01 \x01(\v2 .procurement.v1.PendingApprovalsR\x10pendingApprovals\x12C\n" +
+	"\x0fspend_by_vendor\x18\x02 \x03(\v2\x1b.procurement.v1.VendorSpendR\rspendByVendor\x12^\n" +
+	"\x16po_status_distribution\x18\x03 \x03(\v2(.procurement.v1.PurchaseOrderStatusCountR\x14poStatusDistribution\x12@\n" +
+	"\fspend_totals\x18\x04 \x03(\v2\x1d.procurement.v1.CurrencySpendR\vspendTotals\"_\n" +
+	"\x10PendingApprovals\x12\x14\n" +
+	"\x05total\x18\x01 \x01(\x05R\x05total\x125\n" +
+	"\x05items\x18\x02 \x03(\v2\x1f.procurement.v1.PendingApprovalR\x05items\"\x87\x02\n" +
+	"\x0fPendingApproval\x12%\n" +
+	"\x0erequisition_id\x18\x01 \x01(\tR\rrequisitionId\x12\x16\n" +
+	"\x06number\x18\x02 \x01(\tR\x06number\x12\x1a\n" +
+	"\bcurrency\x18\x03 \x01(\tR\bcurrency\x12\x1f\n" +
+	"\vtotal_cents\x18\x04 \x01(\x03R\n" +
+	"totalCents\x12!\n" +
+	"\fsubmitted_at\x18\x05 \x01(\tR\vsubmittedAt\x12\x17\n" +
+	"\astep_id\x18\x06 \x01(\tR\x06stepId\x12\x17\n" +
+	"\astep_no\x18\a \x01(\x05R\x06stepNo\x12#\n" +
+	"\rrole_required\x18\b \x01(\tR\froleRequired\"\xbb\x01\n" +
+	"\vVendorSpend\x12\x1b\n" +
+	"\tvendor_id\x18\x01 \x01(\tR\bvendorId\x12\x1f\n" +
+	"\vvendor_name\x18\x02 \x01(\tR\n" +
+	"vendorName\x12\x1a\n" +
+	"\bcurrency\x18\x03 \x01(\tR\bcurrency\x12(\n" +
+	"\x10thirty_day_cents\x18\x04 \x01(\x03R\x0ethirtyDayCents\x12(\n" +
+	"\x10ninety_day_cents\x18\x05 \x01(\x03R\x0eninetyDayCents\"\x7f\n" +
+	"\rCurrencySpend\x12\x1a\n" +
+	"\bcurrency\x18\x01 \x01(\tR\bcurrency\x12(\n" +
+	"\x10thirty_day_cents\x18\x02 \x01(\x03R\x0ethirtyDayCents\x12(\n" +
+	"\x10ninety_day_cents\x18\x03 \x01(\x03R\x0eninetyDayCents\"H\n" +
+	"\x18PurchaseOrderStatusCount\x12\x16\n" +
+	"\x06status\x18\x01 \x01(\tR\x06status\x12\x14\n" +
+	"\x05count\x18\x02 \x01(\x05R\x05count2\xa5\x14\n" +
 	"\vProcurement\x12K\n" +
 	"\fCreateVendor\x12#.procurement.v1.CreateVendorRequest\x1a\x16.procurement.v1.Vendor\x12E\n" +
 	"\tGetVendor\x12 .procurement.v1.GetVendorRequest\x1a\x16.procurement.v1.Vendor\x12K\n" +
@@ -3414,7 +3920,8 @@ const file_procurement_v1_procurement_proto_rawDesc = "" +
 	"\fListInvoices\x12#.procurement.v1.ListInvoicesRequest\x1a$.procurement.v1.ListInvoicesResponse\x12L\n" +
 	"\fMatchInvoice\x12#.procurement.v1.MatchInvoiceRequest\x1a\x17.procurement.v1.Invoice\x12Z\n" +
 	"\x10GetMatchSettings\x12'.procurement.v1.GetMatchSettingsRequest\x1a\x1d.procurement.v1.MatchSettings\x12b\n" +
-	"\x14ReplaceMatchSettings\x12+.procurement.v1.ReplaceMatchSettingsRequest\x1a\x1d.procurement.v1.MatchSettingsBFZDgithub.com/luksluki/eprocurement/gen/go/procurement/v1;procurementv1b\x06proto3"
+	"\x14ReplaceMatchSettings\x12+.procurement.v1.ReplaceMatchSettingsRequest\x1a\x1d.procurement.v1.MatchSettings\x12U\n" +
+	"\fGetDashboard\x12#.procurement.v1.GetDashboardRequest\x1a .procurement.v1.DashboardSummaryBFZDgithub.com/luksluki/eprocurement/gen/go/procurement/v1;procurementv1b\x06proto3"
 
 var (
 	file_procurement_v1_procurement_proto_rawDescOnce sync.Once
@@ -3428,7 +3935,7 @@ func file_procurement_v1_procurement_proto_rawDescGZIP() []byte {
 	return file_procurement_v1_procurement_proto_rawDescData
 }
 
-var file_procurement_v1_procurement_proto_msgTypes = make([]protoimpl.MessageInfo, 47)
+var file_procurement_v1_procurement_proto_msgTypes = make([]protoimpl.MessageInfo, 54)
 var file_procurement_v1_procurement_proto_goTypes = []any{
 	(*Vendor)(nil),                          // 0: procurement.v1.Vendor
 	(*CreateVendorRequest)(nil),             // 1: procurement.v1.CreateVendorRequest
@@ -3477,6 +3984,13 @@ var file_procurement_v1_procurement_proto_goTypes = []any{
 	(*MatchSettings)(nil),                   // 44: procurement.v1.MatchSettings
 	(*GetMatchSettingsRequest)(nil),         // 45: procurement.v1.GetMatchSettingsRequest
 	(*ReplaceMatchSettingsRequest)(nil),     // 46: procurement.v1.ReplaceMatchSettingsRequest
+	(*GetDashboardRequest)(nil),             // 47: procurement.v1.GetDashboardRequest
+	(*DashboardSummary)(nil),                // 48: procurement.v1.DashboardSummary
+	(*PendingApprovals)(nil),                // 49: procurement.v1.PendingApprovals
+	(*PendingApproval)(nil),                 // 50: procurement.v1.PendingApproval
+	(*VendorSpend)(nil),                     // 51: procurement.v1.VendorSpend
+	(*CurrencySpend)(nil),                   // 52: procurement.v1.CurrencySpend
+	(*PurchaseOrderStatusCount)(nil),        // 53: procurement.v1.PurchaseOrderStatusCount
 }
 var file_procurement_v1_procurement_proto_depIdxs = []int32{
 	0,  // 0: procurement.v1.ListVendorsResponse.vendors:type_name -> procurement.v1.Vendor
@@ -3498,65 +4012,72 @@ var file_procurement_v1_procurement_proto_depIdxs = []int32{
 	38, // 16: procurement.v1.Invoice.items:type_name -> procurement.v1.InvoiceItem
 	38, // 17: procurement.v1.CreateInvoiceRequest.items:type_name -> procurement.v1.InvoiceItem
 	37, // 18: procurement.v1.ListInvoicesResponse.invoices:type_name -> procurement.v1.Invoice
-	1,  // 19: procurement.v1.Procurement.CreateVendor:input_type -> procurement.v1.CreateVendorRequest
-	2,  // 20: procurement.v1.Procurement.GetVendor:input_type -> procurement.v1.GetVendorRequest
-	3,  // 21: procurement.v1.Procurement.UpdateVendor:input_type -> procurement.v1.UpdateVendorRequest
-	4,  // 22: procurement.v1.Procurement.DeactivateVendor:input_type -> procurement.v1.DeactivateVendorRequest
-	5,  // 23: procurement.v1.Procurement.ListVendors:input_type -> procurement.v1.ListVendorsRequest
-	10, // 24: procurement.v1.Procurement.CreateRequisition:input_type -> procurement.v1.CreateRequisitionRequest
-	11, // 25: procurement.v1.Procurement.UpdateRequisition:input_type -> procurement.v1.UpdateRequisitionRequest
-	12, // 26: procurement.v1.Procurement.SubmitRequisition:input_type -> procurement.v1.SubmitRequisitionRequest
-	13, // 27: procurement.v1.Procurement.ListRequisitions:input_type -> procurement.v1.ListRequisitionsRequest
-	15, // 28: procurement.v1.Procurement.GetRequisition:input_type -> procurement.v1.GetRequisitionRequest
-	16, // 29: procurement.v1.Procurement.DecideApproval:input_type -> procurement.v1.DecideApprovalRequest
-	19, // 30: procurement.v1.Procurement.GetApprovalRules:input_type -> procurement.v1.GetApprovalRulesRequest
-	20, // 31: procurement.v1.Procurement.ReplaceApprovalRules:input_type -> procurement.v1.ReplaceApprovalRulesRequest
-	24, // 32: procurement.v1.Procurement.CreatePurchaseOrder:input_type -> procurement.v1.CreatePurchaseOrderRequest
-	26, // 33: procurement.v1.Procurement.IssuePurchaseOrder:input_type -> procurement.v1.IssuePurchaseOrderRequest
-	27, // 34: procurement.v1.Procurement.AcknowledgePurchaseOrder:input_type -> procurement.v1.AcknowledgePurchaseOrderRequest
-	28, // 35: procurement.v1.Procurement.CancelPurchaseOrder:input_type -> procurement.v1.CancelPurchaseOrderRequest
-	29, // 36: procurement.v1.Procurement.ClosePurchaseOrder:input_type -> procurement.v1.ClosePurchaseOrderRequest
-	30, // 37: procurement.v1.Procurement.ListPurchaseOrders:input_type -> procurement.v1.ListPurchaseOrdersRequest
-	32, // 38: procurement.v1.Procurement.GetPurchaseOrder:input_type -> procurement.v1.GetPurchaseOrderRequest
-	35, // 39: procurement.v1.Procurement.PostGoodsReceipt:input_type -> procurement.v1.PostGoodsReceiptRequest
-	39, // 40: procurement.v1.Procurement.CreateInvoice:input_type -> procurement.v1.CreateInvoiceRequest
-	40, // 41: procurement.v1.Procurement.GetInvoice:input_type -> procurement.v1.GetInvoiceRequest
-	41, // 42: procurement.v1.Procurement.ListInvoices:input_type -> procurement.v1.ListInvoicesRequest
-	43, // 43: procurement.v1.Procurement.MatchInvoice:input_type -> procurement.v1.MatchInvoiceRequest
-	45, // 44: procurement.v1.Procurement.GetMatchSettings:input_type -> procurement.v1.GetMatchSettingsRequest
-	46, // 45: procurement.v1.Procurement.ReplaceMatchSettings:input_type -> procurement.v1.ReplaceMatchSettingsRequest
-	0,  // 46: procurement.v1.Procurement.CreateVendor:output_type -> procurement.v1.Vendor
-	0,  // 47: procurement.v1.Procurement.GetVendor:output_type -> procurement.v1.Vendor
-	0,  // 48: procurement.v1.Procurement.UpdateVendor:output_type -> procurement.v1.Vendor
-	0,  // 49: procurement.v1.Procurement.DeactivateVendor:output_type -> procurement.v1.Vendor
-	6,  // 50: procurement.v1.Procurement.ListVendors:output_type -> procurement.v1.ListVendorsResponse
-	7,  // 51: procurement.v1.Procurement.CreateRequisition:output_type -> procurement.v1.Requisition
-	7,  // 52: procurement.v1.Procurement.UpdateRequisition:output_type -> procurement.v1.Requisition
-	7,  // 53: procurement.v1.Procurement.SubmitRequisition:output_type -> procurement.v1.Requisition
-	14, // 54: procurement.v1.Procurement.ListRequisitions:output_type -> procurement.v1.ListRequisitionsResponse
-	7,  // 55: procurement.v1.Procurement.GetRequisition:output_type -> procurement.v1.Requisition
-	17, // 56: procurement.v1.Procurement.DecideApproval:output_type -> procurement.v1.DecideApprovalResponse
-	21, // 57: procurement.v1.Procurement.GetApprovalRules:output_type -> procurement.v1.ApprovalRulesResponse
-	21, // 58: procurement.v1.Procurement.ReplaceApprovalRules:output_type -> procurement.v1.ApprovalRulesResponse
-	25, // 59: procurement.v1.Procurement.CreatePurchaseOrder:output_type -> procurement.v1.CreatePurchaseOrderResponse
-	22, // 60: procurement.v1.Procurement.IssuePurchaseOrder:output_type -> procurement.v1.PurchaseOrder
-	22, // 61: procurement.v1.Procurement.AcknowledgePurchaseOrder:output_type -> procurement.v1.PurchaseOrder
-	22, // 62: procurement.v1.Procurement.CancelPurchaseOrder:output_type -> procurement.v1.PurchaseOrder
-	22, // 63: procurement.v1.Procurement.ClosePurchaseOrder:output_type -> procurement.v1.PurchaseOrder
-	31, // 64: procurement.v1.Procurement.ListPurchaseOrders:output_type -> procurement.v1.ListPurchaseOrdersResponse
-	22, // 65: procurement.v1.Procurement.GetPurchaseOrder:output_type -> procurement.v1.PurchaseOrder
-	36, // 66: procurement.v1.Procurement.PostGoodsReceipt:output_type -> procurement.v1.PostGoodsReceiptResponse
-	37, // 67: procurement.v1.Procurement.CreateInvoice:output_type -> procurement.v1.Invoice
-	37, // 68: procurement.v1.Procurement.GetInvoice:output_type -> procurement.v1.Invoice
-	42, // 69: procurement.v1.Procurement.ListInvoices:output_type -> procurement.v1.ListInvoicesResponse
-	37, // 70: procurement.v1.Procurement.MatchInvoice:output_type -> procurement.v1.Invoice
-	44, // 71: procurement.v1.Procurement.GetMatchSettings:output_type -> procurement.v1.MatchSettings
-	44, // 72: procurement.v1.Procurement.ReplaceMatchSettings:output_type -> procurement.v1.MatchSettings
-	46, // [46:73] is the sub-list for method output_type
-	19, // [19:46] is the sub-list for method input_type
-	19, // [19:19] is the sub-list for extension type_name
-	19, // [19:19] is the sub-list for extension extendee
-	0,  // [0:19] is the sub-list for field type_name
+	49, // 19: procurement.v1.DashboardSummary.pending_approvals:type_name -> procurement.v1.PendingApprovals
+	51, // 20: procurement.v1.DashboardSummary.spend_by_vendor:type_name -> procurement.v1.VendorSpend
+	53, // 21: procurement.v1.DashboardSummary.po_status_distribution:type_name -> procurement.v1.PurchaseOrderStatusCount
+	52, // 22: procurement.v1.DashboardSummary.spend_totals:type_name -> procurement.v1.CurrencySpend
+	50, // 23: procurement.v1.PendingApprovals.items:type_name -> procurement.v1.PendingApproval
+	1,  // 24: procurement.v1.Procurement.CreateVendor:input_type -> procurement.v1.CreateVendorRequest
+	2,  // 25: procurement.v1.Procurement.GetVendor:input_type -> procurement.v1.GetVendorRequest
+	3,  // 26: procurement.v1.Procurement.UpdateVendor:input_type -> procurement.v1.UpdateVendorRequest
+	4,  // 27: procurement.v1.Procurement.DeactivateVendor:input_type -> procurement.v1.DeactivateVendorRequest
+	5,  // 28: procurement.v1.Procurement.ListVendors:input_type -> procurement.v1.ListVendorsRequest
+	10, // 29: procurement.v1.Procurement.CreateRequisition:input_type -> procurement.v1.CreateRequisitionRequest
+	11, // 30: procurement.v1.Procurement.UpdateRequisition:input_type -> procurement.v1.UpdateRequisitionRequest
+	12, // 31: procurement.v1.Procurement.SubmitRequisition:input_type -> procurement.v1.SubmitRequisitionRequest
+	13, // 32: procurement.v1.Procurement.ListRequisitions:input_type -> procurement.v1.ListRequisitionsRequest
+	15, // 33: procurement.v1.Procurement.GetRequisition:input_type -> procurement.v1.GetRequisitionRequest
+	16, // 34: procurement.v1.Procurement.DecideApproval:input_type -> procurement.v1.DecideApprovalRequest
+	19, // 35: procurement.v1.Procurement.GetApprovalRules:input_type -> procurement.v1.GetApprovalRulesRequest
+	20, // 36: procurement.v1.Procurement.ReplaceApprovalRules:input_type -> procurement.v1.ReplaceApprovalRulesRequest
+	24, // 37: procurement.v1.Procurement.CreatePurchaseOrder:input_type -> procurement.v1.CreatePurchaseOrderRequest
+	26, // 38: procurement.v1.Procurement.IssuePurchaseOrder:input_type -> procurement.v1.IssuePurchaseOrderRequest
+	27, // 39: procurement.v1.Procurement.AcknowledgePurchaseOrder:input_type -> procurement.v1.AcknowledgePurchaseOrderRequest
+	28, // 40: procurement.v1.Procurement.CancelPurchaseOrder:input_type -> procurement.v1.CancelPurchaseOrderRequest
+	29, // 41: procurement.v1.Procurement.ClosePurchaseOrder:input_type -> procurement.v1.ClosePurchaseOrderRequest
+	30, // 42: procurement.v1.Procurement.ListPurchaseOrders:input_type -> procurement.v1.ListPurchaseOrdersRequest
+	32, // 43: procurement.v1.Procurement.GetPurchaseOrder:input_type -> procurement.v1.GetPurchaseOrderRequest
+	35, // 44: procurement.v1.Procurement.PostGoodsReceipt:input_type -> procurement.v1.PostGoodsReceiptRequest
+	39, // 45: procurement.v1.Procurement.CreateInvoice:input_type -> procurement.v1.CreateInvoiceRequest
+	40, // 46: procurement.v1.Procurement.GetInvoice:input_type -> procurement.v1.GetInvoiceRequest
+	41, // 47: procurement.v1.Procurement.ListInvoices:input_type -> procurement.v1.ListInvoicesRequest
+	43, // 48: procurement.v1.Procurement.MatchInvoice:input_type -> procurement.v1.MatchInvoiceRequest
+	45, // 49: procurement.v1.Procurement.GetMatchSettings:input_type -> procurement.v1.GetMatchSettingsRequest
+	46, // 50: procurement.v1.Procurement.ReplaceMatchSettings:input_type -> procurement.v1.ReplaceMatchSettingsRequest
+	47, // 51: procurement.v1.Procurement.GetDashboard:input_type -> procurement.v1.GetDashboardRequest
+	0,  // 52: procurement.v1.Procurement.CreateVendor:output_type -> procurement.v1.Vendor
+	0,  // 53: procurement.v1.Procurement.GetVendor:output_type -> procurement.v1.Vendor
+	0,  // 54: procurement.v1.Procurement.UpdateVendor:output_type -> procurement.v1.Vendor
+	0,  // 55: procurement.v1.Procurement.DeactivateVendor:output_type -> procurement.v1.Vendor
+	6,  // 56: procurement.v1.Procurement.ListVendors:output_type -> procurement.v1.ListVendorsResponse
+	7,  // 57: procurement.v1.Procurement.CreateRequisition:output_type -> procurement.v1.Requisition
+	7,  // 58: procurement.v1.Procurement.UpdateRequisition:output_type -> procurement.v1.Requisition
+	7,  // 59: procurement.v1.Procurement.SubmitRequisition:output_type -> procurement.v1.Requisition
+	14, // 60: procurement.v1.Procurement.ListRequisitions:output_type -> procurement.v1.ListRequisitionsResponse
+	7,  // 61: procurement.v1.Procurement.GetRequisition:output_type -> procurement.v1.Requisition
+	17, // 62: procurement.v1.Procurement.DecideApproval:output_type -> procurement.v1.DecideApprovalResponse
+	21, // 63: procurement.v1.Procurement.GetApprovalRules:output_type -> procurement.v1.ApprovalRulesResponse
+	21, // 64: procurement.v1.Procurement.ReplaceApprovalRules:output_type -> procurement.v1.ApprovalRulesResponse
+	25, // 65: procurement.v1.Procurement.CreatePurchaseOrder:output_type -> procurement.v1.CreatePurchaseOrderResponse
+	22, // 66: procurement.v1.Procurement.IssuePurchaseOrder:output_type -> procurement.v1.PurchaseOrder
+	22, // 67: procurement.v1.Procurement.AcknowledgePurchaseOrder:output_type -> procurement.v1.PurchaseOrder
+	22, // 68: procurement.v1.Procurement.CancelPurchaseOrder:output_type -> procurement.v1.PurchaseOrder
+	22, // 69: procurement.v1.Procurement.ClosePurchaseOrder:output_type -> procurement.v1.PurchaseOrder
+	31, // 70: procurement.v1.Procurement.ListPurchaseOrders:output_type -> procurement.v1.ListPurchaseOrdersResponse
+	22, // 71: procurement.v1.Procurement.GetPurchaseOrder:output_type -> procurement.v1.PurchaseOrder
+	36, // 72: procurement.v1.Procurement.PostGoodsReceipt:output_type -> procurement.v1.PostGoodsReceiptResponse
+	37, // 73: procurement.v1.Procurement.CreateInvoice:output_type -> procurement.v1.Invoice
+	37, // 74: procurement.v1.Procurement.GetInvoice:output_type -> procurement.v1.Invoice
+	42, // 75: procurement.v1.Procurement.ListInvoices:output_type -> procurement.v1.ListInvoicesResponse
+	37, // 76: procurement.v1.Procurement.MatchInvoice:output_type -> procurement.v1.Invoice
+	44, // 77: procurement.v1.Procurement.GetMatchSettings:output_type -> procurement.v1.MatchSettings
+	44, // 78: procurement.v1.Procurement.ReplaceMatchSettings:output_type -> procurement.v1.MatchSettings
+	48, // 79: procurement.v1.Procurement.GetDashboard:output_type -> procurement.v1.DashboardSummary
+	52, // [52:80] is the sub-list for method output_type
+	24, // [24:52] is the sub-list for method input_type
+	24, // [24:24] is the sub-list for extension type_name
+	24, // [24:24] is the sub-list for extension extendee
+	0,  // [0:24] is the sub-list for field type_name
 }
 
 func init() { file_procurement_v1_procurement_proto_init() }
@@ -3570,7 +4091,7 @@ func file_procurement_v1_procurement_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_procurement_v1_procurement_proto_rawDesc), len(file_procurement_v1_procurement_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   47,
+			NumMessages:   54,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
