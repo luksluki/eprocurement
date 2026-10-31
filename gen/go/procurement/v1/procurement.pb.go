@@ -3416,7 +3416,8 @@ func (x *PendingApproval) GetRoleRequired() string {
 
 // VendorSpend is one vendor+currency row of the spend widget: the sum of
 // purchase_orders.total_cents over POs with issued_at inside each trailing
-// window and status neither draft nor cancelled (the #49 register basis).
+// window and status neither draft nor cancelled (the #49 register basis
+// minus issued-then-cancelled POs).
 type VendorSpend struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	VendorId       string                 `protobuf:"bytes,1,opt,name=vendor_id,json=vendorId,proto3" json:"vendor_id,omitempty"`

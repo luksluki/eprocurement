@@ -1050,7 +1050,8 @@ missing (404 `requisition_not_found`).
 - #40: three-way match with tolerance (done — 0010 `match_settings` (defaults 0%/0%), the pure integer engine with the cumulative upper-side qty guard and the symmetric price guard, the pinned `match_result` shape with `inv_over_bill_qty`/`inv_over_bill_price` reason lines, the transactional Match under the PO row lock with the `matched` re-run guard and exactly one `invoice.matched`/`invoice.discrepancy` outbox row per run, gRPC `MatchInvoice`/`GetMatchSettings`/`ReplaceMatchSettings`, REST `POST /api/v1/invoices/{id}/match` + admin-only `GET|PUT /api/v1/match-settings` behind `match:configure`, no attachment gate). See the [Three-way match](#three-way-match-40) section.
 - #41: invoice list endpoint + invoice UI with match result (done — `ListInvoices` at `invoice:read` behind `GET /api/v1/invoices` with the three-status `inv_status_invalid`/`inv_page_invalid` filter contract and header-only rows, 0012's `invoices_tenant_status_idx`, the `/app/invoices` list/detail screens with the MatchResultPanel rendering the #40 verdict + per-line diff, the client-side hard attachment gate on the Match button, the `/app/invoices/new?po=` create page, and the finance attachment upload — the demo flow's 'attachment required' obligation now lives in the UI). See the [Invoice list](#invoice-list--filters-pagination-query-plans-41) section below.
 - #44: decision audit log with actor IP and admin view (done — 0013 `outbox.actor_ip`, `x-actor-ip` gateway→interceptor→outbox propagation with fiber's trusted-proxy check (`GATEWAY_TRUSTED_PROXIES`), the §14.5 envelope delta `actor_ip` flowing to the Mongo projections, the audit read API `ListAudit`/`ExportAudit` at `audit:read` with the three-layer CSV export bound, and the `/app/audit` admin view; the audit_log decision set now covers all five PRD §14.7 verbs). See the [Migration 0013](#migration-0013--procurementoutbox_actor_ip-44) section.
-- #52: dashboard summary (done — the `dashboard` read package behind gRPC `GetDashboard`/REST `GET /api/v1/dashboard/summary` at the broad new `dashboard:read`, one tenant transaction returning the pending-approval queue, the 30/90-day per-vendor spend over the #49 register basis with per-currency KPI totals, and the seven-status PO distribution; 0014's three partial read indexes; the seed anchored on now−120d with requisitions spread evenly across the window per the maintainer decision). See the [Dashboard summary](#dashboard-summary-52) section below.
+- #52: dashboard summary (done — the `dashboard` read package behind gRPC `GetDashboard`/REST `GET /api/v1/dashboard/summary` at the broad new `dashboard:read`, one tenant transaction returning the pending-approval queue, the 30/90-day per-vendor spend over the #49 register basis minus issued-then-cancelled POs
+  with per-currency KPI totals, and the seven-status PO distribution; 0014's three partial read indexes; the seed anchored on now−120d with requisitions spread evenly across the window per the maintainer decision). See the [Dashboard summary](#dashboard-summary-52) section below.
 - Approvals read endpoints/queue #32-34 (M2–M3).
 - The timeline/event read path (#42/#43/#47, `GET /api/v1/events`) consumes the outbox's `entity_type`/`entity_id` columns; a tenant+entity index arrives with whichever issue first queries them.
 
@@ -1434,8 +1435,10 @@ one consistent snapshot and p95 is a single-call claim.
 - **Spend per vendor** — `SUM(purchase_orders.total_cents)` per
   vendor+currency over trailing 30- and 90-day windows (one statement, two
   FILTER arms), basis: `issued_at` inside the window and status neither
-  `draft` nor `cancelled` — the #49 nightly register basis (drafts never
-  carry `issued_at`; cancelled POs that were issued drop out). The table is
+  `draft` nor `cancelled` — the #49 nightly register basis MINUS
+  issued-then-cancelled POs (the register filters `issued_at` only, so
+  such a PO stays in the nightly CSV but is excluded from spend; drafts
+  never carry `issued_at` in either). The table is
   bounded to the top 10 rows by 90-day spend; the KPI totals are the same
   sums **unbounded and per currency** — money never mixes IDR and USD, so
   the totals stay one row per currency.
@@ -1471,7 +1474,7 @@ tenant scoping), proven on the same ~100k fixture as the budget test
   submitted-without-steps rows the EXISTS guard must ignore);
 - `Σ po_status_distribution.count` == the unfiltered `ListPurchaseOrders`
   total;
-- `spend_by_vendor` == the per-vendor+currency sums over the register basis,
+- `spend_by_vendor` == the per-vendor+currency sums over the spend basis,
   tracked while seeding (the fixture's 24 in-window vendor+currency pairs
   overflow the 10-row bound, so the KPI totals provably differ from the
   table's sums), and `spend_totals` == the same sums unbounded.

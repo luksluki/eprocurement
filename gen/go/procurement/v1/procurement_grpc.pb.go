@@ -237,7 +237,8 @@ type ProcurementClient interface {
 	// approvals (the current pending step — the smallest pending step_no — of
 	// each submitted requisition, oldest-submitted first), the spend per
 	// vendor+currency over trailing 30- and 90-day windows (issued POs only:
-	// status not draft/cancelled, the #49 register basis), and the purchase
+	// status not draft/cancelled — the #49 register basis minus
+	// issued-then-cancelled POs), and the purchase
 	// order status distribution over all seven FR-06 statuses including zeros.
 	GetDashboard(ctx context.Context, in *GetDashboardRequest, opts ...grpc.CallOption) (*DashboardSummary, error)
 }
@@ -718,7 +719,8 @@ type ProcurementServer interface {
 	// approvals (the current pending step — the smallest pending step_no — of
 	// each submitted requisition, oldest-submitted first), the spend per
 	// vendor+currency over trailing 30- and 90-day windows (issued POs only:
-	// status not draft/cancelled, the #49 register basis), and the purchase
+	// status not draft/cancelled — the #49 register basis minus
+	// issued-then-cancelled POs), and the purchase
 	// order status distribution over all seven FR-06 statuses including zeros.
 	GetDashboard(context.Context, *GetDashboardRequest) (*DashboardSummary, error)
 	mustEmbedUnimplementedProcurementServer()

@@ -154,8 +154,10 @@ func pendingApprovals(ctx context.Context, tx pgx.Tx) (PendingApprovals, error) 
 
 // vendorSpend runs the spend widget's two queries (KPI totals + the bounded
 // vendor table). Basis across both: POs with issued_at inside the window and
-// status neither draft nor cancelled — the #49 nightly register basis
-// (drafts never carry issued_at; cancelled POs that were issued drop out).
+// status neither draft nor cancelled — the #49 nightly register basis MINUS
+// issued-then-cancelled POs (the register filters issued_at only, so such a
+// PO stays in the nightly CSV but is excluded from spend; drafts never
+// carry issued_at in either).
 func vendorSpend(ctx context.Context, tx pgx.Tx, now time.Time) ([]VendorSpend, []CurrencySpend, error) {
 	totalsRows, err := tx.Query(ctx, spendTotalsSQL, now.Add(-SpendWindow30d), now.Add(-SpendWindow90d))
 	if err != nil {

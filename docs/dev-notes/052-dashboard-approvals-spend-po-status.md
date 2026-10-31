@@ -78,9 +78,11 @@
   `0013_dashboard_read_indexes.sql` collides with #44's already-landed
   `0013_outbox_actor_ip.sql`; the next free slot is 0014 (verified:
   `schema_migrations` tops out at 14 after applying on a scratch database).
-- **Spend basis = the #49 register basis**: POs with `issued_at` inside the
-  window and status neither draft nor cancelled (drafts never carry
-  `issued_at`; cancelled POs that were issued drop out). Pinned by the AC
+- **Spend basis = the #49 register basis MINUS issued-then-cancelled
+  POs**: POs with `issued_at` inside the window and status neither draft
+  nor cancelled. The register itself filters `issued_at` only, so an
+  issued-then-cancelled PO stays in the nightly CSV but is excluded from
+  spend (drafts never carry `issued_at` in either). Pinned by the AC
   citing #49's PO register.
 - **KPI spend totals are per currency, and the vendor table is bounded to
   the top 10 rows by 90-day spend.** Money never mixes IDR and USD, so a

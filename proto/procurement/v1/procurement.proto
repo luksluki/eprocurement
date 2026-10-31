@@ -188,7 +188,8 @@ service Procurement {
   // approvals (the current pending step — the smallest pending step_no — of
   // each submitted requisition, oldest-submitted first), the spend per
   // vendor+currency over trailing 30- and 90-day windows (issued POs only:
-  // status not draft/cancelled, the #49 register basis), and the purchase
+  // status not draft/cancelled — the #49 register basis minus
+  // issued-then-cancelled POs), and the purchase
   // order status distribution over all seven FR-06 statuses including zeros.
   rpc GetDashboard(GetDashboardRequest) returns (DashboardSummary);
 }
@@ -635,7 +636,8 @@ message PendingApproval {
 
 // VendorSpend is one vendor+currency row of the spend widget: the sum of
 // purchase_orders.total_cents over POs with issued_at inside each trailing
-// window and status neither draft nor cancelled (the #49 register basis).
+// window and status neither draft nor cancelled (the #49 register basis
+// minus issued-then-cancelled POs).
 message VendorSpend {
   string vendor_id = 1;
   string vendor_name = 2;

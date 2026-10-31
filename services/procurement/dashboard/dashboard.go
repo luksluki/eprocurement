@@ -66,7 +66,8 @@ type PendingApprovals struct {
 
 // VendorSpend is one vendor+currency row of the spend widget: the sum of
 // purchase_orders.total_cents over POs issued inside each trailing window
-// with status neither draft nor cancelled (the #49 register basis).
+// with status neither draft nor cancelled (the #49 register basis minus
+// issued-then-cancelled POs).
 type VendorSpend struct {
 	VendorID      string
 	VendorName    string
