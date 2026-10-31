@@ -1481,7 +1481,14 @@ real PO list client-side and applying the window filter row by row.
 
 ### Indexes (migration 0014)
 
-Three partial read indexes; no superseded index to drop:
+Three partial read indexes plus two referential-integrity support indexes; no
+superseded index to drop. The FK-support pair closes a measured gap: the
+NO-ACTION checks on `purchase_orders.requisition_id` / `.vendor_id`
+seq-scanned the table per deleted parent row (no index leads with the
+referencing column), turning a 100k-parent DELETE into a 12-minute crawl
+when POs existed — the failure behind the #52 CI round 1 scale-fixture
+timeouts. The application only soft-deletes, so these serve integrity
+maintenance, not a hot product query:
 
 - `requisitions_dashboard_pending_idx (tenant_id, submitted_at) WHERE status
   = 'submitted'` — the approvals widget's ordered walk.
@@ -1495,6 +1502,9 @@ Three partial read indexes; no superseded index to drop:
 - `purchase_orders_dashboard_spend_idx (tenant_id, issued_at) WHERE
   issued_at IS NOT NULL AND status NOT IN ('draft', 'cancelled')` — both
   FILTER arms cut on the `issued_at` range.
+- `purchase_orders_requisition_idx (requisition_id)` and
+  `purchase_orders_vendor_idx (vendor_id)` — the FK NO-ACTION check on
+  parent delete becomes an index lookup instead of a per-row seq scan.
 
 ### Measured plans at ~100k rows (the #52 budget test)
 

@@ -204,6 +204,72 @@ packages run sequentially `-p 1` (the dev-note 031 protocol):
   --frozen-lockfile && pnpm build && pnpm lint && pnpm test`, and
   `docker compose config/up/ps` (no compose file changes).
 
+## CI round 1 — root cause: unindexed FK checks, fix commit
+
+The first CI round failed on the Go job (run 41198373932, `gh run view
+--log-failed`): **all four ~100k scale packages hit `go test`'s default
+10-minute package timeout** — `FAIL …/procurement/dashboard 600.015s`,
+`…/purchaseorder 600.064s`, `…/requisition 600.073s`, `…/vendor 600.011s`,
+each `panic: test timed out after 10m0s`. This issue's dashboard fixture
+made it four concurrent scale fixtures against CI's one Postgres (previously
+three), but the load alone was not the killer — the dumps show packages
+stuck in their cleanup DELETEs.
+
+**Root cause (measured, not inferred): the NO-ACTION FK triggers on
+`purchase_orders.requisition_id` and `purchase_orders.vendor_id` seq-scanned
+`purchase_orders` per deleted parent row** — no index leads with the
+referencing column (the 0007 `UNIQUE (tenant_id, requisition_id)` leads with
+`tenant_id`, unusable for the FK check). Reproduced by hand through psql:
+`DELETE` of 100k requisitions referenced by 50k POs took **727,850 ms
+(12 min)**; the same DELETE with the new indexes is sub-second. So whenever
+another fixture's POs were present (always, in CI), every fixture's cleanup
+DELETE crawled — mid-flight at the 600 s deadline, then either swallowed
+(requisition/vendor used `_ =`, silently leaving fixtures that broke the
+next run on duplicate keys — observed locally as leftovers in tenants 0027/
+0032) or blown past the package budget (CI round 1).
+
+The fix (test code + one migration extension; no CI/workflow change, no
+protocol change):
+
+- **Migration 0014 gains two referential-integrity support indexes**:
+  `purchase_orders_requisition_idx (requisition_id)` and
+  `purchase_orders_vendor_idx (vendor_id)` — the FK check becomes an index
+  lookup. The application only soft-deletes, so these close an integrity
+  maintenance gap rather than serve a hot product query (documented in the
+  migration and `docs/schema/procurement.md`).
+- **`internal/platform/scalegate` (new, test-support)** — a session-level
+  advisory lock (`pg_advisory_lock`, key "100K") on a dedicated pooled
+  connection, serializing the four fixtures' LOAD phases (leading cleanup →
+  seed → VACUUM/ANALYZE/CHECKPOINT). Measurement loops run after the release
+  and overlap under their existing retry protocol (shapeAttempts=3) — the
+  historically proven regime — instead of queueing (whole-body serialization
+  re-busts the timeout from the other side: the queued package pays the wait
+  plus its own run against 10m; observed locally, run 3). The release is
+  idempotent (sync.Once) with a t.Cleanup safety net; a killed test binary
+  releases the session lock with its connection.
+- **Hardened cleanups** — dashboard/requisition/purchaseorder/vendor
+  cleanupScale now fail loudly (t.Fatalf) if the delete fails twice instead
+  of swallowing into leftover fixtures, and vendor/requisition gained
+  leading cleanups so a stale fixture can never wedge the next seed on
+  duplicate keys.
+- **Dashboard fixture trimmed where no query under test looks**: approval
+  steps are seeded only for the submitted (non-stepless) requisitions —
+  2 × 20k = 40k rows instead of 2 × 80k = 160k; the pending count/page only
+  read pending steps and their submitted parents; spend and distribution
+  shapes are untouched (still 100k requisitions, 40k POs, 16 vendors, both
+  windows weighted).
+
+Evidence (this session): the exact CI shape — `go test -timeout 10m -count=1
+./services/procurement/vendor/ ./services/procurement/requisition/
+./services/procurement/purchaseorder/ ./services/procurement/dashboard/`
+(four parallel test binaries, one database) — **all four ok in a 1m41s wall**
+(vendor 99s, requisition 77s, purchase order 37s, dashboard 74s), with every
+shape's median/p95 logged (14 measurement lines) and the database verified
+leftover-free afterwards; the sequential full-suite sweep of all touched
+packages plus server/gateway/rbac/scalegate — all ok; the extended 0014
+applies cleanly on a fresh scratch database (5 indexes, schema_migrations 14,
+dropped afterwards).
+
 ## Follow-ups
 
 - **Redis cache for the dashboard aggregates (PRD §13: TTL 60 s,

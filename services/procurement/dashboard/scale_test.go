@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/luksluki/eprocurement/internal/platform/scalegate"
 	"github.com/luksluki/eprocurement/internal/platform/tenant"
 	"github.com/luksluki/eprocurement/services/procurement/purchaseorder"
 )
@@ -98,6 +99,21 @@ func TestStoreSummaryScale100k(t *testing.T) {
 	db := openTestDB(t)
 	s := NewStore(db)
 
+	// Serialize the ~100k fixtures' LOAD phase (see
+	// internal/platform/scalegate): four concurrent bulk loads starved every
+	// one past go test's package timeout (CI run 41198373932). The gate is
+	// released after the steady-state prep so the short, retry-protected
+	// measurement loops overlap instead of queueing (whole-body
+	// serialization re-busts the timeout from the other side — the queued
+	// package pays the wait plus its own run against 10m). The t.Cleanup
+	// release is the early-exit safety net; the explicit release below is
+	// the real one.
+	releaseGate, err := scalegate.Acquire(t.Context(), db)
+	if err != nil {
+		t.Fatalf("scale gate: %v", err)
+	}
+	t.Cleanup(releaseGate)
+
 	cleanupScale(t, s)
 	fixture, err := seedScale(t, s, 100_000)
 	if err != nil {
@@ -119,6 +135,7 @@ func TestStoreSummaryScale100k(t *testing.T) {
 	if _, err := s.db.Exec(t.Context(), `CHECKPOINT`); err != nil {
 		t.Fatalf("checkpoint: %v", err)
 	}
+	releaseGate() // load phase done — measurements overlap under the retry protocol
 
 	now := time.Now().UTC()
 
@@ -267,9 +284,10 @@ func TestStoreSummaryScale100k(t *testing.T) {
 //     i, so the queue's oldest-first order is generation order. Submitted
 //     rows carry two pending steps (the current one is step 1 / approver),
 //     except the scaleStepless rows, which carry none.
-//   - steps: two per non-draft, non-stepless requisition (approved/closed →
-//     both approved; rejected → rejected + skipped; submitted → both
-//     pending).
+//   - steps: two pending steps per SUBMITTED, non-stepless requisition only
+//     (the dashboard's queries read pending steps and their submitted
+//     parents and nothing else — steps on approved/rejected/closed rows
+//     would add 120k bulk-load rows no query under test ever touches).
 //   - POs: one per closed/approved row (scalePO). Vendor i%16 over the 16
 //     seeded vendors (24 vendor+currency pairs land inside the 90-day
 //     window — more than SpendVendorLimit), USD when i%7==0 else IDR, total
@@ -366,7 +384,9 @@ func seedScale(t *testing.T, s *Store, n int) (*scaleFixture, error) {
 		}
 	}
 
-	// Steps: two per non-draft, non-stepless requisition.
+	// Steps: two pending per submitted, non-stepless requisition only (see
+	// the shape comment — other statuses' chains load the bulk insert
+	// without touching any query under test).
 	for start := 0; start < len(reqs); start += batchSize {
 		end := min(start+batchSize-1, len(reqs)-1)
 		var (
@@ -376,16 +396,16 @@ func seedScale(t *testing.T, s *Store, n int) (*scaleFixture, error) {
 		sb.WriteString(`INSERT INTO procurement.approval_steps (requisition_id, step_no, role_required, threshold_cents, status) VALUES `)
 		rowNum := 0
 		for _, r := range reqs[start : end+1] {
-			if r.status == "draft" || r.stepless {
+			if r.status != "submitted" || r.stepless {
 				continue
 			}
 			rowNum++
 			if rowNum > 1 {
 				sb.WriteByte(',')
 			}
-			fmt.Fprintf(&sb, "($%d,1,'approver',0,'%s')", rowNum*2-1, stepStatus(r.status, 1))
+			fmt.Fprintf(&sb, "($%d,1,'approver',0,'pending')", rowNum*2-1)
 			args = append(args, r.id)
-			fmt.Fprintf(&sb, ",($%d,2,'admin',0,'%s')", rowNum*2, stepStatus(r.status, 2))
+			fmt.Fprintf(&sb, ",($%d,2,'admin',0,'pending')", rowNum*2)
 			args = append(args, r.id)
 		}
 		if rowNum > 0 {
@@ -470,22 +490,6 @@ func seedScale(t *testing.T, s *Store, n int) (*scaleFixture, error) {
 		}
 	}
 	return fixture, nil
-}
-
-// stepStatus maps a requisition status to the step status the materialized
-// chain holds at that step position in this fixture.
-func stepStatus(requisitionStatus string, step int) string {
-	switch requisitionStatus {
-	case "approved", "closed":
-		return "approved"
-	case "rejected":
-		if step == 1 {
-			return "rejected"
-		}
-		return "skipped"
-	default: // submitted: both pending — step 1 is the current one
-		return "pending"
-	}
 }
 
 // commitScaleBatch runs one batched INSERT in its own bypass transaction.

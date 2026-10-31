@@ -38,3 +38,21 @@ CREATE INDEX approval_steps_pending_idx
 CREATE INDEX purchase_orders_dashboard_spend_idx
     ON procurement.purchase_orders (tenant_id, issued_at)
     WHERE issued_at IS NOT NULL AND status NOT IN ('draft', 'cancelled');
+
+-- Referential-integrity support indexes. purchase_orders references
+-- requisitions and vendors with NO ACTION constraints, and PostgreSQL checks
+-- each deleted parent row against the referencing table — a check that
+-- seq-scanned purchase_orders per deleted row, because no index leads with
+-- the referencing column (the 0007 UNIQUE (tenant_id, requisition_id) leads
+-- with tenant_id). Measured with the scale fixtures' data volume: deleting
+-- 100k requisitions while 50k POs existed took 12 minutes without these
+-- indexes (the #52 CI round 1 timeout: every fixture's cleanup DELETE was
+-- mid-crawl at the 600 s package deadline, and a swallowed cleanup failure
+-- left fixtures that broke the next run on duplicate keys). The application
+-- only soft-deletes, so this closes the gap for integrity maintenance and
+-- any future parent-hard-delete path rather than a hot product query.
+CREATE INDEX purchase_orders_requisition_idx
+    ON procurement.purchase_orders (requisition_id);
+
+CREATE INDEX purchase_orders_vendor_idx
+    ON procurement.purchase_orders (vendor_id);

@@ -15,6 +15,14 @@ import (
 )
 
 func testStore(t *testing.T) *Store {
+	s, _ := testStoreDB(t)
+	return s
+}
+
+// testStoreDB is testStore with the pool exposed — the #52 scale gate
+// (internal/platform/scalegate) holds its advisory lock on a dedicated
+// connection of this pool.
+func testStoreDB(t *testing.T) (*Store, *pgxpool.Pool) {
 	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
@@ -40,7 +48,7 @@ func testStore(t *testing.T) *Store {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(db.Close)
-	return NewStore(db)
+	return NewStore(db), db
 }
 
 const (
