@@ -183,6 +183,7 @@ func initRun(pgDSN, mongoURI, amqpURL string) (*runEnv, error) {
 	scratch.Path = "/" + e.scratchName
 	migCfg, err := pgxpool.ParseConfig(scratch.String())
 	if err != nil {
+		e.dropScratch(e.scratchName) // CREATE DATABASE already ran — drop, then close
 		e.adminDB.Close()
 		return nil, fmt.Errorf("parse scratch dsn: %w", err)
 	}
@@ -191,16 +192,19 @@ func initRun(pgDSN, mongoURI, amqpURL string) (*runEnv, error) {
 	migCfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 	migPool, err := pgxpool.NewWithConfig(ctx, migCfg)
 	if err != nil {
+		e.dropScratch(e.scratchName) // CREATE DATABASE already ran — drop, then close
 		e.adminDB.Close()
 		return nil, fmt.Errorf("open migration pool: %w", err)
 	}
 	_, migErr := dbmigrate.Apply(ctx, migPool, "procurement", migrations.FS())
 	migPool.Close()
 	if migErr != nil {
+		e.dropScratch(e.scratchName) // CREATE DATABASE already ran — drop, then close
 		e.adminDB.Close()
 		return nil, fmt.Errorf("apply migrations: %w", migErr)
 	}
 	if e.db, err = pgxpool.New(ctx, scratch.String()); err != nil {
+		e.dropScratch(e.scratchName) // CREATE DATABASE already ran — drop, then close
 		e.adminDB.Close()
 		return nil, fmt.Errorf("open scratch pool: %w", err)
 	}
@@ -534,6 +538,21 @@ type storedAudit struct {
 // event_id) ascending — the exact history.List sort, mirrored — which is a
 // total order except across equal occurred_at values (the approval engine's
 // step + terminal pair; see assertEventSequence).
+// eventCount is events()' counting twin for cross-tenant assertions: a
+// tenant that must own nothing (B in the cross-tenant probes) is asserted
+// as zero on the Mongo projection itself, not only via the Postgres rows.
+func (e *p2pEnv) eventCount(tenantID string) int {
+	e.t.Helper()
+	ctx, cancel := context.WithTimeout(e.t.Context(), 5*time.Second)
+	defer cancel()
+	n, err := e.run.mongoDB.Collection(history.EventsCollectionName).CountDocuments(ctx,
+		bson.M{"tenant_id": tenantID})
+	if err != nil {
+		e.t.Fatalf("count events: %v", err)
+	}
+	return int(n)
+}
+
 func (e *p2pEnv) events() []storedEvent {
 	e.t.Helper()
 	ctx, cancel := context.WithTimeout(e.t.Context(), 5*time.Second)

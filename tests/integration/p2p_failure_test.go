@@ -272,6 +272,9 @@ func TestFailureCrossTenantDenied(t *testing.T) {
 	if got := len(e.events()); got != 1 {
 		t.Fatalf("tenant A projected events = %d, want 1 (pr.submitted)", got)
 	}
+	if got := e.eventCount(e.tenantB); got != 0 {
+		t.Fatalf("tenant B projected events = %d, want 0", got)
+	}
 }
 
 // (5) Invalid lifecycle transition: a cancelled PO accepts no receipt —

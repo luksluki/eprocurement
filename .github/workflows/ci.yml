@@ -174,8 +174,10 @@ jobs:
 
   # ADR-0002 stage 3 — "integration: dockerized Postgres/Mongo/Redis/RabbitMQ
   # services; run integration tests". The #58 procure-to-pay suite runs the
-  # same `make test-p2p` sequence as locally against the compose
-  # infrastructure services only (no service images are built; the suite
+  # same `make test-p2p` sequence as locally; Redis is the one stage-3
+  # service it does not need (the notifications projection lives in Mongo;
+  # the Redis-backed export scheduler is out of scope), so the job starts
+  # postgres/mongo/rabbitmq only (no service images are built; the suite
   # boots the procurement gRPC API in-process and the worker halves itself,
   # each against its own scratch database and a suffixed broker topology).
   # The go/web jobs keep running without a broker; e2e is unchanged.
