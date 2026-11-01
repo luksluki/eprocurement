@@ -186,9 +186,21 @@ database isolation is therefore exercised for real):
   without `TEST_DATABASE_URL`'s scratch path gating — it skips). Full
   `go test ./...` and `pnpm` gates are re-run by the workflow script after
   this note.
-- CI's `integration` job runs for the first time on this branch's PR push;
-  its result is the remaining acceptance evidence (mirrors the verified
-  local `make test-p2p` on a fresh runner).
+- **First CI execution — green.** PR #120 round 1 reported "no checks": the
+  PR was opened while `mergeable: CONFLICTING` (develop had landed #119,
+  which also touches Makefile/docs/ci.yml, after this branch's point), and a
+  `pull_request` workflow runs against `refs/pull/N/merge`, which GitHub
+  cannot materialize for a conflicting PR — zero runs were ever created (the
+  workflow file itself validated clean: `actionlint` exit 0, remote blob
+  identical to local). Merging develop (union of both `.PHONY` lists and
+  both onboarding paragraphs; ci.yml auto-merged) in `35ac561` fixed it:
+  run [41317351888](https://github.com/luksluki/eprocurement/actions/runs/41317351888)
+  — **Go 3m14s ✓, Web 1m17s ✓, Integration · procure-to-pay 44s ✓, E2E
+  6m23s ✓**. The integration job's log shows `make test-p2p` →
+  `ok github.com/luksluki/eprocurement/tests/integration 1.404s` with
+  per-event projection latencies 53–57 ms on the runner, and — unlike the
+  wedged dev box — no leaked-scratch-database line: the drop completed on
+  the healthy server.
 
 ## Follow-ups
 
@@ -196,8 +208,8 @@ database isolation is therefore exercised for real):
   2026-11-01; it ignored cancel/terminate) and drop the leaked
   `eproc_p2p_it_*` scratch databases plus the wedged 3-hour INSERT's
   transaction — maintainer action on the dev stack, not done from here.
-- **First CI execution** of the `integration` job lands with this PR's
-  push — link its run in the PR body once green.
+- ~~**First CI execution** of the `integration` job~~ — done: green on run
+  41317351888 (see Evidence); link the run in the PR body.
 - The convert response's item basket carries no DB ids (see Decisions); if
   a consumer ever needs them in-band, that is a small procurement API
   change, not a test concern.
