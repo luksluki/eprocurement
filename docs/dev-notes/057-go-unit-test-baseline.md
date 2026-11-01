@@ -160,8 +160,42 @@ All commands run this session on the working tree (Windows, Git Bash, Go
   checkout — config.go, vendor store/scale tests — untouched by this diff.)
 - `git check-ignore coverage*.out` — coverage artifacts ignored.
 - **Not run here:** the full `go vet ./...`/`go build ./...`/`go test ./...`
-  and pnpm gates (the workflow script runs them after this ask), CI round 1
-  itself, and the `docker compose config` gate (no compose file touched).
+  and pnpm gates (the workflow script ran them before the #57 commit) and
+  the `docker compose config` gate (no compose file touched). CI round 1
+  results are recorded in the section below.
+
+## CI round 1 (run 41304268253, 2026-11-01)
+
+- **All three #57 steps passed in the Go job — PASS in 5m1s** (was ~3m before
+  this PR): the gated unit suite, the procurement coverage step (the pinned
+  set read 88.1% on the runner, guard OK), and the documents report-only
+  step all green. `timeout-minutes: 15` holds with ~10 minutes of headroom —
+  decision 8's bump-to-20 clause not needed. Web PASS.
+- **E2E failed — and it is not this diff.** `docker compose up -d --wait`
+  killed the stack on `container eprocurement-worker-1 exited (1)`. The same
+  failure signature is on **both preceding develop pushes** (runs
+  41270378870 03:44 and 41294281116 09:42 — the 02:00 run, before the otel
+  commit `5444d55`, passed): a pre-existing fresh-stack boot crash this
+  branch inherited. Root cause chain: documents and the worker both run
+  `EnsureBucket` at boot (`documents/cmd/documents/main.go:92`,
+  `worker/cmd/worker/main.go:178`); on a FRESH MinIO both `BucketExists`
+  checks return false and the `MakeBucket` calls race — the loser gets
+  `BucketAlreadyOwnedByYou` and `worker` boots fail-fast into exit 1.
+  Locally the bucket is long-existing (no `MakeBucket`), which is why the
+  warm stack never reproduced it; the #54 otel commit shifted both services'
+  boot timing into the race window on the runner. Mechanism proven locally
+  with the new regression test against the unfixed code: **5/5 runs** the
+  losing client failed with exactly "Your previous request to create the
+  named bucket succeeded and you already own it."
+- **Fix (`fix(documents)` commit):** `EnsureBucket`
+  (`services/documents/objectstore/minio.go`) re-checks `BucketExists` when
+  `MakeBucket` errors — the bucket existing now, created by the sibling
+  with the same credentials, is the outcome both boot paths want; any other
+  failure still surfaces. Regression test `TestEnsureBucketConcurrentBoot`
+  (new, `minio_test.go`): two clients, a per-run unique bucket (the shared
+  test bucket exists, so no MakeBucket would fire on it), barrier start —
+  FAIL 5/5 before the fix, **PASS 10/10 after**; the package's full suite
+  also green.
 
 ## Follow-ups
 
@@ -173,10 +207,11 @@ All commands run this session on the working tree (Windows, Git Bash, Go
 - **Documents coverage threshold** — once CI reports the 16.7% unit-only
   number on the pinned 7-package set for a few runs, open the follow-up
   that gates it at the real figure plus buffer (maintainer decision 2).
-- **CI round 1 watch** — the Go job grows by the gated unit run (~seconds)
-  and the procurement coverage run (~3 min measured locally, packages in
-  parallel). Decision 8: if round 1 approaches the 15-minute ceiling, bump
-  `timeout-minutes` to 20 and flag it in the PR body.
+- **CI round 1 watch** — resolved: the Go job ran 5m1s of the 15-minute
+  ceiling with all three #57 steps green; no timeout bump needed.
+- **The EnsureBucket race also sits on develop** (both develop pushes since
+  the otel commit fail e2e the same way) — this PR's fix commit carries the
+  correction; the squash-merge brings it to develop with #57.
 - **Interface extraction for the 8+ store concrete types** (out of scope by
   decision 4) — tracked as its own issue; until then the fakes-over-mocks
   convention stands as documented here.
