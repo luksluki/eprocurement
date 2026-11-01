@@ -14,6 +14,15 @@ extensions:
     endpoint: 0.0.0.0:13133
 
 exporters:
+  # #54: traces land in Jaeger (compose profile observability) over OTLP
+  # gRPC; jaeger:4317 is the container-internal receiver the all-in-one
+  # image exposes.
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+  # Retained for troubleshooting: without the observability profile (no
+  # jaeger service) spans still stream to the collector's stdout.
   debug:
     verbosity: normal
 
@@ -23,7 +32,9 @@ service:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [debug]
+      # #54: Jaeger is the destination; debug stays as the always-on
+      # troubleshooting sink.
+      exporters: [otlp/jaeger, debug]
     metrics:
       receivers: [otlp]
       processors: [batch]

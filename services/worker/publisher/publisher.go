@@ -22,7 +22,10 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
+	"github.com/luksluki/eprocurement/internal/platform/telemetry"
 	"github.com/luksluki/eprocurement/services/procurement/outbox"
 )
 
@@ -187,13 +190,41 @@ func (p *AMQPPublisher) Close() error {
 	return err
 }
 
+// publishContext synthesizes the producer's trace parent from the outbox
+// row and starts the publish span (#54). The loop runs off the worker's
+// root context — no inbound span exists — and the outbox table stores only
+// trace_id (no span id, docs/schema/procurement.md), so the parent is
+// manufactured from the row's trace id (ContextWithTraceIDString keeps the
+// SAME trace id, never a fresh one). An already-valid span in ctx (a
+// future in-request publisher) is never overridden.
+func publishContext(ctx context.Context, env Envelope) (context.Context, trace.Span) {
+	ctx = telemetry.ContextWithTraceIDString(ctx, env.TraceID)
+	return telemetry.StartPublishSpan(ctx, env.Type)
+}
+
 // Publish marshals the envelope, publishes it to the events exchange with
-// routing key = event type and persistent delivery, and waits for the broker
-// confirm before returning. A confirm that never arrives inside
-// confirmTimeout, an explicit nack, or a transport error returns an error —
-// the caller keeps the row's published_at NULL and retries next tick
-// (at-least-once; consumers dedupe on event_id, PRD §14.8).
+// routing key = event type, persistent delivery, and the W3C traceparent
+// injected into the message headers (the REST → broker → worker leg of
+// PRD §18), and waits for the broker confirm before returning. A confirm
+// that never arrives inside confirmTimeout, an explicit nack, or a
+// transport error returns an error — the caller keeps the row's
+// published_at NULL and retries next tick (at-least-once; consumers
+// dedupe on event_id, PRD §14.8).
 func (p *AMQPPublisher) Publish(ctx context.Context, env Envelope) error {
+	headers := amqp.Table{}
+	ctx, span := publishContext(ctx, env)
+	telemetry.InjectAMQP(ctx, headers)
+	err := p.publishConfirmed(ctx, env, headers)
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+	}
+	span.End()
+	return err
+}
+
+// publishConfirmed is the broker path of Publish: reconnect if needed,
+// publish with the prepared headers, and wait for the confirm.
+func (p *AMQPPublisher) publishConfirmed(ctx context.Context, env Envelope, headers amqp.Table) error {
 	body, err := json.Marshal(env)
 	if err != nil {
 		return fmt.Errorf("publisher: marshal envelope %s: %w", env.EventID, err)
@@ -211,6 +242,7 @@ func (p *AMQPPublisher) Publish(ctx context.Context, env Envelope) error {
 			DeliveryMode: amqp.Persistent,
 			MessageId:    env.EventID,
 			Timestamp:    env.OccurredAt,
+			Headers:      headers,
 			Body:         body,
 		})
 	if err != nil {

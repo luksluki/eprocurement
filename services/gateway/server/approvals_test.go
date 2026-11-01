@@ -251,27 +251,47 @@ func TestApprovalDecideIdempotencyKey(t *testing.T) {
 	}
 }
 
-// AC (trace propagation, PRD §18): the request's X-Trace-Id rides along as
-// x-trace-id gRPC metadata on the decide call (generated when absent), so
-// procurement's outbox rows share the REST trace.
+// AC (trace propagation, PRD §18 + #54): the request's trace id rides
+// along as x-trace-id gRPC metadata on the decide call so procurement's
+// outbox rows share the REST trace. Since #54 the value is DERIVED FROM
+// THE REQUEST SPAN — never an independent legacy value: a W3C-shaped
+// 32-hex X-Trace-Id anchors the same trace id end to end; anything else is
+// replaced by the generated span id, so the REST value, the metadata, and
+// Jaeger can never disagree.
 func TestApprovalDecideTracePropagation(t *testing.T) {
 	fake := approvalFake(sampleDecideResponse())
 	app, verifier, priv, kid := newTestApp(t)
 	registerApprovalRoutes(app, verifier, fake)
 	token := reqTokenFor(t, priv, kid, rbac.RoleApprover)
 
+	// A pre-#54 non-hex legacy id: replaced by the span's (generated)
+	// 32-hex id, and the response header mirrors the metadata.
 	resp, body := reqDo(t, app, "POST", "/api/v1/approvals/step-1/decide", token,
 		`{"decision":"approve"}`, map[string]string{"X-Trace-Id": "trace-edge-31"})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("decide with trace = %d, body = %v", resp.StatusCode, body)
 	}
 	md := metadataOf(t, fake.decideCtx)
-	if md["x-trace-id"] != "trace-edge-31" {
-		t.Fatalf("propagated trace = %q, want trace-edge-31", md["x-trace-id"])
+	if got := md["x-trace-id"]; len(got) != 32 {
+		t.Fatalf("propagated trace = %q, want the span's generated 32-hex id", got)
+	}
+	if resp.Header.Get("X-Trace-Id") != md["x-trace-id"] {
+		t.Fatalf("response X-Trace-Id %q != propagated %q", resp.Header.Get("X-Trace-Id"), md["x-trace-id"])
 	}
 
-	// Absent header: the middleware generates a 32-hex id, and it still
-	// rides along.
+	// A W3C-shaped 32-hex legacy id anchors the SAME trace (legacy bridge).
+	const hexID = "0af7651916cd43dd8448eb211c80319c"
+	fake.decideCtx = nil
+	resp, _ = reqDo(t, app, "POST", "/api/v1/approvals/step-1/decide", token,
+		`{"decision":"approve"}`, map[string]string{"X-Trace-Id": hexID})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("decide with hex trace = %d", resp.StatusCode)
+	}
+	if md = metadataOf(t, fake.decideCtx); md["x-trace-id"] != hexID {
+		t.Fatalf("propagated trace = %q, want the anchored %q", md["x-trace-id"], hexID)
+	}
+
+	// Absent header: the span generates a 32-hex id, and it still rides.
 	fake.decideCtx = nil
 	resp, _ = reqDo(t, app, "POST", "/api/v1/approvals/step-1/decide", token, `{"decision":"approve"}`, nil)
 	if resp.StatusCode != http.StatusOK {

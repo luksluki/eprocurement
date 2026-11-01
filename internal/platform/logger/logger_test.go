@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 func newTestLogger(buf *bytes.Buffer) *slog.Logger {
@@ -49,6 +51,26 @@ func TestTraceIDRoundTrip(t *testing.T) {
 	}
 	if got := TraceID(context.Background()); got != "" {
 		t.Fatalf("TraceID on empty context = %q, want empty", got)
+	}
+}
+
+// AC #54 (span-first): when the context carries an OpenTelemetry span
+// context, TraceID reports the SPAN's trace id — the value Jaeger shows —
+// even if a legacy trace-id value also rides the context; without a span
+// the legacy value still answers (cron/boot paths keep logging).
+func TestTraceIDSpanFirst(t *testing.T) {
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	ctx, span := tp.Tracer("test").Start(WithTraceID(context.Background(), "legacy-id"), "op")
+	defer span.End()
+	want := span.SpanContext().TraceID().String()
+
+	if got := TraceID(ctx); got != want {
+		t.Fatalf("TraceID = %q, want the span's %q (the legacy value must not win)", got, want)
+	}
+	if got := TraceID(WithTraceID(context.Background(), "legacy-only")); got != "legacy-only" {
+		t.Fatalf("TraceID without a span = %q, want the legacy value", got)
 	}
 }
 

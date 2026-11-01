@@ -21,6 +21,7 @@ type Config struct {
 	LoginRatePerMin int           // GATEWAY_LOGIN_RATE_PER_MIN — per-IP login limiter budget (default 30)
 	TrustedProxies  []string      // GATEWAY_TRUSTED_PROXIES — comma-separated IPs/CIDRs whose X-Forwarded-For is honored (#44); empty trusts no proxy
 	MetricsPort     string        // METRICS_PORT — /metrics listen port, container-internal (default "9100", #55)
+	OTLPEndpoint    string        // OTEL_EXPORTER_OTLP_ENDPOINT — OTLP gRPC collector for traces (#54); empty = SDK active, nothing exported
 }
 
 // Load reads the configuration from the environment.
@@ -37,6 +38,7 @@ func Load() Config {
 		LoginRatePerMin: envInt("GATEWAY_LOGIN_RATE_PER_MIN", 30),
 		TrustedProxies:  envCSV("GATEWAY_TRUSTED_PROXIES"),
 		MetricsPort:     envOr("METRICS_PORT", "9100"),
+		OTLPEndpoint:    envOr("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
 	}
 }
 

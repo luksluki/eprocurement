@@ -98,9 +98,9 @@ services:
     networks: [backend]
 
   # Observability profile (opt-in: `docker compose --profile observability
-  # up`). Prometheus + Grafana landed with #55; Jaeger stays with #54.
-  # PRD §14.9 models them as default services trimmed by the demo profile —
-  # this stack inverts that (the default stays lean, observability opts in),
+  # up`). Prometheus + Grafana landed with #55; Jaeger with #54. PRD §14.9
+  # models them as default services trimmed by the demo profile — this
+  # stack inverts that (the default stays lean, observability opts in),
   # per the issue note "Demo profile may skip Grafana"; the deviation is
   # recorded in docs/dev-notes/055.
   prometheus:
@@ -140,6 +140,24 @@ services:
         condition: service_healthy
     networks: [backend]
 
+  # Traces UI (#54): the collector forwards OTLP traces here (see
+  # deploy/compose/otel-collector.yaml). all-in-one serves the UI on 16686
+  # and the OTLP gRPC receiver on its container-internal 4317 —
+  # deliberately NOT published to the host (the METRICS_PORT pattern);
+  # only the compose-network collector exports to it. No healthcheck: the
+  # modern all-in-one image ships no shell/wget, so a CMD-SHELL probe
+  # cannot run — `up --wait` treats a running container without a
+  # healthcheck as healthy; verify via the UI/API (docs/dev-notes/054).
+  # COLLECTOR_OTLP_ENABLED pins the (default-on) OTLP receivers explicitly.
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    profiles: [observability]
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "${JAEGER_UI_PORT:-16686}:16686"
+    networks: [backend]
+
   identity:
     build:
       context: .
@@ -153,6 +171,8 @@ services:
       # to the host — only Prometheus (profile observability) scrapes it.
       METRICS_PORT: "9101"
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # #54: OTLP gRPC endpoint for the process's span exporter.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       IDENTITY_LOGIN_RATE_PER_MIN: ${IDENTITY_LOGIN_RATE_PER_MIN:-5}
       IDENTITY_JWT_KEY: ${IDENTITY_JWT_KEY:-}
       IDENTITY_JWT_KEY_PREVIOUS: ${IDENTITY_JWT_KEY_PREVIOUS:-}
@@ -183,6 +203,8 @@ services:
       PORT: "8082"
       METRICS_PORT: "9102" # container-internal (#55), not published
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # #54: OTLP gRPC endpoint for the process's span exporter.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       DATABASE_URL: postgres://${POSTGRES_USER:-eprocurement}:${POSTGRES_PASSWORD:-eprocurement}@postgres:5432/${POSTGRES_DB:-eprocurement}?sslmode=disable
     ports:
       - "${PROCUREMENT_PORT:-8082}:8082"
@@ -208,6 +230,8 @@ services:
       PORT: "8083"
       METRICS_PORT: "9103" # container-internal (#55), not published
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # #54: OTLP gRPC endpoint for the process's span exporter.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       MONGO_URI: mongodb://${MONGO_ROOT_USER:-eprocurement}:${MONGO_ROOT_PASSWORD:-eprocurement}@mongo:27017/${MONGO_DB:-eprocurement}?authSource=admin
       S3_ENDPOINT: minio:9000
       # Presigned URLs must be reachable from OUTSIDE the compose network.
@@ -250,6 +274,8 @@ services:
       APP_ENV: ${APP_ENV:-local}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       METRICS_PORT: "9104" # container-internal (#55), not published
+      # #54: OTLP gRPC endpoint for the process's span exporter.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       DATABASE_URL: postgres://${POSTGRES_USER:-eprocurement}:${POSTGRES_PASSWORD:-eprocurement}@postgres:5432/${POSTGRES_DB:-eprocurement}?sslmode=disable
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-eprocurement}:${RABBITMQ_PASSWORD:-eprocurement}@rabbitmq:5672/
       # consumer side (#47): same credentials the documents service uses
@@ -291,6 +317,8 @@ services:
       PORT: "8080"
       METRICS_PORT: "9100" # container-internal (#55), not published
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # #54: OTLP gRPC endpoint for the process's span exporter.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       IDENTITY_ADDR: identity:8081
       PROCUREMENT_ADDR: procurement:8082
       DOCUMENTS_ADDR: documents:8083

@@ -18,8 +18,8 @@ import (
 	"google.golang.org/grpc"
 
 	procurementv1 "github.com/luksluki/eprocurement/gen/go/procurement/v1"
-	"github.com/luksluki/eprocurement/internal/platform/logger"
 	"github.com/luksluki/eprocurement/internal/platform/metrics"
+	"github.com/luksluki/eprocurement/internal/platform/telemetry"
 	"github.com/luksluki/eprocurement/services/gateway/token"
 	"github.com/luksluki/eprocurement/services/identity/auth"
 )
@@ -149,7 +149,11 @@ func New(log *slog.Logger, verifier *token.Verifier, opts ...Option) *fiber.App 
 	})
 
 	app.Use(requestLogger(log))
-	app.Use(traceID())
+	// #54: the OTel edge middleware — starts the server span, stores it in
+	// the fiber request context (c.SetUserContext) so forwardContext's
+	// outgoing gRPC contexts carry it, and derives the legacy X-Trace-Id
+	// response header + "trace_id" local FROM the span.
+	app.Use(telemetry.HTTPTrace())
 	if o.metrics != nil {
 		app.Use(requestMetrics(o.metrics))
 	}
@@ -321,20 +325,8 @@ func requestMetrics(mc *metrics.Collectors) fiber.Handler {
 	}
 }
 
-// traceID propagates X-Trace-Id (generating one when absent) into locals and
-// the response header, mirroring the gRPC interceptor on the identity side.
-func traceID() fiber.Handler {
-	return func(c *fiber.Ctx) error {
-		id := strings.TrimSpace(c.Get("X-Trace-Id"))
-		if id == "" || len(id) > 64 {
-			id = logger.NewTraceID()
-		}
-		c.Locals("trace_id", id)
-		c.Set("X-Trace-Id", id)
-		return c.Next()
-	}
-}
-
+// traceIDFrom returns the request's trace id local — set by the #54 OTel
+// HTTP middleware from the request span, so it always matches Jaeger.
 func traceIDFrom(c *fiber.Ctx) string {
 	id, _ := c.Locals("trace_id").(string)
 	return id

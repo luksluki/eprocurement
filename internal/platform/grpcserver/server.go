@@ -1,10 +1,11 @@
 // Package grpcserver provides the shared gRPC server scaffolding for all
 // services: standard health (liveness "" / readiness keyed by service name,
 // backed by a dependency ping loop), reflection, and the platform unary
-// interceptors — trace-id propagation, request-latency metrics (#55), JSON
-// request logging, and panic recovery. Services add their own interceptors
-// (e.g. RBAC) and register their APIs on the underlying grpc.Server before
-// Serve.
+// interceptors — OpenTelemetry tracing (#54, chained FIRST so the span
+// context exists before anything else reads it), trace-id propagation,
+// request-latency metrics (#55), JSON request logging, and panic recovery.
+// Services add their own interceptors (e.g. RBAC) and register their APIs
+// on the underlying grpc.Server before Serve.
 package grpcserver
 
 import (
@@ -17,6 +18,7 @@ import (
 
 	"github.com/luksluki/eprocurement/internal/platform/logger"
 	"github.com/luksluki/eprocurement/internal/platform/metrics"
+	"github.com/luksluki/eprocurement/internal/platform/telemetry"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
@@ -97,7 +99,12 @@ func New(log *slog.Logger, pinger Pinger, opts ...Option) *Server {
 		opt(s)
 	}
 
-	chain := []grpc.UnaryServerInterceptor{TraceInterceptor}
+	// #54: the OTel interceptor is FIRST — it extracts/creates the span
+	// context every later interceptor and handler reads (logger.TraceID is
+	// span-first). The legacy TraceInterceptor stays second: its x-trace-id
+	// handling covers non-OTel callers and its generated value is shadowed
+	// by the span whenever both exist.
+	chain := []grpc.UnaryServerInterceptor{telemetry.GRPCUnaryServerInterceptor(), TraceInterceptor}
 	if s.metrics != nil {
 		chain = append(chain, s.metrics)
 	}

@@ -1,10 +1,10 @@
 // Package logger provides JSON structured logging with trace-id propagation.
 //
 // The base logger writes one JSON object per line to stdout with the service
-// name and environment attached. gRPC interceptors (see services/identity/server)
-// put the trace id into the request context; FromContext returns a logger that
-// includes it, so every log line produced while handling a request carries the
-// same trace_id.
+// name and environment attached. The gateway's HTTP middleware and the gRPC
+// server interceptors put the trace context into the request context (#54);
+// FromContext returns a logger that includes its trace id, so every log line
+// produced while handling a request carries the same trace_id.
 package logger
 
 import (
@@ -13,6 +13,8 @@ import (
 	"encoding/hex"
 	"log/slog"
 	"os"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 type ctxKey struct{}
@@ -49,8 +51,17 @@ func WithTraceID(ctx context.Context, traceID string) context.Context {
 	return context.WithValue(ctx, ctxKey{}, traceID)
 }
 
-// TraceID returns the trace id from the context, or "" when absent.
+// TraceID returns the trace id for logs and outbox rows (#54): the SPAN
+// context wins, so the value is exactly what Jaeger shows for the request
+// — including the trace the worker's publisher/consumer re-attach by the
+// outbox trace_id. The legacy context value (the pre-#54 propagation path
+// via X-Trace-Id metadata, still written by the trace interceptors)
+// remains the fallback for contexts that never carried a span (cron ticks,
+// boot code), keeping every existing caller working.
 func TraceID(ctx context.Context) string {
+	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
+		return sc.TraceID().String()
+	}
 	id, _ := ctx.Value(ctxKey{}).(string)
 	return id
 }

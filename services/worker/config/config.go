@@ -60,6 +60,11 @@ type Config struct {
 	// age) and the export-age refresh cadence.
 	MetricsPort       string        // METRICS_PORT — /metrics port, container-internal (default "9104")
 	ExportAgeInterval time.Duration // EXPORT_AGE_INTERVAL — export_age_seconds refresh (default 60s)
+
+	// Tracing (#54): where the five OTLP gRPC exporters send spans; empty =
+	// the SDK stays active (span ids for log/outbox linkage) but exports
+	// nothing.
+	OTLPEndpoint string // OTEL_EXPORTER_OTLP_ENDPOINT
 }
 
 // Load reads the configuration from the environment with local-development
@@ -88,6 +93,7 @@ func Load() Config {
 		S3Bucket:           envOr("S3_BUCKET", "attachments"),
 		S3UseSSL:           envBool("S3_USE_SSL", false),
 		MetricsPort:        envOr("METRICS_PORT", "9104"),
+		OTLPEndpoint:       envOr("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
 		ExportAgeInterval:  durationOr("EXPORT_AGE_INTERVAL", 60*time.Second),
 	}
 }
