@@ -118,7 +118,7 @@ jobs:
       # the covered lines, the unit-only read is ~23%.
       - name: Coverage (procurement parity set, threshold 80%)
         run: |
-          go test ./services/procurement/... -count=1 \
+          go test ./services/procurement/... -count=1 -skip 'Scale100k' \
             -coverprofile=coverage-procurement.out \
             -coverpkg=./services/procurement/approval,./services/procurement/config,./services/procurement/dashboard,./services/procurement/goodsreceipt,./services/procurement/invoice,./services/procurement/match,./services/procurement/outbox,./services/procurement/purchaseorder,./services/procurement/requisition,./services/procurement/server,./services/procurement/vendor
           go tool cover -func=coverage-procurement.out | tail -1

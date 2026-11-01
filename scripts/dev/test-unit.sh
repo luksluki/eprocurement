@@ -12,12 +12,12 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 unset TEST_DATABASE_URL TEST_MONGO_URI TEST_S3_ENDPOINT \
-	TEST_S3_ACCESS_KEY TEST_S3_SECRET_KEY TEST_RABBITMQ_URL
+	TEST_S3_ACCESS_KEY TEST_S3_SECRET_KEY TEST_RABBITMQ_URL TEST_REDIS_URL
 
 max="${UNIT_SUITE_MAX_SECONDS:-120}"
 
 start=$(date +%s)
-go test ./...
+go test ./... -count=1
 end=$(date +%s)
 elapsed=$((end - start))
 

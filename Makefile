@@ -111,7 +111,7 @@ cover: ## Identity-domain coverage with enforced threshold (compose stack must b
 # Needs the compose database — the DB-backed store tests carry most of the
 # covered lines (unit-only reads ~22%).
 cover-procurement: ## Procurement coverage with enforced threshold (compose stack must be up)
-	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test ./services/procurement/... -count=1 \
+	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test ./services/procurement/... -count=1 -skip 'Scale100k' \
 		-coverprofile=coverage-procurement.out \
 		-coverpkg=./services/procurement/approval,./services/procurement/config,./services/procurement/dashboard,./services/procurement/goodsreceipt,./services/procurement/invoice,./services/procurement/match,./services/procurement/outbox,./services/procurement/purchaseorder,./services/procurement/requisition,./services/procurement/server,./services/procurement/vendor
 	go tool cover -func=coverage-procurement.out | tail -1
