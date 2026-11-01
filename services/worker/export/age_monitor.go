@@ -99,8 +99,10 @@ func (a *AgeMonitor) tick(ctx context.Context) {
 		value, ok, err := a.KV.Get(ctx, HeartbeatKey(tenantID))
 		switch {
 		case err != nil:
-			a.logger().Warn("export age heartbeat unreadable; series removed",
-				"tenant_id", tenantID, "error", err)
+			if ctx.Err() == nil { // mid-tick shutdown is not an unreadable heartbeat
+				a.logger().Warn("export age heartbeat unreadable; series removed",
+					"tenant_id", tenantID, "error", err)
+			}
 			a.Sink.DeleteExportAge(tenantID)
 		case !ok:
 			// Never exported (or Redis flushed): unknown age, not zero.
