@@ -102,6 +102,6 @@ e2e: ## Run the Playwright happy path (compose stack must be up)
 # The #56 p95 budget re-run path: the five ~100k scale fixtures against the
 # compose database, with a per-shape p95-vs-budget report parsed from the
 # tests' own logs (the budgets live in the tests, not here). Serialized
-# bulk loads; a full run is roughly 10 minutes.
+# bulk loads; a full run is roughly 8 minutes.
 perf-budget: ## Run the 100k scale fixtures and report p95 vs budget (stack must be up)
 	bash scripts/dev/perf-budget.sh

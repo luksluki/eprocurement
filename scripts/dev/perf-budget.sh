@@ -6,7 +6,7 @@
 # Usage: scripts/dev/perf-budget.sh   (or: make perf-budget)
 # Requires the compose PostgreSQL (make compose-up). The five fixtures
 # serialize their bulk-load phases on the scalegate advisory lock, so a full
-# run takes roughly 10 minutes; -timeout 30m covers the queueing.
+# run takes roughly 8 minutes; -timeout 30m covers the queueing.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -58,6 +58,9 @@ fmt_ms() {
 	*ms) echo "${1%ms}" ;;
 	*us) awk -v v="${1%us}" 'BEGIN {printf "%.1f", v/1000}' ;;
 	*µs) awk -v v="${1%µs}" 'BEGIN {printf "%.1f", v/1000}' ;;
+	*h*) echo "perf-budget: fmt_ms: hour-scale duration unsupported: $1" >&2; exit 2 ;;
+	*m*s) awk -v d="${1%s}" 'BEGIN { split(d, p, "m"); printf "%.1f", (p[1]*60+p[2])*1000 }' ;;
+	*m) awk -v d="${1%m}" 'BEGIN {printf "%.1f", d*60000}' ;;
 	*s) awk -v v="${1%s}" 'BEGIN {printf "%.1f", v*1000}' ;;
 	*) echo "$1" ;;
 	esac
@@ -81,6 +84,10 @@ END { for (s in seen) print names[s] "\t" last[s] }
 echo
 echo "perf-budget: per-shape p95 vs budget (final attempt per shape):"
 fail=0
+if [ -z "$(tr -d '[:space:]' <<<"$rows")" ]; then
+	fail=1
+	echo "perf-budget: FAIL - no shape lines parsed (test log format drift?)" >&2
+fi
 while IFS=$'\t' read -r shape rest; do
 	[ -n "${shape:-}" ] || continue
 	median=${rest#*median=}
