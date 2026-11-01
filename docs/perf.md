@@ -13,15 +13,22 @@ and links.
 
 | Source | Target | Enforcement |
 |---|---|---|
-| PRD §12 FR-09 (prd-v0.2.md) | dashboard p95 < 300 ms on seed data | `dashboard.TestStoreSummaryScale100k` |
-| PRD §19 NFR, Performance row | p95 < 300 ms for list/detail endpoints on the 100k-item seed; dashboard p95 < 300 ms | the five scale tests (below) |
+| PRD §12 FR-09 (prd-v0.2.md) | dashboard p95 < 500 ms on seed data | `dashboard.TestStoreSummaryScale100k` |
+| PRD §19 NFR, Performance row | p95 < 300 ms for list/detail endpoints on the 100k-item seed; dashboard p95 < 500 ms | the five scale tests (below) |
 | PRD §23 DoD | "p95 latency meets NFR on seed dataset" | `make perf-budget` / CI `go test ./...` |
 
-The §19 dashboard cell read < 500 ms until #56 (the #52 test kept the 500 ms
-budget pending measurement); #56 measured the clean fixture at p95 ≈ 199 ms
-with the 0014 indexes already in the repo, so per the maintainer decision of
-2026-11-01 the budget tightened to FR-09's 300 ms and the §19 cell was
-reconciled to match — the FR-09 vs §19 inconsistency ends at one number.
+The FR-09 vs §19 dashboard inconsistency (300 vs 500 ms) was resolved by
+measurement in #56 per the maintainer decision ("cek potensial optimasi,
+jika memungkinkan optimasi menjadi < 300 ms, tetapi jika terdapat banyak
+pertimbangan, update sesuaikan PRD menjadi < 500ms"): the clean dev fixture
+reads p95 ≈ 199 ms — under 300 with the 0014 indexes already in the repo —
+but the CI runner, where the budget is actually enforced, read median
+~275–282 ms / p95 307–783 ms across three attempts (CI run 41290280970
+round 1 failed a 300 ms trial budget on all three attempts). Closing that
+gap would take a query redesign of the spend/pending widgets — "banyak
+pertimbangan" — so FR-09 was reconciled to < 500 ms per §19 and the
+enforced budget stays 500 ms. The lists' 300 ms row is enforced and passes
+with ≥3× headroom (see §3).
 
 ## 2. What is measured — the fixture protocol
 
@@ -61,8 +68,9 @@ The shared protocol, identical in all five fixtures:
    `app.tenant_id`) — the evidence mirrored into docs/schema/procurement.md
    and this page.
 
-**Budgets: 300 ms p95 per list shape; 300 ms p95 per whole dashboard
-summary.** Numbers in this page are dev-machine measurements (Windows dev
+**Budgets: 300 ms p95 per list shape; 500 ms p95 per whole dashboard
+summary (the reconciled FR-09/§19 number — §1).** Numbers in this page are
+dev-machine measurements (Windows dev
 host, `en_US.utf8`/libc collation — the dev collation inflates string work
 several-fold vs the Linux/glibc CI database; see the requisition note in
 docs/schema/procurement.md).
@@ -159,15 +167,20 @@ InitPlan 1 → Aggregate
 -> Limit → Sort (top-N) over the same bitmap scan
 ```
 
-### Dashboard summary (#52, tightened in #56; `dashboard.TestStoreSummaryScale100k`)
+### Dashboard summary (#52, reconciled in #56; `dashboard.TestStoreSummaryScale100k`)
 
 One `Summary` call = one transaction, five queries (pending count, pending
 first page, spend totals, spend by vendor, PO status distribution). The 0014
-partial indexes carry the pending and spend shapes. Clean solo run
-2026-11-01: **median ~165 ms, p95 ~199 ms** against the 300 ms budget (the
-#52-era dev machine measured p95 265–456 ms against the then-500 ms budget
-with a churned database). Per-query plans and the by-design distribution
-scan are in docs/schema/procurement.md, "Dashboard summary".
+partial indexes carry the pending and spend shapes. Budget: **p95 < 500 ms**
+(§19; the #56 reconciliation of FR-09's < 300 ms figure is recorded in §1 —
+the dev fixture measures comfortably under 300, the CI runner does not).
+Clean solo dev run 2026-11-01: **median ~165 ms, p95 ~199 ms** (the
+#52-era dev machine measured p95 265–456 ms against the same budget with a
+churned database); CI round 1 (run 41290280970) read median ~275–282 ms /
+p95 307–783 ms across attempts under the concurrent five-fixture run —
+inside the 500 ms budget, outside a 300 ms one. Per-query plans and the
+by-design distribution scan are in docs/schema/procurement.md, "Dashboard
+summary".
 
 ### Suite-concurrency check (2026-11-01, all five fixtures in one run)
 
@@ -196,9 +209,9 @@ exists for). **Every shape passed on its first attempt — no retries fired:**
 | invoice | combined status+query | 14 ms | 15 ms |
 | dashboard | summary (whole call) | 192 ms | 198 ms |
 
-Every row is under its 300 ms budget — including the dashboard's tightened
-one — with the worst shape (PO combined, p95 96 ms; dashboard, p95 198 ms)
-at 3×+ headroom.
+Every row is under its 300 ms list budget (dashboard's own budget is the
+reconciled 500 ms) — with the worst shape (PO combined, p95 96 ms; lists
+overall) at 3×+ headroom.
 
 ## 4. By-design sequential-scan exceptions
 

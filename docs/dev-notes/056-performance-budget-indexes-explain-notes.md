@@ -57,10 +57,18 @@
   `pgbatch`'s own test covers the happy path, the empty no-op (nothing is
   sent), and the failure path (a mid-batch 23505 surfaces and the
   transaction rolls back).
-- **Dashboard budget tightened 500 → 300 ms (maintainer decision 3, branch
-  A)** — `dashboard/scale_test.go` `summaryBudgetMs` now enforces FR-09's
-  300 ms, and PRD §19's dashboard cell was reconciled to < 300 ms (it read
-  < 500 ms; the #52 test had kept the 500 ms pending this measurement).
+- **Dashboard budget resolved by measurement to §19's 500 ms (maintainer
+  decision 3, branch B after CI round 1)** — `dashboard/scale_test.go`
+  `summaryBudgetMs` stays at the #52 value of 500, and PRD FR-09 (§12)
+  was reconciled to < 500 ms per NFR §19. The decision data: the clean dev
+  fixture reads p95 ≈ 199 ms (under FR-09's 300), which first suggested
+  branch A (tighten to 300); but the CI runner — where the budget is
+  enforced, with the five fixtures' measurement loops overlapping — read
+  median ~275–282 ms / p95 307–783 ms (CI run 41290280970 round 1 failed a
+  300 ms trial budget on all three attempts). Closing that gap would take a
+  query redesign of the spend/pending widgets ("banyak pertimbangan"), so
+  per the maintainer's verbatim instruction the PRD moved to < 500 ms
+  instead. FR-09, §19, and the enforced budget now agree at 500 ms.
 - **`make perf-budget` + `scripts/dev/perf-budget.sh` (new)** — the p95
   budget re-run path: runs the five ~100k fixtures against the compose
   stack one package at a time with `-v`, parses each shape's final
@@ -77,16 +85,25 @@
   docs/schema/procurement.md (updated: the invoice list section replaced
   its #41 60k-row deferral with the #56 100k evidence and the leakproof
   finding; the vendor/requisition sections cross-reference it; the
-  dashboard section records the tightened budget and clean measurement).
+  dashboard section records the reconciled 500 ms budget and both
+  measurements).
 
 ## Decisions
 
 1. **Maintainer decisions 1–3 applied as recorded on the issue** (see
-   Provenance). Decision 3 resolved as **branch A**: the clean-dashboard
-   measurement (median ~165 ms, p95 ~199 ms with the 0014 indexes already
-   in the repo) meets FR-09's 300 ms with ~34% headroom and required *no*
-   new query/index work — no "banyak pertimbangan" — so the budget was
-   tightened and §19 reconciled rather than the PRD relaxed to 500 ms.
+   Provenance). Decision 3 went through both of its branches, each decided
+   by measurement: the clean dev fixture (median ~165 ms, p95 ~199 ms with
+   the 0014 indexes already in the repo) met FR-09's 300 ms with ~34%
+   headroom, so the budget was first tightened to 300 ms (branch A). **CI
+   round 1 (run 41290280970) reversed it**: on the CI runner, where the
+   budget is enforced with the five fixtures' measurement loops
+   overlapping, the summary read median ~275–282 ms / p95 307–783 ms and
+   failed the 300 ms budget on all three attempts. Closing that gap would
+   take a query redesign of the spend/pending widgets — the maintainer's
+   "banyak pertimbangan" fork — so the enforced budget returned to §19's
+   500 ms and **PRD FR-09 was reconciled to < 500 ms** instead (branch B).
+   FR-09, §19, and the enforced budget now agree at 500 ms; the dev-side
+   sub-300 measurement is recorded in docs/perf.md as context.
 2. **Migration 0015 ships as a no-DDL decision record, and that is the
    measured answer, not a shortcut.** The plan's "(final name/content
    decided by measurement)" clause resolved to zero indexes: candidate
@@ -146,10 +163,9 @@
   -count=1` — all PASS (their scale tests included).
 - `go test ./services/procurement/dashboard -run TestStoreSummaryScale100k
   -count=1 -v -timeout 20m` on the cleaned database — PASS, first attempt:
-  median 165.5 ms, p95 198.6 ms (against the old 500 ms budget; the
-  tightened 300 ms budget then PASSed inside the full-suite run below).
-  A first measurement taken while the experiment fixtures (~100k extra
-  POs) were still loaded read p95 251 ms — discarded as polluted and
+  median 165.5 ms, p95 198.6 ms. A first measurement taken while the
+  experiment fixtures (~100k extra POs) were still loaded read p95 251 ms —
+  discarded as polluted and
   re-measured after cleanup.
 - Index experiments (psql against the compose PostgreSQL, all under
   `BEGIN; SELECT set_config('role','eproc_app',true);
@@ -174,12 +190,20 @@
   1. All five fixtures against one database with the measurement loops
      overlapping (the CI-like condition): **every shape passed on its first
      attempt — no retries fired**; worst rows: PO combined p95 96 ms,
-     dashboard summary p95 198 ms vs the tightened 300 ms budget. The
-     per-shape table is in docs/perf.md §3.
+     dashboard summary p95 198 ms. The per-shape table is in docs/perf.md
+     §3.
   2. The final script (sequential per package, per-package attribution —
      the first version collapsed identically-named shapes across packages,
      caught and fixed during this validation): exit 0, all 18 shapes PASS,
      dashboard summary p95 224 ms on a quiet database.
+- **CI round 1 (run 41290280970, job 124799911705)** — the Web job passed;
+  the Go job failed on exactly one test, the tightened 300 ms dashboard
+  budget: attempt 1/3 p95 307 ms, attempt 2/3 p95 356 ms, attempt 3/3
+  p95 783 ms (median 275–282 ms on the first two). Every other package
+  passed, including the invoice scale test introduced here (42.5 s) and the
+  four batched stores. This is the measurement that re-resolved maintainer
+  decision 3 to branch B (see Decisions 1); the fix commit restores the
+  500 ms budget and reconciles PRD FR-09 accordingly.
 - `make help` lists `perf-budget`; `bash -n scripts/dev/perf-budget.sh`
   clean; the parser was additionally verified against a synthetic
   busting-attempt log (FAIL row + exit 1) and both real logs.
