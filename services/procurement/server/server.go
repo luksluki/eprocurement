@@ -10,6 +10,7 @@ import (
 	"github.com/luksluki/eprocurement/internal/platform/grpcserver"
 	"github.com/luksluki/eprocurement/internal/platform/rbac"
 	"github.com/luksluki/eprocurement/services/procurement/approval"
+	"github.com/luksluki/eprocurement/services/procurement/dashboard"
 	"github.com/luksluki/eprocurement/services/procurement/goodsreceipt"
 	"github.com/luksluki/eprocurement/services/procurement/invoice"
 	"github.com/luksluki/eprocurement/services/procurement/match"
@@ -46,7 +47,9 @@ const ServiceName = "procurement"
 // same money-records gate as creating one (the finance reviewer persona,
 // PRD §5; no new permission for the match action). Configuring match
 // tolerances is admin-only (match:configure has no non-admin role — the
-// approval:configure twin).
+// approval:configure twin). The dashboard summary (#52) is the broad
+// dashboard:read — every role, tenant-wide; it only aggregates reads those
+// roles already hold (FR-09's landing page).
 var methodPermissions = rbac.MethodPermissions{
 	"/procurement.v1.Procurement/CreateVendor":             rbac.VendorWrite,
 	"/procurement.v1.Procurement/GetVendor":                rbac.VendorRead,
@@ -75,10 +78,11 @@ var methodPermissions = rbac.MethodPermissions{
 	"/procurement.v1.Procurement/MatchInvoice":             rbac.InvoiceWrite,
 	"/procurement.v1.Procurement/GetMatchSettings":         rbac.MatchConfigure,
 	"/procurement.v1.Procurement/ReplaceMatchSettings":     rbac.MatchConfigure,
+	"/procurement.v1.Procurement/GetDashboard":             rbac.DashboardRead,
 }
 
 // New returns a grpcserver.Server with the procurement API registered.
-func New(log *slog.Logger, pinger grpcserver.Pinger, store *vendor.Store, requisitions *requisition.Store, approvals *approval.Store, purchaseOrders *purchaseorder.Store, goodsReceipts *goodsreceipt.Store, invoices *invoice.Store, matches *match.Store, opts ...grpcserver.Option) *grpcserver.Server {
+func New(log *slog.Logger, pinger grpcserver.Pinger, store *vendor.Store, requisitions *requisition.Store, approvals *approval.Store, purchaseOrders *purchaseorder.Store, goodsReceipts *goodsreceipt.Store, invoices *invoice.Store, matches *match.Store, dashboards *dashboard.Store, opts ...grpcserver.Option) *grpcserver.Server {
 	srv := grpcserver.New(log, pinger, append([]grpcserver.Option{
 		grpcserver.WithServiceName(ServiceName),
 		grpcserver.WithUnary(rbac.UnaryInterceptor(methodPermissions)),
@@ -86,7 +90,7 @@ func New(log *slog.Logger, pinger grpcserver.Pinger, store *vendor.Store, requis
 	procurementv1.RegisterProcurementServer(srv.GRPC(), &api{
 		store: store, requisitions: requisitions, approvals: approvals,
 		purchaseOrders: purchaseOrders, goodsReceipts: goodsReceipts,
-		invoices: invoices, matches: matches, log: log,
+		invoices: invoices, matches: matches, dashboards: dashboards, log: log,
 	})
 	return srv
 }

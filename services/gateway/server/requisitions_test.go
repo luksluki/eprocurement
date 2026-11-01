@@ -161,6 +161,12 @@ func (f *fakeRequisitionClient) ReplaceMatchSettings(ctx context.Context, in *pr
 	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
 }
 
+// The #52 dashboard method satisfies the widened ProcurementClient interface;
+// the dashboard tests use their own fake with recording.
+func (f *fakeRequisitionClient) GetDashboard(ctx context.Context, in *procurementv1.GetDashboardRequest, opts ...grpc.CallOption) (*procurementv1.DashboardSummary, error) {
+	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
+}
+
 func (f *fakeRequisitionClient) GetApprovalRules(ctx context.Context, in *procurementv1.GetApprovalRulesRequest, opts ...grpc.CallOption) (*procurementv1.ApprovalRulesResponse, error) {
 	return &procurementv1.ApprovalRulesResponse{}, nil
 }
