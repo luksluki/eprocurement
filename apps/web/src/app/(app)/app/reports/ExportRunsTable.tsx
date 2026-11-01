@@ -13,7 +13,7 @@
 // invalidates ["export-runs"], so the manual run appears in the history
 // once the worker records it (trigger badge "manual").
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import type { ExportRunsPage } from "@/lib/gateway";
 
@@ -68,10 +68,28 @@ export default function ExportRunsTable({
 }) {
   const pathname = usePathname();
   const queryClient = useQueryClient();
+  // The manual trigger answers 202 before the worker records the run, so a
+  // single invalidation can lose the race (refetchOnWindowFocus is off in
+  // Providers). Until the manual-run count grows past its value at trigger
+  // time, the history polls every 2 s — capped at 30 s so a down worker
+  // never polls forever (the row then lands on the next mount/refetch).
+  const [polling, setPolling] = useState(false);
+  const manualRunsAtTrigger = useRef(0);
   const { data, isPending, isError, error, refetch } = useQuery({
     queryKey: ["export-runs"],
     queryFn: fetchRuns,
+    refetchInterval: polling ? 2000 : false,
   });
+  const manualRunCount = (data?.runs ?? []).filter((r) => r.trigger === "manual").length;
+  useEffect(() => {
+    if (!polling) return;
+    if (manualRunCount > manualRunsAtTrigger.current) {
+      setPolling(false);
+      return;
+    }
+    const stop = setTimeout(() => setPolling(false), 30_000);
+    return () => clearTimeout(stop);
+  }, [polling, manualRunCount]);
   const [triggerState, setTriggerState] = useState<"idle" | "busy" | "failed">("idle");
 
   // A 401 from the BFF means the access token expired: run the refresh
@@ -86,11 +104,16 @@ export default function ExportRunsTable({
   async function trigger() {
     setTriggerState("busy");
     try {
+      manualRunsAtTrigger.current = (
+        queryClient.getQueryData<ExportRunsPage>(["export-runs"])?.runs ?? []
+      ).filter((r) => r.trigger === "manual").length;
       await requestExport();
-      // The run is queued; the worker records it shortly — refetch so the
-      // manual row appears in the history (AC: manual export appears in
-      // run history).
+      // The run is queued; the worker records it shortly — the immediate
+      // invalidation races that write, so polling (above) keeps the history
+      // fresh until the manual row actually lands (AC: manual export
+      // appears in run history).
       setTriggerState("idle");
+      setPolling(true);
       await queryClient.invalidateQueries({ queryKey: ["export-runs"] });
     } catch (e) {
       if (e instanceof UnauthorizedError) {

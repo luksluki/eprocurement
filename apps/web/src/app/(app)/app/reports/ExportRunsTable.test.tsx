@@ -224,6 +224,46 @@ describe("ExportRunsTable", () => {
     expect(screen.getByTestId("run-manual").textContent).toBe(copy.manualBadge);
   });
 
+  it("keeps polling after the trigger until the manual run lands (worker race)", { timeout: 20_000 }, async () => {
+    // The real sequence: the trigger answers 202 before the worker records
+    // the run, so the immediate invalidation refetch can come back WITHOUT
+    // the manual row. Polling (2 s interval, 30 s cap) must keep the
+    // history fresh until the row lands — and stop once it has.
+    const base: ExportRunsPage = { runs: [run({ run_id: "a" })] };
+    const withManual: ExportRunsPage = {
+      runs: [run({ run_id: "a" }), run({ run_id: "b", trigger: "manual" })],
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(base)) // initial history
+      .mockResolvedValueOnce(jsonResponse({ status: "requested", event_id: "ev-53" }, 202)) // trigger
+      .mockResolvedValueOnce(jsonResponse(base)) // invalidation refetch — worker not done yet (the race)
+      .mockResolvedValueOnce(jsonResponse(base)) // poll 1 — still not done
+      .mockResolvedValueOnce(jsonResponse(withManual)); // poll 2 — the manual run lands
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderTable(true);
+    await waitFor(() => expect(screen.getByTestId("trigger-export")).toBeTruthy());
+
+    fireEvent.click(screen.getByTestId("trigger-export"));
+
+    // The immediate refetch lost the race: no manual row yet.
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3), { timeout: 5_000 });
+    expect(screen.queryByTestId("run-b")).toBeNull();
+
+    // Poll 1 (t+2s): still nothing.
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4), { timeout: 5_000 });
+    expect(screen.queryByTestId("run-b")).toBeNull();
+
+    // Poll 2 (t+4s): the manual run lands.
+    await waitFor(() => expect(screen.getByTestId("run-b")).toBeTruthy(), { timeout: 5_000 });
+    expect(screen.getByTestId("run-manual").textContent).toBe(copy.manualBadge);
+
+    // Polling stopped once the row appeared — no further fetches.
+    await new Promise((r) => setTimeout(r, 2_500));
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+  });
+
   it("shows the trigger failure state when the queue POST fails", async () => {
     const page: ExportRunsPage = { runs: [run({ run_id: "a" })] };
     const fetchMock = vi
