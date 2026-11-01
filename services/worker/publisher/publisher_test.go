@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"regexp"
 	"sync"
 	"testing"
 	"time"
@@ -16,6 +17,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	amqp "github.com/rabbitmq/amqp091-go"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/luksluki/eprocurement/internal/platform/telemetry"
 
 	"github.com/luksluki/eprocurement/internal/platform/dbmigrate"
 	"github.com/luksluki/eprocurement/internal/platform/tenant"
@@ -567,5 +572,59 @@ func TestLoopUpdatesLagGauge(t *testing.T) {
 				t.Fatalf("lag readings = %v, want [%s]", got, *tc.want)
 			}
 		})
+	}
+}
+
+// AC #54 (publisher linkage): the outbox row's trace_id is the ONLY trace
+// anchor (#31 schema: no span id column), so the publish span must carry
+// the ROW's trace id and the injected traceparent header must match
+// 00-<env.TraceID>-<16 hex>-<flags> — a fresh trace here would break the
+// "one PO flow = one trace" demo (PRD §22).
+func TestPublishContextLinksOutboxRowTrace(t *testing.T) {
+	const rowTraceID = "0af7651916cd43dd8448eb211c80319c"
+	env := Envelope{EventID: "ev-1", Type: "po.issued", TraceID: rowTraceID}
+
+	ctx, span := publishContext(context.Background(), env)
+	defer span.End()
+	if got := trace.SpanContextFromContext(ctx).TraceID().String(); got != rowTraceID {
+		t.Fatalf("publish span trace id = %q, want the outbox row's %q", got, rowTraceID)
+	}
+
+	headers := amqp.Table{}
+	telemetry.InjectAMQP(ctx, headers)
+	tp, _ := headers["traceparent"].(string)
+	var re = regexp.MustCompile(`^00-` + rowTraceID + `-([0-9a-f]{16})-([0-9a-f]{2})$`)
+	if !re.MatchString(tp) {
+		t.Fatalf("traceparent header = %q, want 00-%s-<16 hex>-<2 hex>", tp, rowTraceID)
+	}
+}
+
+// A context that already carries a span is never re-parented by the row's
+// trace id (the existing trace wins).
+func TestPublishContextKeepsExistingSpan(t *testing.T) {
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+	ctx, span := tp.Tracer("test").Start(context.Background(), "existing")
+	defer span.End()
+	want := span.SpanContext().TraceID().String()
+
+	ctx, pubSpan := publishContext(ctx, Envelope{TraceID: "0af7651916cd43dd8448eb211c80319c"})
+	defer pubSpan.End()
+	if got := trace.SpanContextFromContext(ctx).TraceID().String(); got != want {
+		t.Fatalf("trace id = %q, want the existing span's %q", got, want)
+	}
+}
+
+// Failure-shaped row (empty trace_id, pre-#31 data): nothing is invented
+// for the header — the message publishes without traceparent and the
+// consumer's envelope fallback covers it.
+func TestPublishContextWithoutTraceIDInjectsNothing(t *testing.T) {
+	ctx, span := publishContext(context.Background(), Envelope{Type: "pr.submitted"})
+	defer span.End()
+
+	headers := amqp.Table{}
+	telemetry.InjectAMQP(ctx, headers)
+	if _, ok := headers["traceparent"]; ok {
+		t.Fatal("traceparent injected although no trace context exists")
 	}
 }

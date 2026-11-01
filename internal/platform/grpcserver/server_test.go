@@ -12,12 +12,15 @@ import (
 
 	"github.com/luksluki/eprocurement/internal/platform/logger"
 	"github.com/luksluki/eprocurement/internal/platform/metrics"
+	"github.com/luksluki/eprocurement/internal/platform/telemetry"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 // fakePinger flips on demand to drive readiness transitions.
@@ -284,5 +287,67 @@ func TestMetricsInterceptorInChain(t *testing.T) {
 	bare := New(log, &fakePinger{}, WithServiceName("test-svc"), WithHealthInterval(-1))
 	if bare == nil {
 		t.Fatal("New without WithMetrics returned nil")
+	}
+}
+
+// AC #54 (interceptor order): the OTel server interceptor is chained FIRST
+// — before the legacy TraceInterceptor — over a REAL server, with the
+// client sending traceparent (injected by the OTel client interceptor from
+// a real span) plus a DIFFERENT legacy x-trace-id. The handler must see
+// logger.TraceID(ctx) equal the SPAN's trace id: the span wins over the
+// legacy metadata, so logs, outbox rows, and Jaeger can never disagree.
+func TestOTelInterceptorFirstSpanWinsOverLegacyTraceID(t *testing.T) {
+	log := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
+	srv := New(log, &fakePinger{}, WithServiceName("test-svc"), WithHealthInterval(-1))
+
+	var handlerTraceID string
+	// The MethodDesc.Handler contract (what generated pb code does): the
+	// interceptor chain arrives as a parameter and the handler invokes it.
+	invoke := func(ctx context.Context, _ any) (any, error) {
+		handlerTraceID = logger.TraceID(ctx)
+		return nil, nil
+	}
+	srv.GRPC().RegisterService(&grpc.ServiceDesc{
+		ServiceName: "test.Trace",
+		Methods: []grpc.MethodDesc{{
+			MethodName: "Call",
+			Handler: func(_ any, ctx context.Context, _ func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+				if interceptor == nil {
+					return invoke(ctx, nil)
+				}
+				return interceptor(ctx, nil, &grpc.UnaryServerInfo{FullMethod: "/test.Trace/Call"}, invoke)
+			},
+		}},
+	}, nil)
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() { _ = srv.Serve(context.Background(), lis) }()
+	defer func() { _ = lis.Close() }()
+
+	conn, err := grpc.NewClient(lis.Addr().String(),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithUnaryInterceptor(telemetry.GRPCUnaryClientInterceptor()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	// A real span (local SDK provider — no globals, no export) parents the
+	// call; x-trace-id deliberately carries a DIFFERENT value.
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+	ctx, span := tp.Tracer("test").Start(context.Background(), "http GET /api/v1/x")
+	defer span.End()
+	want := span.SpanContext().TraceID().String()
+	ctx = metadata.AppendToOutgoingContext(ctx, "x-trace-id", "ffffffffffffffffffffffffffffffff")
+
+	if err := conn.Invoke(ctx, "/test.Trace/Call", &emptypb.Empty{}, &emptypb.Empty{}); err != nil {
+		t.Fatalf("invoke: %v", err)
+	}
+	if handlerTraceID != want {
+		t.Fatalf("handler trace id = %q, want the span's %q (legacy x-trace-id must not win)", handlerTraceID, want)
 	}
 }

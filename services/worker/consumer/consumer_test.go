@@ -12,6 +12,10 @@ import (
 	"testing"
 	"time"
 
+	amqp "github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/luksluki/eprocurement/internal/platform/telemetry"
 	"github.com/luksluki/eprocurement/services/worker/publisher"
 	"github.com/luksluki/eprocurement/services/worker/topology"
 )
@@ -138,5 +142,66 @@ func TestRunReturnsNilWhenCancelledWithoutBroker(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Run did not return after cancel")
+	}
+}
+
+// AC #54 (consumer linkage): the delivery's trace context comes from the
+// traceparent header the publisher injected; messages published before #54
+// (no header) fall back to the ENVELOPE's trace_id — either way the
+// consume span joins the PO flow's trace instead of starting a new one.
+func TestTraceContext(t *testing.T) {
+	const headerTraceID = "0af7651916cd43dd8448eb211c80319c"
+	const envelopeTraceID = "bbb7651916cd43dd8448eb211c80319c"
+
+	cases := []struct {
+		name    string
+		headers amqp.Table
+		want    string
+	}{
+		{
+			"traceparent header wins",
+			amqp.Table{"traceparent": "00-" + headerTraceID + "-00f067aa0ba902b7-01"},
+			headerTraceID,
+		},
+		{
+			"no header falls back to the envelope trace_id",
+			nil,
+			envelopeTraceID,
+		},
+		{
+			"garbage header falls back to the envelope trace_id",
+			amqp.Table{"traceparent": "not-a-traceparent"},
+			envelopeTraceID,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := validEnvelope()
+			env.TraceID = envelopeTraceID
+
+			ctx := traceContext(context.Background(), tc.headers, env)
+			sc := trace.SpanContextFromContext(ctx)
+			if !sc.IsValid() {
+				t.Fatal("no span context restored for the delivery")
+			}
+			if got := sc.TraceID().String(); got != tc.want {
+				t.Fatalf("trace id = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The consume span is parented by the restored context — the delivery's
+// trace id survives into the span the worker records.
+func TestStartConsumeSpanKeepsDeliveryTrace(t *testing.T) {
+	const envelopeTraceID = "ccc7651916cd43dd8448eb211c80319c"
+	env := validEnvelope()
+	env.TraceID = envelopeTraceID
+
+	ctx := traceContext(context.Background(), nil, env)
+	ctx, span := telemetry.StartConsumeSpan(ctx, topology.DocumentsHistoryQueue)
+	defer span.End()
+	if got := trace.SpanContextFromContext(ctx).TraceID().String(); got != envelopeTraceID {
+		t.Fatalf("consume span trace id = %q, want the delivery's %q", got, envelopeTraceID)
 	}
 }

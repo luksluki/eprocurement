@@ -50,6 +50,7 @@ import (
 
 	"github.com/luksluki/eprocurement/internal/platform/logger"
 	"github.com/luksluki/eprocurement/internal/platform/metrics"
+	"github.com/luksluki/eprocurement/internal/platform/telemetry"
 	exportstore "github.com/luksluki/eprocurement/services/documents/export"
 	"github.com/luksluki/eprocurement/services/documents/history"
 	"github.com/luksluki/eprocurement/services/documents/notifications"
@@ -76,13 +77,28 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// #54: the OTel SDK — spans for the outbox publish, the consumer
+	// settles, the pgx queries and redis commands below. Empty endpoint =
+	// SDK active, nothing exported.
+	tp, err := telemetry.Setup(ctx, "worker", cfg.Env, cfg.OTLPEndpoint)
+	if err != nil {
+		return fmt.Errorf("setup telemetry: %w", err)
+	}
+	defer telemetry.Shutdown(context.Background(), tp, 5*time.Second)
+
 	// Metrics half (#55): the process gauges (outbox lag from the publisher
 	// loop, DLQ depth from the monitor, export age from the refresher
 	// below) and the /metrics server that publishes them.
 	mc := metrics.New()
 
-	// Publisher half (#45): postgres pool + broker connection with retry.
-	db, err := pgxpool.New(context.Background(), cfg.DatabaseURL)
+	// Publisher half (#45): postgres pool (with the #54 pgx query tracer —
+	// the outbox Pending/MarkPublished and the export register queries get
+	// spans) + broker connection with retry.
+	poolCfg, err := telemetry.PGXPoolConfig(cfg.DatabaseURL)
+	if err != nil {
+		return fmt.Errorf("parse database url: %w", err)
+	}
+	db, err := pgxpool.NewWithConfig(context.Background(), poolCfg)
 	if err != nil {
 		return fmt.Errorf("open database pool: %w", err)
 	}
@@ -144,8 +160,9 @@ func run() error {
 	// Export half (#49): Redis (lock + heartbeat), MinIO (the single
 	// S3_BUCKET documents presigns from), the run-history indexes, then
 	// the scheduler — constructed fail-fast on a bad schedule/zone or a
-	// TTL that does not exceed the job budget.
-	rdb, err := connectRedis(ctx, cfg.RedisURL, log)
+	// TTL that does not exceed the job budget. Since #54 the client also
+	// carries the redis span hook (one span per command/pipeline).
+	rdb, err := connectRedis(ctx, cfg.RedisURL, log, telemetry.RedisHook{})
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil // shutdown during boot: not an error
@@ -295,13 +312,16 @@ func connectMongo(ctx context.Context, uri string, log *slog.Logger) (*mongo.Cli
 
 // connectRedis dials and pings Redis with exponential backoff (1 s → 10 s
 // cap) until the server answers or ctx ends (#49: the export lock and
-// heartbeat live there).
-func connectRedis(ctx context.Context, url string, log *slog.Logger) (*redis.Client, error) {
+// heartbeat live there). hooks (may be empty) installs the #54 span hook.
+func connectRedis(ctx context.Context, url string, log *slog.Logger, hooks ...redis.Hook) (*redis.Client, error) {
 	opts, err := redis.ParseURL(url)
 	if err != nil {
 		return nil, fmt.Errorf("parse redis url: %w", err)
 	}
 	client := redis.NewClient(opts)
+	for _, h := range hooks {
+		client.AddHook(h)
+	}
 	backoff := time.Second
 	for {
 		pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)

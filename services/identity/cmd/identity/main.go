@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -21,6 +22,7 @@ import (
 	platformjwt "github.com/luksluki/eprocurement/internal/platform/jwt"
 	"github.com/luksluki/eprocurement/internal/platform/logger"
 	"github.com/luksluki/eprocurement/internal/platform/metrics"
+	"github.com/luksluki/eprocurement/internal/platform/telemetry"
 	"github.com/luksluki/eprocurement/services/identity/auth"
 	identityconfig "github.com/luksluki/eprocurement/services/identity/config"
 	"github.com/luksluki/eprocurement/services/identity/migrations"
@@ -59,11 +61,29 @@ func run() error {
 		log.Info("migrations applied", "count", len(applied), "names", applied)
 	}
 
-	db, err := pgxpool.New(context.Background(), cfg.DatabaseURL)
+	// #54: the runtime pool carries the pgx query tracer (one span per SQL
+	// statement, no parameters recorded). The migration pool above is
+	// deliberately excluded — boot-time, simple protocol, once per deploy
+	// (see docs/dev-notes/054).
+	poolCfg, err := telemetry.PGXPoolConfig(cfg.DatabaseURL)
+	if err != nil {
+		return fmt.Errorf("parse database url: %w", err)
+	}
+	db, err := pgxpool.NewWithConfig(context.Background(), poolCfg)
 	if err != nil {
 		return fmt.Errorf("open database pool: %w", err)
 	}
 	defer db.Close()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// #54: the OTel SDK — empty endpoint = SDK active, nothing exported.
+	tp, err := telemetry.Setup(ctx, "identity", cfg.Env, cfg.OTLPEndpoint)
+	if err != nil {
+		return fmt.Errorf("setup telemetry: %w", err)
+	}
+	defer telemetry.Shutdown(context.Background(), tp, 5*time.Second)
 
 	priv, err := signingKey(log, "IDENTITY_JWT_KEY", cfg.JWTKeySeed)
 	if err != nil {
@@ -76,9 +96,6 @@ func run() error {
 		}
 	}
 	authSvc := auth.New(db, log, auth.NewKeyring(priv, previous), cfg.LoginRatePerMin)
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	// #55: gRPC latency histogram + the /metrics server below.
 	mc := metrics.New()

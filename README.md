@@ -76,8 +76,9 @@ make help              # all targets
 | gateway (REST) | http://localhost:8080 (`/healthz`, `/.well-known/jwks.json`) |
 | Prometheus (#55, observability profile) | http://localhost:9090 — scrapes the services' container-internal `/metrics` ports (9100–9104) |
 | Grafana (#55, observability profile) | http://localhost:3001 — admin/`GRAFANA_ADMIN_PASSWORD`, dashboard auto-provisioned |
+| Jaeger UI (#54, observability profile) | http://localhost:16686 — spans for one PO request flow as ONE trace: gateway → gRPC → pgx → outbox publish → consume |
 
-Run `docker compose --profile observability up -d` to add Prometheus and Grafana; the default stack stays lean (the profile deviation from PRD §14.9 is recorded in `docs/dev-notes/055`).
+Run `docker compose --profile observability up -d` to add Prometheus, Grafana, and the Jaeger trace UI (#54); the default stack stays lean (the profile deviation from PRD §14.9 is recorded in `docs/dev-notes/055`).
 
 Reset the local stack (drops volumes): `make reset`.
 

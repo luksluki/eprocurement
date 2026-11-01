@@ -41,11 +41,27 @@ import (
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel/trace"
 
+	"github.com/luksluki/eprocurement/internal/platform/telemetry"
 	"github.com/luksluki/eprocurement/services/documents/history"
 	"github.com/luksluki/eprocurement/services/worker/publisher"
 	"github.com/luksluki/eprocurement/services/worker/topology"
 )
+
+// traceContext restores a delivery's trace context (#54): the W3C
+// traceparent the publisher injected into the message headers when
+// present, else the envelope's trace_id synthesized as a remote parent —
+// the fallback for messages published before #54 (and for rows whose
+// trace_id is empty: nothing is invented, the consume span starts a fresh
+// root trace).
+func traceContext(ctx context.Context, headers amqp.Table, env publisher.Envelope) context.Context {
+	ctx = telemetry.ExtractAMQP(ctx, headers)
+	if !trace.SpanContextFromContext(ctx).IsValid() {
+		ctx = telemetry.ContextWithTraceIDString(ctx, env.TraceID)
+	}
+	return ctx
+}
 
 // dialTimeout bounds one AMQP dial attempt.
 const dialTimeout = 10 * time.Second
@@ -305,6 +321,13 @@ func (r *Runner) handle(ctx context.Context, ch *amqp.Channel, td taggedDelivery
 		return
 	}
 
+	// #54: one consumer span per delivery, parented by the publisher's
+	// trace (traceparent header, or the envelope trace_id for pre-#54
+	// messages) — the closing leg of "one PO flow = one trace".
+	ctx = traceContext(ctx, d.Headers, env)
+	ctx, span := telemetry.StartConsumeSpan(ctx, queue)
+	defer span.End()
+
 	hctx, cancel := context.WithTimeout(ctx, r.deliveryTimeout)
 	applied, err := r.handlers[queue].Apply(hctx, ev)
 	cancel()
@@ -348,12 +371,15 @@ func (r *Runner) handle(ctx context.Context, ch *amqp.Channel, td taggedDelivery
 
 // publishRetry parks a copy of the delivery on the retry-tier queue via the
 // default exchange (routing key = queue name) with the retry count raised.
+// The headers are re-injected with the CURRENT (consume) span context, so
+// the copy that later returns from the retry tier carries the same trace.
 func publishRetry(ctx context.Context, ch *amqp.Channel, target string, d amqp.Delivery, count int32) error {
 	headers := amqp.Table{}
 	for k, v := range d.Headers {
 		headers[k] = v
 	}
 	headers[topology.RetryCountHeader] = count
+	telemetry.InjectAMQP(ctx, headers)
 	pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	return ch.PublishWithContext(pctx, "", target, false, false, amqp.Publishing{

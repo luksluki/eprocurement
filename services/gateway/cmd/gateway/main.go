@@ -23,6 +23,7 @@ import (
 	procurementv1 "github.com/luksluki/eprocurement/gen/go/procurement/v1"
 	"github.com/luksluki/eprocurement/internal/platform/logger"
 	"github.com/luksluki/eprocurement/internal/platform/metrics"
+	"github.com/luksluki/eprocurement/internal/platform/telemetry"
 	gatewayconfig "github.com/luksluki/eprocurement/services/gateway/config"
 	"github.com/luksluki/eprocurement/services/gateway/dlq"
 	"github.com/luksluki/eprocurement/services/gateway/server"
@@ -44,12 +45,26 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// #54: the OTel SDK — the edge is where every request trace starts
+	// (the HTTP middleware in services/gateway/server). Empty endpoint =
+	// SDK active but nothing exported (local/CI).
+	tp, err := telemetry.Setup(ctx, "gateway", cfg.Env, cfg.OTLPEndpoint)
+	if err != nil {
+		return fmt.Errorf("setup telemetry: %w", err)
+	}
+	defer telemetry.Shutdown(context.Background(), tp, 5*time.Second)
+
 	// #55: the process's Prometheus collectors — the request-latency
 	// histogram below and the /metrics server at the bottom of run.
 	mc := metrics.New()
 
+	// #54: the OTel client interceptor injects the W3C traceparent of the
+	// request span (forwardContext built the outgoing ctx from it) into
+	// every proxied call's metadata.
+	otelDial := grpc.WithUnaryInterceptor(telemetry.GRPCUnaryClientInterceptor())
+
 	conn, err := grpc.NewClient(cfg.IdentityAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
+		grpc.WithTransportCredentials(insecure.NewCredentials()), otelDial)
 	if err != nil {
 		return fmt.Errorf("dial identity %s: %w", cfg.IdentityAddr, err)
 	}
@@ -61,14 +76,14 @@ func run() error {
 	)
 
 	procurementConn, err := grpc.NewClient(cfg.ProcurementAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
+		grpc.WithTransportCredentials(insecure.NewCredentials()), otelDial)
 	if err != nil {
 		return fmt.Errorf("dial procurement %s: %w", cfg.ProcurementAddr, err)
 	}
 	defer func() { _ = procurementConn.Close() }()
 
 	documentsConn, err := grpc.NewClient(cfg.DocumentsAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(insecure.NewCredentials()), otelDial,
 		// #44: the audit CSV export rides one unary response (bounded by
 		// documents at the newest 10 000 rows, metadata columns only — a few
 		// MB at worst). The gRPC default receive limit is 4 MiB, so the dial
@@ -98,7 +113,8 @@ func run() error {
 	log.Info("starting gateway", "port", cfg.Port,
 		"identity_addr", cfg.IdentityAddr, "procurement_addr", cfg.ProcurementAddr,
 		"documents_addr", cfg.DocumentsAddr, "login_rate_per_min", cfg.LoginRatePerMin,
-		"trusted_proxies", len(cfg.TrustedProxies), "metrics_port", cfg.MetricsPort)
+		"trusted_proxies", len(cfg.TrustedProxies), "metrics_port", cfg.MetricsPort,
+		"otlp_endpoint", cfg.OTLPEndpoint)
 
 	// #55: the /metrics server runs on its container-internal port until
 	// shutdown. A listen failure cancels the signal context so the main

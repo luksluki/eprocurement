@@ -19,6 +19,7 @@ import (
 	"github.com/luksluki/eprocurement/internal/platform/grpcserver"
 	"github.com/luksluki/eprocurement/internal/platform/logger"
 	"github.com/luksluki/eprocurement/internal/platform/metrics"
+	"github.com/luksluki/eprocurement/internal/platform/telemetry"
 	"github.com/luksluki/eprocurement/services/documents/attachment"
 	documentsconfig "github.com/luksluki/eprocurement/services/documents/config"
 	exportstore "github.com/luksluki/eprocurement/services/documents/export"
@@ -41,6 +42,15 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// #54: the OTel SDK — documents' Mongo calls stay un-instrumented for
+	// now (CommandMonitor carries no context; maintainer decision, issue
+	// #54 comment 2); the gRPC request spans still export.
+	tp, err := telemetry.Setup(ctx, "documents", cfg.Env, cfg.OTLPEndpoint)
+	if err != nil {
+		return fmt.Errorf("setup telemetry: %w", err)
+	}
+	defer telemetry.Shutdown(context.Background(), tp, 5*time.Second)
 
 	// #55: gRPC latency histogram + the /metrics server below.
 	mc := metrics.New()
