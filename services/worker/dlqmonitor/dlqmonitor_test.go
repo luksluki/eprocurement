@@ -9,7 +9,9 @@ package dlqmonitor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"sync"
@@ -218,5 +220,49 @@ func TestDepthReadsSeededDLQ(t *testing.T) {
 		if n != 2 {
 			t.Fatalf("readings = %v, want the seeded depth 2", seen)
 		}
+	}
+}
+
+// AC #55 (DLQ depth gauge): a successful tick reaches SetDepth with the
+// broker's count; a failed tick reports nothing so the gauge keeps its
+// last real value instead of faking a fresh one.
+func TestTickSetsDepthGauge(t *testing.T) {
+	cases := []struct {
+		name     string
+		depthFn  func(ctx context.Context, url string, topo topology.Topology) (int, error)
+		wantRead bool
+		want     int
+	}{
+		{
+			name:     "successful read publishes the depth",
+			depthFn:  func(context.Context, string, topology.Topology) (int, error) { return 367, nil },
+			wantRead: true, want: 367,
+		},
+		{
+			name:     "broker failure publishes nothing",
+			depthFn:  func(context.Context, string, topology.Topology) (int, error) { return 0, errors.New("broker down") },
+			wantRead: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []int
+			m := &Monitor{
+				URL:      "unused (depthFn stubbed)",
+				Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+				SetDepth: func(n int) { got = append(got, n) },
+			}
+			m.depthFn = tc.depthFn
+			m.tick(context.Background())
+			if tc.wantRead {
+				if len(got) != 1 || got[0] != tc.want {
+					t.Fatalf("SetDepth readings = %v, want [%d]", got, tc.want)
+				}
+				return
+			}
+			if len(got) != 0 {
+				t.Fatalf("SetDepth readings = %v, want none on a failed tick", got)
+			}
+		})
 	}
 }

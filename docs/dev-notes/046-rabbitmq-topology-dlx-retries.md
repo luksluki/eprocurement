@@ -148,7 +148,10 @@ on :55432, MongoDB on :27017), commands run from the repo root:
 - **#47 consumers** consume `documents.history`/`notifications`/`exports`
   reusing `topology.Default.Declare` and the `NextRetry`/`RetryCount`
   failure helper; they will drain the dev-stack backlog described above.
-- **#48** is the DLQ admin/monitoring surface; the DLQ depth metric is #54.
+- **#48** is the DLQ admin/monitoring surface; the DLQ depth metric landed
+  with #55 (`dlq_depth_messages`). *(This line originally deferred the
+  metric to #54; corrected by #55 — a same-class fix beyond the documented
+  045/047/048 list, flagged in #55's PR body.)*
 - The notifications subset and the 4-delivery max-attempts reading are the
   maintainer-override candidates flagged in Decisions; the PR description
   should repeat them.

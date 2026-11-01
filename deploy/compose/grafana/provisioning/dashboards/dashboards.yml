@@ -1,0 +1,15 @@
+# Grafana dashboard provisioning (#55): the checked-in JSON dashboards
+# (deploy/compose/grafana/dashboards, mounted at /var/lib/grafana/dashboards
+# in compose.yaml) load automatically — no manual import.
+apiVersion: 1
+
+providers:
+  - name: eprocurement
+    folder: eProcurement
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

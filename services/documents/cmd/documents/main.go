@@ -16,7 +16,9 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
+	"github.com/luksluki/eprocurement/internal/platform/grpcserver"
 	"github.com/luksluki/eprocurement/internal/platform/logger"
+	"github.com/luksluki/eprocurement/internal/platform/metrics"
 	"github.com/luksluki/eprocurement/services/documents/attachment"
 	documentsconfig "github.com/luksluki/eprocurement/services/documents/config"
 	exportstore "github.com/luksluki/eprocurement/services/documents/export"
@@ -35,10 +37,21 @@ func main() {
 func run() error {
 	cfg := documentsconfig.Load()
 	log := logger.New("documents", cfg.Env, cfg.LogLevel)
-	log.Info("starting documents service", "port", cfg.Port)
+	log.Info("starting documents service", "port", cfg.Port, "metrics_port", cfg.MetricsPort)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// #55: gRPC latency histogram + the /metrics server below.
+	mc := metrics.New()
+	metricsDone := make(chan error, 1)
+	go func() {
+		err := mc.Serve(ctx, ":"+cfg.MetricsPort, log)
+		if err != nil {
+			stop() // unblock the gRPC Serve; the error is returned below
+		}
+		metricsDone <- err
+	}()
 
 	mongoClient, err := mongo.Connect(ctx, options.Client().ApplyURI(cfg.MongoURI))
 	if err != nil {
@@ -83,8 +96,15 @@ func run() error {
 		return fmt.Errorf("listen %s: %w", cfg.Port, err)
 	}
 	srv := server.New(log, pinger{client: mongoClient}, store, storage,
-		attachment.Limits{MaxSizeBytes: int64(cfg.AttachmentMaxSizeMB) << 20}, events, exports)
-	return srv.Serve(ctx, lis)
+		attachment.Limits{MaxSizeBytes: int64(cfg.AttachmentMaxSizeMB) << 20}, events, exports,
+		grpcserver.WithMetrics(mc))
+	serveErr := srv.Serve(ctx, lis)
+	stop()
+	metricsErr := <-metricsDone
+	if serveErr != nil {
+		return serveErr
+	}
+	return metricsErr
 }
 
 // pinger adapts the MongoDB client to the gRPC health-check Pinger.

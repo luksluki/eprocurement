@@ -9,6 +9,7 @@ package server
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"log/slog"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ import (
 
 	procurementv1 "github.com/luksluki/eprocurement/gen/go/procurement/v1"
 	"github.com/luksluki/eprocurement/internal/platform/logger"
+	"github.com/luksluki/eprocurement/internal/platform/metrics"
 	"github.com/luksluki/eprocurement/services/gateway/token"
 	"github.com/luksluki/eprocurement/services/identity/auth"
 )
@@ -63,6 +65,7 @@ type gatewayOptions struct {
 	loginLimit     *loginLimiter
 	dlq            DLQAdmin
 	trustedProxies []string
+	metrics        *metrics.Collectors
 }
 
 // WithProcurement proxies the procurement API under /api/v1/vendors,
@@ -109,6 +112,13 @@ func WithTrustedProxies(cidrs []string) Option {
 	return func(o *gatewayOptions) { o.trustedProxies = cidrs }
 }
 
+// WithMetrics records http_request_duration_seconds{method, route, status}
+// for every request (#55, PRD §18) — the same collectors the process's
+// /metrics server on METRICS_PORT publishes.
+func WithMetrics(c *metrics.Collectors) Option {
+	return func(o *gatewayOptions) { o.metrics = c }
+}
+
 // New builds the fiber app.
 func New(log *slog.Logger, verifier *token.Verifier, opts ...Option) *fiber.App {
 	var o gatewayOptions
@@ -138,6 +148,9 @@ func New(log *slog.Logger, verifier *token.Verifier, opts ...Option) *fiber.App 
 
 	app.Use(requestLogger(log))
 	app.Use(traceID())
+	if o.metrics != nil {
+		app.Use(requestMetrics(o.metrics))
+	}
 
 	app.Get("/healthz", healthz(verifier))
 	app.Get("/.well-known/jwks.json", jwks(verifier))
@@ -263,6 +276,44 @@ func requestLogger(log *slog.Logger) fiber.Handler {
 			"duration_ms", time.Since(start).Milliseconds(),
 			"trace_id", traceIDFrom(c),
 		)
+		return err
+	}
+}
+
+// requestMetrics records http_request_duration_seconds{method, route,
+// status} per request (#55, PRD §18). Three fiber subtleties are pinned:
+// (1) the route label is the matched route TEMPLATE — c.Route() is only
+// populated once Next() has routed the request — so label cardinality
+// stays bounded (/api/v1/vendors/:id, not one series per vendor id).
+// (2) fiber renders errors (a handler's error return, the default 404)
+// in the ErrorHandler AFTER middleware unwinds, so the status must be
+// derived from the error when one is present — the response is still 200
+// inside the middleware at that point. (3) for a request that matches no
+// route, fiber's 404 is a NEWLY allocated *fiber.Error (not the
+// ErrNotFound sentinel) and c.Route() is the last matched Use route
+// ("/"), so 404/405 errors are labeled "unmatched" — visible without
+// leaking raw URIs into the label space.
+func requestMetrics(mc *metrics.Collectors) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		start := time.Now()
+		err := c.Next()
+
+		var fe *fiber.Error
+		status := c.Response().StatusCode()
+		if err != nil {
+			status = fiber.StatusInternalServerError
+			if errors.As(err, &fe) {
+				status = fe.Code
+			}
+		}
+
+		route := "unmatched"
+		if fe == nil || (fe.Code != fiber.StatusNotFound && fe.Code != fiber.StatusMethodNotAllowed) {
+			if r := c.Route(); r != nil && r.Path != "" {
+				route = r.Path
+			}
+		}
+		mc.ObserveHTTP(c.Method(), route, status, time.Since(start))
 		return err
 	}
 }

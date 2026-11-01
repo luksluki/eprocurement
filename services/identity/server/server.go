@@ -12,6 +12,7 @@ import (
 
 	identityv1 "github.com/luksluki/eprocurement/gen/go/identity/v1"
 	"github.com/luksluki/eprocurement/internal/platform/grpcserver"
+	"github.com/luksluki/eprocurement/internal/platform/metrics"
 	"github.com/luksluki/eprocurement/internal/platform/rbac"
 	"github.com/luksluki/eprocurement/services/identity/auth"
 )
@@ -30,6 +31,7 @@ type Option func(*options)
 type options struct {
 	healthInterval time.Duration
 	svc            *auth.Service
+	metrics        *metrics.Collectors
 }
 
 // WithHealthInterval overrides the readiness ping interval (tests use short values).
@@ -40,6 +42,12 @@ func WithHealthInterval(d time.Duration) Option {
 // WithIdentityAPI registers the identity.v1 API (login/refresh/logout/jwks).
 func WithIdentityAPI(svc *auth.Service) Option {
 	return func(o *options) { o.svc = svc }
+}
+
+// WithMetrics chains the #55 gRPC latency interceptor into the server; the
+// same collectors back the process's /metrics server on METRICS_PORT.
+func WithMetrics(c *metrics.Collectors) Option {
+	return func(o *options) { o.metrics = c }
 }
 
 // New returns a grpcserver.Server with identity's API registered. The
@@ -53,11 +61,15 @@ func New(log *slog.Logger, pinger Pinger, opts ...Option) *grpcserver.Server {
 		opt(&o)
 	}
 
-	srv := grpcserver.New(log, pinger,
+	platformOpts := []grpcserver.Option{
 		grpcserver.WithServiceName(ServiceName),
 		grpcserver.WithHealthInterval(o.healthInterval),
 		grpcserver.WithUnary(rbac.UnaryInterceptor(rbac.MethodPermissions{})),
-	)
+	}
+	if o.metrics != nil {
+		platformOpts = append(platformOpts, grpcserver.WithMetrics(o.metrics))
+	}
+	srv := grpcserver.New(log, pinger, platformOpts...)
 	if o.svc != nil {
 		identityv1.RegisterIdentityServer(srv.GRPC(), newAPI(log, o.svc))
 	}

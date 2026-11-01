@@ -20,6 +20,7 @@ import (
 	"github.com/luksluki/eprocurement/internal/platform/dbmigrate"
 	platformjwt "github.com/luksluki/eprocurement/internal/platform/jwt"
 	"github.com/luksluki/eprocurement/internal/platform/logger"
+	"github.com/luksluki/eprocurement/internal/platform/metrics"
 	"github.com/luksluki/eprocurement/services/identity/auth"
 	identityconfig "github.com/luksluki/eprocurement/services/identity/config"
 	"github.com/luksluki/eprocurement/services/identity/migrations"
@@ -36,7 +37,7 @@ func main() {
 func run() error {
 	cfg := identityconfig.Load()
 	log := logger.New("identity", cfg.Env, cfg.LogLevel)
-	log.Info("starting identity service", "port", cfg.Port)
+	log.Info("starting identity service", "port", cfg.Port, "metrics_port", cfg.MetricsPort)
 
 	// Migrations run on boot with a simple-protocol pool (multi-statement SQL);
 	// the runtime pool below uses the default prepared-statement mode.
@@ -79,13 +80,30 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// #55: gRPC latency histogram + the /metrics server below.
+	mc := metrics.New()
+	metricsDone := make(chan error, 1)
+	go func() {
+		err := mc.Serve(ctx, ":"+cfg.MetricsPort, log)
+		if err != nil {
+			stop() // unblock the gRPC Serve; the error is returned below
+		}
+		metricsDone <- err
+	}()
+
 	lc := net.ListenConfig{}
 	lis, err := lc.Listen(ctx, "tcp", ":"+cfg.Port)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", cfg.Port, err)
 	}
-	srv := server.New(log, db, server.WithIdentityAPI(authSvc))
-	return srv.Serve(ctx, lis)
+	srv := server.New(log, db, server.WithIdentityAPI(authSvc), server.WithMetrics(mc))
+	serveErr := srv.Serve(ctx, lis)
+	stop()
+	metricsErr := <-metricsDone
+	if serveErr != nil {
+		return serveErr
+	}
+	return metricsErr
 }
 
 // signingKey resolves one Ed25519 signing key from a base64 seed. An empty

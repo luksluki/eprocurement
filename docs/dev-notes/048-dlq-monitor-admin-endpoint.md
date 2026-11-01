@@ -14,10 +14,12 @@
 > names "hourly summary metric + admin endpoint" as two deliverables and
 > PRD §18 lists DLQ depth among future Prometheus metrics — so this
 > issue's reading (live depth in the admin response + hourly structured
-> depth log in the worker; Prometheus/OTel export deferred to #54 with
-> the observability stack, per dev-notes 045/047) is **flagged for
+> depth log in the worker; Prometheus/OTel export deferred with the
+> observability stack, per dev-notes 045/047) is **flagged for
 > maintainer sign-off in the PR body**, along with the decode_error
-> cross-tenant decision below.
+> cross-tenant decision below. *(Numbering corrected by #55: the metrics
+> half — `dlq_depth_messages` — landed with #55; the OTel/traces half
+> stays #54's.)*
 
 ## What
 
@@ -121,9 +123,10 @@
 - **Interim metric surface.** PRD §16's "hourly summary metric" is
   realized as the worker's structured depth log (hourly, `DLQ_SUMMARY_INTERVAL`);
   the admin endpoint's `depth` field is the live value. No metrics stack
-  exists in the repo yet (compose's observability profile is parked —
-  dev-notes 045/047), so Prometheus/OTel export lands with #54 (PRD §18
-  lists DLQ depth). No new dependency; amqp091-go was already in go.mod.
+  existed in the repo yet (compose's observability profile was parked —
+  dev-notes 045/047), so Prometheus/OTel export was deferred — since #55
+  the depth is exported as `dlq_depth_messages` (PRD §18); the OTel half
+  stays #54's. No new dependency; amqp091-go was already in go.mod.
 - **Monitor tests use Suffixed topologies; the exported `Depth` is
   smoke-checked only.** The deterministic seeded-DLQ proof runs against
   a Suffixed topology (the repo's broker-isolation convention); the
@@ -220,10 +223,12 @@ All commands run from the repo root against the local compose stack
 - **PR body must carry the two sign-off items** (verification list):
   (a) "DLQ depth metric" realized as live depth in the admin response +
   the worker's hourly structured depth log, Prometheus/OTel export with
-  #54; (b) decode_error entries visible cross-tenant (metadata only)
-  and answered 409 on replay.
-- #54 exports the depth as a real metric (PRD §18) and adds the alerting
-  rules formalizing the runbook thresholds.
+  #54 *(corrected by #55: the metric half landed there as
+  `dlq_depth_messages`)*; (b) decode_error entries visible cross-tenant
+  (metadata only) and answered 409 on replay.
+- #55 exports the depth as a real metric (`dlq_depth_messages`, PRD §18).
+  The DLQ **alerting** rules formalizing the runbook thresholds remain
+  #54's — deliberately out of #55's alerts.yml.
 - A web admin surface (DLQ page on `/admin`) is deliberately out of
   scope; the API contract is stable for it.
 - The dev broker's real DLQ (367 messages at verification — `pr.approved`

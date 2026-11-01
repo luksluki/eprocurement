@@ -97,7 +97,48 @@ services:
       - "${OTEL_HEALTH_PORT:-13133}:13133"
     networks: [backend]
 
-  # Observability profile (Jaeger + Prometheus/Grafana) arrives with #54.
+  # Observability profile (opt-in: `docker compose --profile observability
+  # up`). Prometheus + Grafana landed with #55; Jaeger stays with #54.
+  # PRD §14.9 models them as default services trimmed by the demo profile —
+  # this stack inverts that (the default stays lean, observability opts in),
+  # per the issue note "Demo profile may skip Grafana"; the deviation is
+  # recorded in docs/dev-notes/055.
+  prometheus:
+    image: prom/prometheus:v3.6.0
+    profiles: [observability]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    volumes:
+      - ./deploy/compose/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/compose/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheusdata:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [backend]
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    profiles: [observability]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-eprocurement}
+    volumes:
+      - ./deploy/compose/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/compose/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    ports:
+      # Not 3000: the web dev server owns 3000 on the host.
+      - "${GRAFANA_PORT:-3001}:3000"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    networks: [backend]
 
   identity:
     build:
@@ -108,6 +149,9 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-local}
       PORT: "8081"
+      # Container-internal /metrics port (#55); deliberately NOT published
+      # to the host — only Prometheus (profile observability) scrapes it.
+      METRICS_PORT: "9101"
       LOG_LEVEL: ${LOG_LEVEL:-info}
       IDENTITY_LOGIN_RATE_PER_MIN: ${IDENTITY_LOGIN_RATE_PER_MIN:-5}
       IDENTITY_JWT_KEY: ${IDENTITY_JWT_KEY:-}
@@ -137,6 +181,7 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-local}
       PORT: "8082"
+      METRICS_PORT: "9102" # container-internal (#55), not published
       LOG_LEVEL: ${LOG_LEVEL:-info}
       DATABASE_URL: postgres://${POSTGRES_USER:-eprocurement}:${POSTGRES_PASSWORD:-eprocurement}@postgres:5432/${POSTGRES_DB:-eprocurement}?sslmode=disable
     ports:
@@ -161,6 +206,7 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-local}
       PORT: "8083"
+      METRICS_PORT: "9103" # container-internal (#55), not published
       LOG_LEVEL: ${LOG_LEVEL:-info}
       MONGO_URI: mongodb://${MONGO_ROOT_USER:-eprocurement}:${MONGO_ROOT_PASSWORD:-eprocurement}@mongo:27017/${MONGO_DB:-eprocurement}?authSource=admin
       S3_ENDPOINT: minio:9000
@@ -187,11 +233,13 @@ services:
       start_period: 10s
     networks: [backend]
 
-  # Background jobs (#45: transactional outbox publisher). No ports — the
-  # worker only dials out (postgres, rabbitmq). It deliberately runs no
-  # migrations: procurement is the sole applier, so on a fresh volume the
-  # publisher loop's first polls can fail until procurement has booted; the
-  # loop logs and keeps ticking instead of crash-looping the container.
+  # Background jobs (#45: transactional outbox publisher). The worker dials
+  # out (postgres, rabbitmq, mongo, redis, minio) and serves only its
+  # container-internal /metrics port (#55, METRICS_PORT below — not
+  # published to the host). It deliberately runs no migrations: procurement
+  # is the sole applier, so on a fresh volume the publisher loop's first
+  # polls can fail until procurement has booted; the loop logs and keeps
+  # ticking instead of crash-looping the container.
   worker:
     build:
       context: .
@@ -201,6 +249,7 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-local}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      METRICS_PORT: "9104" # container-internal (#55), not published
       DATABASE_URL: postgres://${POSTGRES_USER:-eprocurement}:${POSTGRES_PASSWORD:-eprocurement}@postgres:5432/${POSTGRES_DB:-eprocurement}?sslmode=disable
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-eprocurement}:${RABBITMQ_PASSWORD:-eprocurement}@rabbitmq:5672/
       # consumer side (#47): same credentials the documents service uses
@@ -240,6 +289,7 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-local}
       PORT: "8080"
+      METRICS_PORT: "9100" # container-internal (#55), not published
       LOG_LEVEL: ${LOG_LEVEL:-info}
       IDENTITY_ADDR: identity:8081
       PROCUREMENT_ADDR: procurement:8082
@@ -278,6 +328,8 @@ volumes:
   redisdata:
   rabbitmqdata:
   miniodata:
+  prometheusdata:
+  grafanadata:
 
 networks:
   backend:

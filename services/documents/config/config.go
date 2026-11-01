@@ -8,9 +8,10 @@ import (
 
 // Config holds the documents service runtime configuration.
 type Config struct {
-	Env      string // APP_ENV (default "local")
-	Port     string // PORT — gRPC listen port (default "8083")
-	LogLevel string // LOG_LEVEL (default "info")
+	Env         string // APP_ENV (default "local")
+	Port        string // PORT — gRPC listen port (default "8083")
+	LogLevel    string // LOG_LEVEL (default "info")
+	MetricsPort string // METRICS_PORT — /metrics listen port, container-internal (default "9103", #55)
 
 	MongoURI string // MONGO_URI — MongoDB connection string (document_meta)
 	MongoDB  string // MONGO_DB — database name (default "eprocurement")
@@ -34,6 +35,7 @@ func Load() Config {
 		Env:                 envOr("APP_ENV", "local"),
 		Port:                envOr("PORT", "8083"),
 		LogLevel:            envOr("LOG_LEVEL", "info"),
+		MetricsPort:         envOr("METRICS_PORT", "9103"),
 		MongoURI:            envOr("MONGO_URI", "mongodb://eprocurement:eprocurement@localhost:27017/?authSource=admin"),
 		MongoDB:             envOr("MONGO_DB", "eprocurement"),
 		S3Endpoint:          envOr("S3_ENDPOINT", "localhost:9000"),

@@ -300,12 +300,12 @@ cross-service import inside the single Go module.
   bootstrap. The `procurement.dlx`/`procurement.dlq` declarations stayed
   argument-identical, so redeclaring on a broker that carries the #45 pair
   cannot raise PRECONDITION_FAILED.
-- **Observability (#54 follow-up).** What exists now is the structured
+- **Observability (follow-up).** What existed at #45 was the structured
   publish log (`event_id`, `tenant_id`, `event_type`, `trace_id` from the
-  row). OTel spans, trace propagation into AMQP headers, and the outbox
-  lag metric (§18) are deferred to #54, which introduces the observability
-  stack (compose.yaml's profile note); the repo has no OTel/Prometheus code
-  yet.
+  row). The outbox lag metric (§18) landed with #55 as `outbox_lag_seconds`
+  (the worker's publisher loop reports it); OTel spans and trace
+  propagation into AMQP headers remain #54's. *(Corrected by #55 — this
+  note originally deferred all three to #54.)*
 
 **`pr.submitted` payload (#45, pinned public contract)** — written by the
 Submit transaction (`requisition/store.go` appendSubmittedTx): the same
@@ -397,9 +397,9 @@ DLX/DLQ/bootstrap triple argument-identically to `topology.Declare`
 - **Hourly summary (worker).** `services/worker/dlqmonitor` is the third
   component of the worker binary: one short-lived connection per tick
   (`DLQ_SUMMARY_INTERVAL`, default 1 h) logging the structured depth
-  line — `INFO` at 0, `WARN` above. The structured log is the interim
-  metric surface; the Prometheus/OTel export of the same depth lands with
-  the observability stack (#54, PRD §18).
+  line — `INFO` at 0, `WARN` above. The structured log was the interim
+  metric surface; since #55 every successful reading also publishes the
+  `dlq_depth_messages` gauge (PRD §18) — the OTel half stays #54's.
 
 Operational runbook (inspection, replay, purge, alert thresholds, the
 1000-cap cost, and the cross-replica admin-tool race):
@@ -1039,9 +1039,9 @@ missing (404 `requisition_not_found`).
 - #29: requisition create/edit/submit API (done — store, number generation, idempotent submit, REST/gRPC wiring, gateway `Aborted` → 409). Read endpoints: **list done in #32**, **get done in #33** (see below); timeline is a separate issue.
 - #30: approval rules + sequential engine + decide API (done — matrix materialization, 412 rollback, self/role enforcement, reject-skips, admin rule configuration, steps in-band).
 - #31: idempotent decide + outbox audit/notification events (done — `procurement.outbox` + `decision_idempotency` in 0006, decide replay/conflict contract, `pr.*` decide events with actor + trace, gateway `x-trace-id` propagation). **Re-sequenced with #45** by an agent decision: the outbox table + writer moved from #45's scope into #31 (see dev-note 031's provenance block); #45 keeps the publisher loop only.
-- #45: transactional outbox publisher (done — worker publisher loop: poll 2 s / batch 50, §14.5 envelope to the durable topic exchange `procurement.events` with confirm-mode persistent publishes, `published_at` marking, non-fatal poll/publish errors, `pr.submitted` written by the Submit transaction; the PROVISIONAL DLX bootstrap is superseded by #46's full topology). AMQP consumers, retry queues, and DLQ handling remain with the consumer issues; observability (spans, AMQP trace headers, outbox lag metric) is #54. (M2–M3)
+- #45: transactional outbox publisher (done — worker publisher loop: poll 2 s / batch 50, §14.5 envelope to the durable topic exchange `procurement.events` with confirm-mode persistent publishes, `published_at` marking, non-fatal poll/publish errors, `pr.submitted` written by the Submit transaction; the PROVISIONAL DLX bootstrap is superseded by #46's full topology). AMQP consumers, retry queues, and DLQ handling remain with the consumer issues; observability is split — spans and AMQP trace headers are #54's, the outbox lag metric landed with #55 (corrected by #55). (M2–M3)
 - #46: RabbitMQ topology with DLX and TTL retry queues (done — durable `procurement.events`/`procurement.dlx` exchanges, `documents.history`/`notifications`/`exports` queues with DLX arguments, per-queue retry ladders 5 s → 30 s → 5 min returning to their own queue, `procurement.dlq` bound `#`; consumers arrive with #47). (M2–M3)
-- #48: DLQ monitor, metrics, and admin endpoint (done — gateway `GET /api/v1/dlq` list + `POST /api/v1/dlq/replay` behind the new admin-only `dlq:manage`, the gateway's own AMQP client over `procurement.dlq` with per-tenant filtering and cross-tenant `decode_error` metadata entries; the worker's third component `dlqmonitor` logging the hourly depth summary, `DLQ_SUMMARY_INTERVAL` default 1 h; Prometheus/OTel export of the depth is #54. See the [DLQ monitor](#dlq-monitor-48) section and `docs/ops/dlq-monitor.md`). (M3)
+- #48: DLQ monitor, metrics, and admin endpoint (done — gateway `GET /api/v1/dlq` list + `POST /api/v1/dlq/replay` behind the new admin-only `dlq:manage`, the gateway's own AMQP client over `procurement.dlq` with per-tenant filtering and cross-tenant `decode_error` metadata entries; the worker's third component `dlqmonitor` logging the hourly depth summary, `DLQ_SUMMARY_INTERVAL` default 1 h; the depth gauge landed with #55 (`dlq_depth_messages`), the OTel half is #54's. See the [DLQ monitor](#dlq-monitor-48) section and `docs/ops/dlq-monitor.md`). (M3)
 - #35: PO creation from an approved requisition (done — 0007 tables, draft PO with copied lines, per-tenant gap-free `PO-%06d` numbering, conversion replay contract, tx-scoped active-vendor gate `ForUseTx`, guarded `approved → closed`, one `po.created` outbox event). Goods receipts (#37) and the missing `pr.converted` requisition-side event are follow-ups.
 - #36: PO lifecycle state machine (done — ten legal edges over the seven statuses, receipt-guarded cancel, `issued_at` on issue, guarded tenant-scoped transitions serialized on the PO row lock, one outbox event per transition, gRPC + REST issue/acknowledge/cancel/close at `po:write`). Goods receipts (#37) drive the receipt edges.
 - #37: goods receipts with partial receipt rules (done — 0008 tables, `GRN-%06d` gap-free per tenant, `purchaseorder.ApplyReceipt` three-branch status selection with the same-status branch, cumulative over-receipt guard with the pinned `grn_over_receipt: …` detail line and the dedicated REST renderer, one `grn.posted` outbox row per receipt typed to the PO, gRPC + REST at `grn:post`). See the [Goods receipts](#goods-receipts-37) section.

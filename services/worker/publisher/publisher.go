@@ -248,13 +248,23 @@ type Loop struct {
 	log       *slog.Logger
 	interval  time.Duration
 	batchSize int
+	// setLag, when installed via SetLagSink (#55), receives the outbox lag
+	// after every successful poll: the age of the oldest pending row (rows
+	// come back oldest-first) or 0 when drained. A failed poll reports
+	// nothing — the gauge keeps its last value instead of faking 0.
+	setLag func(time.Duration)
+	// now is the lag clock; tests pin it.
+	now func() time.Time
 }
 
 // NewLoop builds the loop. interval and batchSize come from config (pinned
 // 2 s / 50; env overrides exist for tests).
 func NewLoop(store OutboxStore, pub Publisher, log *slog.Logger, interval time.Duration, batchSize int) *Loop {
-	return &Loop{store: store, pub: pub, log: log, interval: interval, batchSize: batchSize}
+	return &Loop{store: store, pub: pub, log: log, interval: interval, batchSize: batchSize, now: time.Now}
 }
+
+// SetLagSink installs the outbox-lag gauge callback (internal/platform/metrics).
+func (l *Loop) SetLagSink(fn func(time.Duration)) { l.setLag = fn }
 
 // Run polls once immediately, then every interval, until ctx is cancelled
 // (SIGINT/SIGTERM) — then returns nil.
@@ -282,7 +292,14 @@ func (l *Loop) pollOnce(ctx context.Context) {
 			return // shutting down; not a publish-path failure
 		}
 		l.log.Warn("outbox poll failed", "error", err)
-		return
+		return // the lag gauge deliberately keeps its last value (no fake 0)
+	}
+	if l.setLag != nil {
+		lag := time.Duration(0) // drained: the true lag of an empty outbox
+		if len(rows) > 0 {
+			lag = l.now().Sub(rows[0].CreatedAt) // rows arrive oldest-first
+		}
+		l.setLag(lag)
 	}
 	published := make([]string, 0, len(rows))
 	for _, r := range rows {

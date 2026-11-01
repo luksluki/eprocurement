@@ -1,10 +1,10 @@
 // Package dlqmonitor is the worker's half of the PRD §16 "DLQ monitor —
 // hourly summary metric + admin endpoint" (issue #48): a loop that reads
 // procurement.dlq's ready-message depth every interval and logs a
-// structured summary line per tick — the interim metric surface. The
-// Prometheus/OTel export of the same depth lands with the observability
-// stack (#54, PRD §18); the admin endpoint half of the bullet lives in the
-// gateway (services/gateway/dlq).
+// structured summary line per tick. Since #55 every successful reading
+// also publishes the dlq_depth_messages gauge (SetDepth); the OTel/tracing
+// half of the observability stack stays with #54. The admin endpoint half
+// of the §16 bullet lives in the gateway (services/gateway/dlq).
 //
 // The monitor adds no boot-order coupling: it never dials at boot, and a
 // broker that is down costs one warn line per tick, nothing more.
@@ -84,13 +84,17 @@ func declareDLQ(ch *amqp.Channel, topo topology.Topology) (amqp.Queue, error) {
 // Monitor is the recurring depth summary. URL and Interval come from
 // config; a zero Interval means DefaultInterval. Topology is injectable
 // for tests (zero means topology.Default); Sink receives every successful
-// reading so tests can observe ticks without parsing logs.
+// reading so tests can observe ticks without parsing logs. SetDepth, when
+// installed (#55), publishes every successful reading to the
+// dlq_depth_messages gauge — a failed tick reports nothing, so the gauge
+// keeps its last value instead of faking 0.
 type Monitor struct {
 	URL      string
 	Interval time.Duration
 	Topology topology.Topology
 	Logger   *slog.Logger
 	Sink     func(depth int)
+	SetDepth func(depth int)
 
 	// depthFn is the broker read one tick performs; tests stub it to run
 	// the loop broker-free. nil means the package's depth function.
@@ -140,7 +144,10 @@ func (m *Monitor) tick(ctx context.Context) {
 		if ctx.Err() == nil { // shutting down is not a broker problem
 			m.logger().Warn("dlq depth check failed", "error", err)
 		}
-		return
+		return // the depth gauge deliberately keeps its last value (no fake 0)
+	}
+	if m.SetDepth != nil {
+		m.SetDepth(n)
 	}
 	if m.Sink != nil {
 		m.Sink(n)

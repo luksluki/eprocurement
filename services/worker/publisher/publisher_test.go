@@ -525,3 +525,47 @@ func TestConnectFailure(t *testing.T) {
 		t.Fatal("connect to a closed port succeeded, want error")
 	}
 }
+
+// AC #55 (outbox lag gauge): after a successful poll the loop reports the
+// age of the oldest pending row; a drained outbox reports 0; a failed poll
+// reports nothing so the gauge keeps its last real value instead of
+// faking a fresh one.
+func TestLoopUpdatesLagGauge(t *testing.T) {
+	old := row("ev-old", "t-1", "pr.submitted")
+	old.CreatedAt = time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	fresh := row("ev-fresh", "t-1", "pr.submitted")
+	fresh.CreatedAt = old.CreatedAt.Add(90 * time.Second)
+	now := old.CreatedAt.Add(5 * time.Minute) // oldest row is 5m old
+
+	cases := []struct {
+		name    string
+		rows    []outbox.PendingEvent
+		pollErr error
+		want    *time.Duration // nil = no reading expected
+	}{
+		{"pending rows report the oldest age", []outbox.PendingEvent{old, fresh}, nil, &[]time.Duration{5 * time.Minute}[0]},
+		{"drained outbox reports zero", nil, nil, &[]time.Duration{0}[0]},
+		{"failed poll reports nothing", nil, errors.New("fake: db down"), nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &fakeStore{rows: tc.rows, marked: map[string]bool{}, pendingErr: tc.pollErr}
+			loop := NewLoop(store, &fakePublisher{}, testLogger(), time.Hour, 50)
+			loop.now = func() time.Time { return now }
+
+			var got []time.Duration
+			loop.SetLagSink(func(d time.Duration) { got = append(got, d) })
+			loop.pollOnce(context.Background())
+
+			if tc.want == nil {
+				if len(got) != 0 {
+					t.Fatalf("lag readings = %v, want none (the gauge keeps its last value)", got)
+				}
+				return
+			}
+			if len(got) != 1 || got[0] != *tc.want {
+				t.Fatalf("lag readings = %v, want [%s]", got, *tc.want)
+			}
+		})
+	}
+}

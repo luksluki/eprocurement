@@ -15,6 +15,7 @@ type Config struct {
 	JWTKeySeed      string // IDENTITY_JWT_KEY — base64 32-byte Ed25519 seed; empty = ephemeral per boot
 	JWTKeyPrevSeed  string // IDENTITY_JWT_KEY_PREVIOUS — previous key, kept verifiable during rotation
 	LoginRatePerMin int    // IDENTITY_LOGIN_RATE_PER_MIN — login attempts per email+address (default 5)
+	MetricsPort     string // METRICS_PORT — /metrics listen port, container-internal (default "9101", #55)
 }
 
 // Load reads the configuration from the environment. Every value has a
@@ -29,6 +30,7 @@ func Load() Config {
 		JWTKeySeed:      os.Getenv("IDENTITY_JWT_KEY"),
 		JWTKeyPrevSeed:  os.Getenv("IDENTITY_JWT_KEY_PREVIOUS"),
 		LoginRatePerMin: envInt("IDENTITY_LOGIN_RATE_PER_MIN", 5),
+		MetricsPort:     envOr("METRICS_PORT", "9101"),
 	}
 }
 

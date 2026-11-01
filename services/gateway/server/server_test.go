@@ -15,6 +15,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 
 	"github.com/luksluki/eprocurement/internal/platform/jwt"
+	"github.com/luksluki/eprocurement/internal/platform/metrics"
 	"github.com/luksluki/eprocurement/services/gateway/token"
 	"github.com/luksluki/eprocurement/services/identity/auth"
 )
@@ -62,6 +63,60 @@ func TestHealthz(t *testing.T) {
 	resp, body := do(t, app, "GET", "/healthz", "")
 	if resp.StatusCode != fiber.StatusOK || body["status"] != "ok" {
 		t.Fatalf("healthz = %d %v", resp.StatusCode, body)
+	}
+}
+
+// AC #55: the gateway records http_request_duration_seconds{method, route,
+// status} with the route TEMPLATE as the label (bounded cardinality), and
+// an unmatched path is labeled "unmatched" instead of leaking the raw URI.
+func TestRequestMetricsRecordsRouteTemplate(t *testing.T) {
+	pub, _, _ := jwt.GenerateKey()
+	kid := jwt.Kid(pub)
+	verifier := token.NewVerifier(&staticFetcher{keys: []token.Key{{Kid: kid, Ed25519: pub, Current: true}}}, time.Hour)
+	mc := metrics.New()
+	log := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
+	app := New(log, verifier, WithMetrics(mc))
+	t.Cleanup(func() { _ = app.Shutdown() })
+
+	for _, path := range []string{"/healthz", "/api/v1/me", "/api/v1/me", "/nowhere/at/all"} {
+		resp, err := app.Test(httptest.NewRequest("GET", path, nil), 5000)
+		if err != nil {
+			t.Fatalf("app.Test %s: %v", path, err)
+		}
+		_ = resp.Body.Close()
+	}
+
+	want := []struct {
+		method, route, status string
+		count                 uint64
+	}{
+		{"GET", "/healthz", "200", 1},
+		{"GET", "/api/v1/me", "401", 2}, // no bearer: both calls 401, same template label
+		{"GET", "unmatched", "404", 1},
+	}
+	families, err := mc.Registry().Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, w := range want {
+		found := false
+		for _, mf := range families {
+			if mf.GetName() != "http_request_duration_seconds" {
+				continue
+			}
+			for _, m := range mf.GetMetric() {
+				labels := map[string]string{}
+				for _, lp := range m.GetLabel() {
+					labels[lp.GetName()] = lp.GetValue()
+				}
+				if labels["method"] == w.method && labels["route"] == w.route && labels["status"] == w.status {
+					found = m.GetHistogram().GetSampleCount() == w.count
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("no http_request_duration_seconds sample for %s %s -> %s with count %d", w.method, w.route, w.status, w.count)
+		}
 	}
 }
 
