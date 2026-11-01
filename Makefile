@@ -1,4 +1,4 @@
-.PHONY: help install build lint test fmt compose-up compose-down compose-logs compose-ps seed seed-reset reset gen-proto cover test-integration
+.PHONY: help install build lint test fmt compose-up compose-down compose-logs compose-ps seed seed-reset reset gen-proto cover test-integration e2e
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -17,6 +17,7 @@ help: ## Show available targets
 	@echo "  gen-proto        Regenerate gen/go from proto/ (needs protoc; see docs/onboarding.md)"
 	@echo "  cover            Identity-domain coverage, enforced threshold (stack must be up)"
 	@echo "  test-integration Full go test ./... against the compose database"
+	@echo "  e2e              Playwright happy path against the compose stack (stack must be up)"
 
 install: ## Install JS workspace dependencies
 	pnpm install
@@ -86,3 +87,13 @@ cover: ## Identity-domain coverage with enforced threshold (compose stack must b
 test-integration: ## Full go test ./... against the compose database and object store
 	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" TEST_MONGO_URI="$(TEST_MONGO_URI)" \
 	TEST_S3_ENDPOINT="$(TEST_S3_ENDPOINT)" go test ./... -count=1
+
+# Playwright happy path (#59) — the same sequence the CI e2e job runs:
+# fixtures are installed by the suite's globalSetup (cmd/useradmin needs
+# DATABASE_URL, hence the .env passthrough), the web app is rebuilt and
+# served with `next start`, and the spec drives the compose stack. Identity's
+# login limiter can 429 rapid local re-runs; raise it per docs/onboarding.md
+# (IDENTITY_LOGIN_RATE_PER_MIN in .env, then make compose-up) if retrying.
+e2e: ## Run the Playwright happy path (compose stack must be up)
+	pnpm --filter @eprocurement/web build
+	DATABASE_URL="$(TEST_DATABASE_URL)" pnpm --filter @eprocurement/e2e e2e

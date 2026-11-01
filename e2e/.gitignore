@@ -1,0 +1,4 @@
+# Playwright artifacts (screenshots/traces land here on failure; the HTML
+# report is generated on every run) — never committed.
+test-results/
+playwright-report/
