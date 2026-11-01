@@ -27,6 +27,7 @@ import (
 
 	"github.com/luksluki/eprocurement/internal/platform/telemetry"
 	"github.com/luksluki/eprocurement/services/procurement/outbox"
+	"github.com/luksluki/eprocurement/services/worker/topology"
 )
 
 // Broker topology (PRD §14.5). The events exchange is the publisher's
@@ -103,6 +104,15 @@ func (o OutboxDB) MarkPublished(ctx context.Context, ids []string) error {
 type AMQPPublisher struct {
 	url            string
 	confirmTimeout time.Duration
+	// exchange is the publish target. Connect pins it to EventsExchange;
+	// ConnectTopology pins it to the topology's events exchange (an isolated
+	// suffixed variant in tests).
+	exchange string
+	// topo, when set by ConnectTopology, is (re-)declared on every connect —
+	// the reconnect path then restores the topology variant's own broker
+	// state, not the production bootstrap. nil (Connect) keeps connect's
+	// bootstrap declarations below.
+	topo *topology.Topology
 
 	mu   sync.Mutex
 	conn *amqp.Connection
@@ -115,11 +125,47 @@ func Connect(ctx context.Context, url string, confirmTimeout time.Duration) (*AM
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("publisher: connect cancelled: %w", err)
 	}
-	p := &AMQPPublisher{url: url, confirmTimeout: confirmTimeout}
+	p := &AMQPPublisher{url: url, confirmTimeout: confirmTimeout, exchange: EventsExchange}
 	if err := p.connect(); err != nil {
 		return nil, err
 	}
 	return p, nil
+}
+
+// ConnectTopology is the topology-aware constructor: the broker topology is
+// declared by topology.Topology.Declare instead of connect's bootstrap
+// declarations, and Publish targets the topology's events exchange. The zero
+// Topology resolves to topology.Default, so ConnectTopology(ctx, url, t,
+// topology.Topology{}) declares and publishes exactly what production runs.
+//
+// The shared-broker hazard is PRECONDITION_FAILED: Declare's exchange/DLX/DLQ
+// arguments must stay argument-for-argument identical to connect's bootstrap
+// declarations (topology.go documents the same contract), or the second
+// declarer on one broker is rejected. Production main keeps calling Connect;
+// this variant exists for test harnesses that need an isolated suffixed copy
+// of the same topology (the procure-to-pay integration suite, #58).
+func ConnectTopology(ctx context.Context, url string, confirmTimeout time.Duration, topo topology.Topology) (*AMQPPublisher, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("publisher: connect cancelled: %w", err)
+	}
+	resolved := resolveTopology(topo)
+	p := &AMQPPublisher{
+		url: url, confirmTimeout: confirmTimeout,
+		exchange: resolved.EventsExchange, topo: &resolved,
+	}
+	if err := p.connect(); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// resolveTopology returns topo, or topology.Default for the zero value — the
+// consumer.New convention, so ConnectTopology's default is production.
+func resolveTopology(topo topology.Topology) topology.Topology {
+	if topo.EventsExchange == "" && topo.DLXExchange == "" && topo.DLQQueue == "" && len(topo.Queues) == 0 {
+		return topology.Default
+	}
+	return topo
 }
 
 // connect dials and declares the channel topology. Not goroutine-safe on its
@@ -135,6 +181,20 @@ func (p *AMQPPublisher) connect() error {
 	if err != nil {
 		_ = conn.Close()
 		return fmt.Errorf("publisher: open channel: %w", err)
+	}
+	if p.topo != nil {
+		// Topology variant (ConnectTopology): the full declaration set of the
+		// configured topology, on boot and on every reconnect.
+		if err := p.topo.Declare(ch); err != nil {
+			_ = conn.Close()
+			return err
+		}
+		if err := ch.Confirm(false); err != nil {
+			_ = conn.Close()
+			return fmt.Errorf("publisher: confirm mode: %w", err)
+		}
+		p.conn, p.ch = conn, ch
+		return nil
 	}
 	if err := ch.ExchangeDeclare(EventsExchange, "topic",
 		true, false, false, false, nil); err != nil {
@@ -236,7 +296,7 @@ func (p *AMQPPublisher) publishConfirmed(ctx context.Context, env Envelope, head
 			return err
 		}
 	}
-	dc, err := p.ch.PublishWithDeferredConfirmWithContext(ctx, EventsExchange, env.Type,
+	dc, err := p.ch.PublishWithDeferredConfirmWithContext(ctx, p.exchange, env.Type,
 		false, false, amqp.Publishing{
 			ContentType:  "application/json",
 			DeliveryMode: amqp.Persistent,
