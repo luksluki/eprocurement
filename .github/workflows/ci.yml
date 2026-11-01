@@ -78,6 +78,20 @@ jobs:
       - name: Build
         run: go build ./...
 
+      # #57: the unit-suite baseline as a measured gate. TEST_* is cleared at
+      # step level (integration helpers treat empty like unset) so this is the
+      # unit-only suite; scripts/dev/test-unit.sh times the run and fails past
+      # UNIT_SUITE_MAX_SECONDS (default 120s, the AGENTS.md 2-minute contract).
+      # The integration run below keeps its service-container coverage.
+      - name: Unit suite (duration gate)
+        env:
+          TEST_DATABASE_URL: ""
+          TEST_MONGO_URI: ""
+          TEST_S3_ENDPOINT: ""
+          TEST_S3_ACCESS_KEY: ""
+          TEST_S3_SECRET_KEY: ""
+        run: bash scripts/dev/test-unit.sh
+
       - name: Migrations
         run: |
           go run ./services/identity/cmd/migrate
@@ -95,6 +109,38 @@ jobs:
             -coverpkg=./services/identity/auth,./services/identity/server,./services/identity/config
           go tool cover -func=coverage.out | tail -1
           go tool cover -func=coverage.out | awk '/^total:/ {gsub("%","",$3); if ($3+0 < 80) {print "identity coverage "$3"% is below the 80% threshold"; exit 1}}'
+
+      # #57, maintainer decision 2: procurement is gated at the identity
+      # parity set's threshold (dev-note 024: "apply the same coverage guard
+      # to future domains") — 80% over domain + server + config with the
+      # coverpkg list pinned in writing. It runs with the service containers
+      # (job-level TEST_DATABASE_URL): the DB-backed store tests carry most of
+      # the covered lines, the unit-only read is ~23%.
+      - name: Coverage (procurement parity set, threshold 80%)
+        run: |
+          go test ./services/procurement/... -count=1 \
+            -coverprofile=coverage-procurement.out \
+            -coverpkg=./services/procurement/approval,./services/procurement/config,./services/procurement/dashboard,./services/procurement/goodsreceipt,./services/procurement/invoice,./services/procurement/match,./services/procurement/outbox,./services/procurement/purchaseorder,./services/procurement/requisition,./services/procurement/server,./services/procurement/vendor
+          go tool cover -func=coverage-procurement.out | tail -1
+          go tool cover -func=coverage-procurement.out | awk '/^total:/ {gsub("%","",$3); if ($3+0 < 80) {print "procurement coverage "$3"% is below the 80% threshold"; exit 1}}'
+
+      # #57, maintainer decision 2: documents is measured, not gated — its
+      # unit-only baseline (16.7% over the pinned 7-package set) is far below
+      # any sensible gate, so CI reports the number ungated and a follow-up
+      # sets the threshold at the real figure plus buffer. Unit-only (TEST_*
+      # cleared at step level) to match the recorded baseline.
+      - name: Coverage (documents, report-only)
+        env:
+          TEST_DATABASE_URL: ""
+          TEST_MONGO_URI: ""
+          TEST_S3_ENDPOINT: ""
+          TEST_S3_ACCESS_KEY: ""
+          TEST_S3_SECRET_KEY: ""
+        run: |
+          go test ./services/documents/... -count=1 \
+            -coverprofile=coverage-documents.out \
+            -coverpkg=./services/documents/attachment,./services/documents/config,./services/documents/export,./services/documents/history,./services/documents/notifications,./services/documents/objectstore,./services/documents/server
+          go tool cover -func=coverage-documents.out | tail -1
 
   web:
     name: Web · install · build · lint · test
