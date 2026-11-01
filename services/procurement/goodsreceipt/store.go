@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/luksluki/eprocurement/internal/platform/logger"
+	"github.com/luksluki/eprocurement/internal/platform/pgbatch"
 	"github.com/luksluki/eprocurement/internal/platform/tenant"
 	"github.com/luksluki/eprocurement/services/procurement/outbox"
 	"github.com/luksluki/eprocurement/services/procurement/purchaseorder"
@@ -239,12 +240,18 @@ func insertGRN(ctx context.Context, tx pgx.Tx, grn *GoodsReceipt) error {
 		grn.ReceivedAt, grn.Notes); err != nil {
 		return err
 	}
-	for _, it := range grn.Items {
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO procurement.goods_receipt_items (grn_id, po_item_id, qty_received)
-			VALUES ($1, $2, $3)`, grn.ID, it.POItemID, it.QtyReceived); err != nil {
-			return err
-		}
+	// The receipt lines go out as one batched pipeline (one network round
+	// trip, issue #56's write-path N+1) with the plain loop's per-row error
+	// semantics: the first failing row's error surfaces, the transaction
+	// fails as a whole either way.
+	rows := make([][]any, len(grn.Items))
+	for i, it := range grn.Items {
+		rows[i] = []any{grn.ID, it.POItemID, it.QtyReceived}
+	}
+	if err := pgbatch.Exec(ctx, tx, `
+		INSERT INTO procurement.goods_receipt_items (grn_id, po_item_id, qty_received)
+		VALUES ($1, $2, $3)`, rows); err != nil {
+		return err
 	}
 	return nil
 }

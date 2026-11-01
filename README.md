@@ -109,6 +109,7 @@ The tool reads `DATABASE_URL`, `MONGO_URI`, and `MONGO_DB` from `.env` (or the e
 - Local onboarding — `docs/onboarding.md`
 - Identity schema — `docs/schema/identity.md`
 - Procurement schema — `docs/schema/procurement.md`
+- Performance budgets — `docs/perf.md` (`make perf-budget`)
 - RBAC model — `docs/rbac.md`
 - Ops runbooks — `docs/ops/` (JWKS rotation)
 - PRD v0.2 — `docs/prd/prd-v0.2.md`

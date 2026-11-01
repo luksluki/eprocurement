@@ -1,0 +1,52 @@
+-- 0015_list_prefix_index_review: the measured index review of every list
+-- endpoint (issue #56). This migration deliberately carries NO DDL.
+--
+-- The plan was to close the selective number-prefix list shapes (requisition
+-- / purchase-order / invoice number, vendor code) with new prefix indexes
+-- "wherever the planner demonstrably benefits" (maintainer decision 2 on
+-- #56). The #56 experiments measured the exact list statements of all four
+-- tables at 100k rows per tenant, under the real RLS context
+-- (SET ROLE eproc_app + app.tenant_id), with candidate indexes physically
+-- present and ANALYZE'd:
+--
+--   * invoices (upper(number) text_pattern_ops),
+--     requisitions / purchase_orders (number text_pattern_ops),
+--     vendors (code text_pattern_ops) — at ~1k, ~100 and ~10 matching rows
+--     (1%, 0.1%, 0.01% selectivity) the planner kept the parallel sequential
+--     scan in every single case; the index was never touched.
+--
+-- The root cause is a PostgreSQL row-security planner rule, verified by
+-- isolating the predicate shape under an identical plan context:
+--
+--   * User-supplied quals containing LEAKY functions (~~ LIKE, ~~* ILIKE)
+--   can never become index conditions on a table protected by row-level
+--   security — the planner pulls them out of the scan so the policy filter
+--   is guaranteed to evaluate first. `number LIKE $2 || '%'` is leaky
+--   (textlike.proleakproof = f), so no prefix index can ever serve the list
+--   shapes' prefix arms under the current single-policy RLS design,
+--   regardless of selectivity or index definition.
+--   * The same experiment with LEAKPROOF quals (number >= 'X' AND
+--   number < 'Y', text_ge/text_lt.proleakproof = t) on a plain btree index
+--   produced "Index Scan ... Index Cond" under the same RLS context — the
+--   control that proves the mechanism. It is also why the status-equality
+--   shapes DO use their (tenant_id, status) indexes (0003/0011/0012) and
+--   the 0014 partial indexes keep paying off: texteq is leakproof.
+--
+-- Measured consequence: the prefix shapes keep their (parallel) sequential
+-- scans — ~45-55 ms p95 on the invoice list at 100k rows, ~6x under the
+-- 300 ms budget — and stay documented as by-design exceptions in
+-- docs/perf.md, next to the unfiltered page-1 and whole-table distribution
+-- scans (the planner's own cost choice, per the query-plan sections of
+-- docs/schema/procurement.md). Closing them with indexes would need either
+-- an RLS policy reshaping or per-service read roles (platform decision,
+-- golden rule 10 — explicitly out of scope here per maintainer decision 2),
+-- or a leakproof range-bound rewrite of the prefix predicates (a
+-- collation-sensitive query-semantics change with its own follow-up note in
+-- docs/perf.md).
+--
+-- A no-op migration is the point: this file is the durable record that the
+-- prefix-index question was measured to a negative on 2026-11-01, so a
+-- future list-index author starts from the leakproof-rule finding instead
+-- of re-running the experiments or shipping an index the planner cannot
+-- use. Version 0015 is consumed by that record; the next real index change
+-- takes 0016.

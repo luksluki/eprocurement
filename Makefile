@@ -1,4 +1,4 @@
-.PHONY: help install build lint test fmt compose-up compose-down compose-logs compose-ps seed seed-reset reset gen-proto cover test-integration e2e
+.PHONY: help install build lint test fmt compose-up compose-down compose-logs compose-ps seed seed-reset reset gen-proto cover test-integration e2e perf-budget
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -18,6 +18,7 @@ help: ## Show available targets
 	@echo "  cover            Identity-domain coverage, enforced threshold (stack must be up)"
 	@echo "  test-integration Full go test ./... against the compose database"
 	@echo "  e2e              Playwright happy path against the compose stack (stack must be up)"
+	@echo "  perf-budget      Run the 100k scale fixtures and report p95 vs budget (stack must be up)"
 
 install: ## Install JS workspace dependencies
 	pnpm install
@@ -97,3 +98,10 @@ test-integration: ## Full go test ./... against the compose database and object 
 e2e: ## Run the Playwright happy path (compose stack must be up)
 	pnpm --filter @eprocurement/web build
 	DATABASE_URL="$(TEST_DATABASE_URL)" pnpm --filter @eprocurement/e2e e2e
+
+# The #56 p95 budget re-run path: the five ~100k scale fixtures against the
+# compose database, with a per-shape p95-vs-budget report parsed from the
+# tests' own logs (the budgets live in the tests, not here). Serialized
+# bulk loads; a full run is roughly 10 minutes.
+perf-budget: ## Run the 100k scale fixtures and report p95 vs budget (stack must be up)
+	bash scripts/dev/perf-budget.sh

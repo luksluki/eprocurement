@@ -24,8 +24,12 @@ const (
 )
 
 // summaryBudgetMs is the whole-summary budget the dashboard must meet at
-// ~100k rows — the PRD §19 NFR table's "dashboard p95 < 500 ms" (FR-09).
-const summaryBudgetMs = 500
+// ~100k rows — FR-09's "dashboard p95 < 300 ms" (reconciled with NFR §19,
+// whose dashboard row #52 had kept at < 500 ms pending this measurement:
+// issue #56 measured p95 ≈ 199 ms on the #52 fixture with the 0014 partial
+// indexes, so the tighter FR-09 number is the enforced budget and §19's
+// dashboard row reads < 300 ms too).
+const summaryBudgetMs = 300
 
 // shapeAttempts bounds the budget's retries. The budget is a steady-state
 // p95 claim, but CI runs `go test ./...` with the 100k budget fixtures
@@ -235,7 +239,7 @@ func TestStoreSummaryScale100k(t *testing.T) {
 		}
 	})
 
-	t.Run("p95 under 500ms", func(t *testing.T) {
+	t.Run("p95 under 300ms", func(t *testing.T) {
 		var p95 time.Duration
 		for attempt := 1; attempt <= shapeAttempts; attempt++ {
 			// Warm-ups (fill caches; the budget is steady-state).

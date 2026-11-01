@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/luksluki/eprocurement/internal/platform/logger"
+	"github.com/luksluki/eprocurement/internal/platform/pgbatch"
 	"github.com/luksluki/eprocurement/internal/platform/tenant"
 	"github.com/luksluki/eprocurement/services/procurement/outbox"
 )
@@ -128,16 +129,18 @@ func insertRequisition(ctx context.Context, tx pgx.Tx, agg *Requisition) (Requis
 	return out, nil
 }
 
+// insertItems writes the item basket as one batched pipeline (one network
+// round trip for the whole basket, issue #56's write-path N+1) while keeping
+// the plain loop's per-row error semantics: the first failing row's error
+// surfaces and the transaction fails as a whole either way.
 func insertItems(ctx context.Context, tx pgx.Tx, requisitionID string, items []Item) error {
-	for _, it := range items {
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO procurement.requisition_items (requisition_id, description, qty, unit_price_cents, category)
-			VALUES ($1, $2, $3, $4, $5)`,
-			requisitionID, it.Description, it.Qty, it.UnitPriceCents, it.Category); err != nil {
-			return err
-		}
+	rows := make([][]any, len(items))
+	for i, it := range items {
+		rows[i] = []any{requisitionID, it.Description, it.Qty, it.UnitPriceCents, it.Category}
 	}
-	return nil
+	return pgbatch.Exec(ctx, tx, `
+		INSERT INTO procurement.requisition_items (requisition_id, description, qty, unit_price_cents, category)
+		VALUES ($1, $2, $3, $4, $5)`, rows)
 }
 
 // Get returns one requisition of tenantID (header plus items) without

@@ -393,7 +393,7 @@ service Documents   { rpc ListEvents(...) returns (...); rpc CreatePresignedUplo
 
 | Area | Requirement |
 |---|---|
-| Performance | p95 < 300 ms for list/detail endpoints on 100k-item seed; dashboard p95 < 500 ms |
+| Performance | p95 < 300 ms for list/detail endpoints on 100k-item seed; dashboard p95 < 300 ms (reconciled with FR-09 in #56: measured on the #52 fixture, enforced by its scale test) |
 | Scale (demo) | 10 tenants, 100k requisitions, 1M events — seed generator included |
 | Availability | Compose demo: restart-safe; no data loss on worker kill |
 | Security | OWASP Top 10 mitigations; tenant isolation verified by e2e test |

@@ -1,8 +1,8 @@
 // Package scalegate serializes the heavy ~100k scale fixtures across the
 // test binaries CI runs in parallel. Each fixture bulk-loads hundreds of
-// thousands of rows against the one shared CI PostgreSQL; since #52 a fourth
-// fixture (dashboard) joined the three existing ones (vendor #27,
-// requisition #32, purchase order #38), and four concurrent bulk loads
+// thousands of rows against the one shared CI PostgreSQL; since #56 a fifth
+// fixture (invoice) joined the four existing ones (vendor #27, requisition
+// #32, purchase order #38, dashboard #52), and concurrent bulk loads
 // stretched every one of them past go test's 10-minute package timeout (CI
 // run 41198373932: all four procurement scale packages FAILed at 600 s).
 //
