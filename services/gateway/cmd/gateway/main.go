@@ -22,6 +22,7 @@ import (
 	identityv1 "github.com/luksluki/eprocurement/gen/go/identity/v1"
 	procurementv1 "github.com/luksluki/eprocurement/gen/go/procurement/v1"
 	"github.com/luksluki/eprocurement/internal/platform/logger"
+	"github.com/luksluki/eprocurement/internal/platform/metrics"
 	gatewayconfig "github.com/luksluki/eprocurement/services/gateway/config"
 	"github.com/luksluki/eprocurement/services/gateway/dlq"
 	"github.com/luksluki/eprocurement/services/gateway/server"
@@ -42,6 +43,10 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// #55: the process's Prometheus collectors — the request-latency
+	// histogram below and the /metrics server at the bottom of run.
+	mc := metrics.New()
 
 	conn, err := grpc.NewClient(cfg.IdentityAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -87,11 +92,26 @@ func run() error {
 		// over procurement.dlq (maintainer option A, 2026-10-28). It dials
 		// per request; a broker that is down fails those requests with 503
 		// and nothing else — no boot-time dependency.
-		server.WithDLQ(dlq.New(cfg.RabbitMQURL, topology.Default)))
+		server.WithDLQ(dlq.New(cfg.RabbitMQURL, topology.Default)),
+		// #55: request-latency histogram, published on METRICS_PORT.
+		server.WithMetrics(mc))
 	log.Info("starting gateway", "port", cfg.Port,
 		"identity_addr", cfg.IdentityAddr, "procurement_addr", cfg.ProcurementAddr,
 		"documents_addr", cfg.DocumentsAddr, "login_rate_per_min", cfg.LoginRatePerMin,
-		"trusted_proxies", len(cfg.TrustedProxies))
+		"trusted_proxies", len(cfg.TrustedProxies), "metrics_port", cfg.MetricsPort)
+
+	// #55: the /metrics server runs on its container-internal port until
+	// shutdown. A listen failure cancels the signal context so the main
+	// listener unblocks, and the error is returned — the process must not
+	// run unobserved.
+	metricsDone := make(chan error, 1)
+	go func() {
+		err := mc.Serve(ctx, ":"+cfg.MetricsPort, log)
+		if err != nil {
+			stop()
+		}
+		metricsDone <- err
+	}()
 
 	go func() {
 		<-ctx.Done()
@@ -100,15 +120,19 @@ func run() error {
 		_ = app.ShutdownWithContext(shutdownCtx)
 	}()
 
-	if err := app.Listen(":" + cfg.Port); err != nil {
-		// Listen returns nil on graceful shutdown.
-		select {
-		case <-ctx.Done():
+	listenErr := app.Listen(":" + cfg.Port)
+	// Capture whether shutdown had already begun BEFORE stop() — stop also
+	// cancels ctx, so reading it afterwards would misreport a listen error
+	// as a graceful shutdown.
+	graceful := ctx.Err() != nil
+	stop()
+	metricsErr := <-metricsDone
+	if listenErr != nil {
+		if graceful {
 			log.Info("gateway stopped")
 			return nil
-		default:
-			return fmt.Errorf("listen %s: %w", cfg.Port, err)
 		}
+		return fmt.Errorf("listen %s: %w", cfg.Port, listenErr)
 	}
-	return nil
+	return metricsErr
 }

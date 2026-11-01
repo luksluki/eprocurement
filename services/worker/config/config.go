@@ -1,11 +1,14 @@
 // Package config loads worker service configuration from the environment.
 //
-// The one worker binary runs all four background halves (dev-notes
-// 045/047/048/049): the transactional outbox publisher (#45; DATABASE_URL +
-// the poll knobs below), the Mongo projection consumers (#47;
-// MONGO_URI/MONGO_DB), the DLQ depth monitor (#48; DLQ_SUMMARY_INTERVAL),
-// and the nightly export scheduler (#49; REDIS_URL + the EXPORT_* knobs +
-// the S3_* object store). RABBITMQ_URL is shared. PollInterval and
+// The one worker binary runs all background halves (dev-notes
+// 045/047/048/049/055): the transactional outbox publisher (#45;
+// DATABASE_URL + the poll knobs below), the Mongo projection consumers
+// (#47; MONGO_URI/MONGO_DB), the DLQ depth monitor (#48;
+// DLQ_SUMMARY_INTERVAL), the nightly export scheduler (#49; REDIS_URL +
+// the EXPORT_* knobs + the S3_* object store), and the #55 metrics half
+// (the /metrics server on METRICS_PORT carrying the outbox-lag, DLQ-depth,
+// and export-age gauges + the EXPORT_AGE_INTERVAL refresher). RABBITMQ_URL
+// is shared. PollInterval and
 // BatchSize are pinned by the PRD (§16: poll every 2 s, batch 50); the env
 // overrides exist so tests can tick fast and so operators can tune a demo
 // — production keeps the defaults. The export schedule knobs are raw
@@ -52,6 +55,11 @@ type Config struct {
 	S3SecretKey     string        // S3_SECRET_KEY
 	S3Bucket        string        // S3_BUCKET — the single bucket shared with documents
 	S3UseSSL        bool          // S3_USE_SSL
+
+	// Metrics (#55): the /metrics server (outbox lag, DLQ depth, export
+	// age) and the export-age refresh cadence.
+	MetricsPort       string        // METRICS_PORT — /metrics port, container-internal (default "9104")
+	ExportAgeInterval time.Duration // EXPORT_AGE_INTERVAL — export_age_seconds refresh (default 60s)
 }
 
 // Load reads the configuration from the environment with local-development
@@ -79,6 +87,8 @@ func Load() Config {
 		S3SecretKey:        envOr("S3_SECRET_KEY", "eprocurement"),
 		S3Bucket:           envOr("S3_BUCKET", "attachments"),
 		S3UseSSL:           envBool("S3_USE_SSL", false),
+		MetricsPort:        envOr("METRICS_PORT", "9104"),
+		ExportAgeInterval:  durationOr("EXPORT_AGE_INTERVAL", 60*time.Second),
 	}
 }
 

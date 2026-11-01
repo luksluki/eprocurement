@@ -1,9 +1,10 @@
 // Package grpcserver provides the shared gRPC server scaffolding for all
 // services: standard health (liveness "" / readiness keyed by service name,
 // backed by a dependency ping loop), reflection, and the platform unary
-// interceptors — trace-id propagation, JSON request logging, and panic
-// recovery. Services add their own interceptors (e.g. RBAC) and register
-// their APIs on the underlying grpc.Server before Serve.
+// interceptors — trace-id propagation, request-latency metrics (#55), JSON
+// request logging, and panic recovery. Services add their own interceptors
+// (e.g. RBAC) and register their APIs on the underlying grpc.Server before
+// Serve.
 package grpcserver
 
 import (
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/luksluki/eprocurement/internal/platform/logger"
+	"github.com/luksluki/eprocurement/internal/platform/metrics"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
@@ -37,6 +39,9 @@ type Server struct {
 	pinger   Pinger
 	interval time.Duration
 	extra    []grpc.UnaryServerInterceptor
+	// metrics, when set via WithMetrics, records per-call latency ahead of
+	// the extra interceptors (see WithMetrics).
+	metrics grpc.UnaryServerInterceptor
 	// lastHealth mirrors the reported readiness status; written only by
 	// refreshReadiness, which runs sequentially (once in Serve, then from the
 	// single readinessLoop goroutine).
@@ -66,6 +71,18 @@ func WithUnary(interceptors ...grpc.UnaryServerInterceptor) Option {
 	return func(s *Server) { s.extra = append(s.extra, interceptors...) }
 }
 
+// WithMetrics chains the #55 gRPC latency interceptor
+// (grpc_request_duration_seconds{method, code}) right after the trace
+// interceptor, so the observed duration covers the RBAC re-check and the
+// handler. A nil Collectors is ignored (tests).
+func WithMetrics(c *metrics.Collectors) Option {
+	return func(s *Server) {
+		if c != nil {
+			s.metrics = c.GRPCUnaryInterceptor()
+		}
+	}
+}
+
 // New returns a Server ready to accept API registrations and then Serve.
 func New(log *slog.Logger, pinger Pinger, opts ...Option) *Server {
 	s := &Server{
@@ -80,8 +97,12 @@ func New(log *slog.Logger, pinger Pinger, opts ...Option) *Server {
 		opt(s)
 	}
 
-	chain := append([]grpc.UnaryServerInterceptor{TraceInterceptor},
-		append(s.extra, s.loggingInterceptor, s.recoveryInterceptor)...)
+	chain := []grpc.UnaryServerInterceptor{TraceInterceptor}
+	if s.metrics != nil {
+		chain = append(chain, s.metrics)
+	}
+	chain = append(chain, s.extra...)
+	chain = append(chain, s.loggingInterceptor, s.recoveryInterceptor)
 	s.grpc = grpc.NewServer(grpc.ChainUnaryInterceptor(chain...))
 	s.health = health.NewServer()
 	s.lastHealth = healthpb.HealthCheckResponse_NOT_SERVING

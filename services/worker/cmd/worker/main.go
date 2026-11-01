@@ -1,15 +1,20 @@
 // Command worker runs the background jobs in ONE binary under ONE signal
-// context (the #45 + #47 + #48 + #49 composition, dev-notes 047/048/049):
+// context (the #45 + #47 + #48 + #49 + #55 composition, dev-notes
+// 047/048/049/055):
 //
 //   - the transactional outbox publisher (#45): poll procurement.outbox,
 //     publish the §14.5 envelopes to RabbitMQ, mark published_at;
 //   - the Mongo projection consumers (#47): consume documents.history and
 //     notifications idempotently (unique event_id dedupe);
 //   - the DLQ depth monitor (#48): log an hourly structured summary of
-//     procurement.dlq's depth (PRD §16);
+//     procurement.dlq's depth (PRD §16) and publish the depth gauge (#55);
 //   - the nightly export scheduler (#49): fire EXPORT_SCHEDULE in EXPORT_TZ,
 //     per tenant take the Redis lock, write the PO register CSV to MinIO,
-//     keep the run history in Mongo export_runs, detect missed runs.
+//     keep the run history in Mongo export_runs, detect missed runs;
+//   - the export-age refresher (#55): recompute export_age_seconds{tenant}
+//     from the Redis heartbeats every EXPORT_AGE_INTERVAL;
+//   - the /metrics server (#55): publish the gauges on METRICS_PORT
+//     (container-internal; only Prometheus scrapes it).
 //
 // SIGINT/SIGTERM stops all components gracefully (each Run returns nil); a
 // fatal error in any cancels the siblings and fails the process. Boot
@@ -44,6 +49,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.com/luksluki/eprocurement/internal/platform/logger"
+	"github.com/luksluki/eprocurement/internal/platform/metrics"
 	exportstore "github.com/luksluki/eprocurement/services/documents/export"
 	"github.com/luksluki/eprocurement/services/documents/history"
 	"github.com/luksluki/eprocurement/services/documents/notifications"
@@ -70,6 +76,11 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Metrics half (#55): the process gauges (outbox lag from the publisher
+	// loop, DLQ depth from the monitor, export age from the refresher
+	// below) and the /metrics server that publishes them.
+	mc := metrics.New()
+
 	// Publisher half (#45): postgres pool + broker connection with retry.
 	db, err := pgxpool.New(context.Background(), cfg.DatabaseURL)
 	if err != nil {
@@ -85,6 +96,7 @@ func run() error {
 	}
 	defer pub.Close()
 	loop := publisher.NewLoop(publisher.OutboxDB{DB: db}, pub, log, cfg.PollInterval, cfg.BatchSize)
+	loop.SetLagSink(mc.SetOutboxLag) // outbox_lag_seconds (#55)
 
 	// Consumer half (#47): Mongo connect+ping with backoff, then the
 	// projection indexes BEFORE consumption starts — a fresh database
@@ -120,11 +132,13 @@ func run() error {
 	}
 
 	// DLQ monitor half (#48): hourly depth summary, no boot dial — a
-	// broker that is down is one warn per tick, not a boot failure.
+	// broker that is down is one warn per tick, not a boot failure. Since
+	// #55 each successful reading also sets the dlq_depth_messages gauge.
 	monitor := &dlqmonitor.Monitor{
 		URL:      cfg.RabbitMQURL,
 		Interval: cfg.DLQSummaryInterval,
 		Logger:   log,
+		SetDepth: mc.SetDLQDepth,
 	}
 
 	// Export half (#49): Redis (lock + heartbeat), MinIO (the single
@@ -161,16 +175,26 @@ func run() error {
 		return err
 	}
 
+	// Export-age refresher (#55): export_age_seconds{tenant} from the same
+	// register + heartbeat KV the scheduler uses.
+	ageMonitor := export.NewAgeMonitor(export.NewRegister(db), export.NewRedisKV(rdb),
+		mc, cfg.ExportAgeInterval, log)
+
 	log.Info("starting worker",
 		"poll_interval", cfg.PollInterval.String(), "batch_size", cfg.BatchSize,
 		"dlq_summary_interval", cfg.DLQSummaryInterval.String(),
 		"queues", []string{topology.DocumentsHistoryQueue, topology.NotificationsQueue},
-		"export_schedule", cfg.ExportSchedule, "export_tz", cfg.ExportTZ)
+		"export_schedule", cfg.ExportSchedule, "export_tz", cfg.ExportTZ,
+		"export_age_interval", cfg.ExportAgeInterval.String(), "metrics_port", cfg.MetricsPort)
 	return runComponents(ctx, log,
 		component{"publisher", loop.Run},
 		component{"consumers", runner.Run},
 		component{"dlq-monitor", monitor.Run},
 		component{"exports", scheduler.Run},
+		component{"export-age", ageMonitor.Run},
+		component{"metrics", func(ctx context.Context) error {
+			return mc.Serve(ctx, ":"+cfg.MetricsPort, log)
+		}},
 	)
 }
 

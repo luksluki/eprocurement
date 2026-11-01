@@ -14,8 +14,9 @@ Two surfaces make the DLQ visible:
 - **Hourly depth summary (worker, #48)** — the worker logs one structured
   line per hour (configurable via `DLQ_SUMMARY_INTERVAL`, default `1h`):
   `{"msg":"dlq depth summary","depth":N}` — `INFO` at 0, `WARN` above 0.
-  This is the interim metric surface; the Prometheus/OTel export of the
-  same depth lands with the observability stack (#54, PRD §18).
+  Since #55 every successful reading also publishes the
+  `dlq_depth_messages` gauge (PRD §18); the OTel/tracing half of the
+  observability stack stays with #54.
 - **Admin endpoint (gateway, #48)** — `GET /api/v1/dlq` and
   `POST /api/v1/dlq/replay`, behind Bearer auth + the admin-only
   `dlq:manage` permission (`docs/rbac.md`).

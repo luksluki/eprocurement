@@ -15,7 +15,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/luksluki/eprocurement/internal/platform/dbmigrate"
+	"github.com/luksluki/eprocurement/internal/platform/grpcserver"
 	"github.com/luksluki/eprocurement/internal/platform/logger"
+	"github.com/luksluki/eprocurement/internal/platform/metrics"
 	"github.com/luksluki/eprocurement/services/procurement/approval"
 	procurementconfig "github.com/luksluki/eprocurement/services/procurement/config"
 	"github.com/luksluki/eprocurement/services/procurement/dashboard"
@@ -39,7 +41,7 @@ func main() {
 func run() error {
 	cfg := procurementconfig.Load()
 	log := logger.New("procurement", cfg.Env, cfg.LogLevel)
-	log.Info("starting procurement service", "port", cfg.Port)
+	log.Info("starting procurement service", "port", cfg.Port, "metrics_port", cfg.MetricsPort)
 
 	// Migrations run on boot with a simple-protocol pool (multi-statement SQL).
 	migCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
@@ -69,11 +71,29 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// #55: gRPC latency histogram + the /metrics server below.
+	mc := metrics.New()
+	metricsDone := make(chan error, 1)
+	go func() {
+		err := mc.Serve(ctx, ":"+cfg.MetricsPort, log)
+		if err != nil {
+			stop() // unblock the gRPC Serve; the error is returned below
+		}
+		metricsDone <- err
+	}()
+
 	lc := net.ListenConfig{}
 	lis, err := lc.Listen(ctx, "tcp", ":"+cfg.Port)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", cfg.Port, err)
 	}
-	srv := server.New(log, db, vendor.NewStore(db), requisition.NewStore(db), approval.NewStore(db), purchaseorder.NewStore(db), goodsreceipt.NewStore(db), invoice.NewStore(db), match.NewStore(db), dashboard.NewStore(db))
-	return srv.Serve(ctx, lis)
+	srv := server.New(log, db, vendor.NewStore(db), requisition.NewStore(db), approval.NewStore(db), purchaseorder.NewStore(db), goodsreceipt.NewStore(db), invoice.NewStore(db), match.NewStore(db), dashboard.NewStore(db),
+		grpcserver.WithMetrics(mc))
+	serveErr := srv.Serve(ctx, lis)
+	stop()
+	metricsErr := <-metricsDone
+	if serveErr != nil {
+		return serveErr
+	}
+	return metricsErr
 }

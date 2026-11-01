@@ -74,6 +74,10 @@ make help              # all targets
 | procurement (gRPC + health) | `localhost:8082` |
 | documents (gRPC + health) | `localhost:8083` — attachments: MongoDB `document_meta` + MinIO presigned uploads |
 | gateway (REST) | http://localhost:8080 (`/healthz`, `/.well-known/jwks.json`) |
+| Prometheus (#55, observability profile) | http://localhost:9090 — scrapes the services' container-internal `/metrics` ports (9100–9104) |
+| Grafana (#55, observability profile) | http://localhost:3001 — admin/`GRAFANA_ADMIN_PASSWORD`, dashboard auto-provisioned |
+
+Run `docker compose --profile observability up -d` to add Prometheus and Grafana; the default stack stays lean (the profile deviation from PRD §14.9 is recorded in `docs/dev-notes/055`).
 
 Reset the local stack (drops volumes): `make reset`.
 

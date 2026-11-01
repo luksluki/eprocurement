@@ -11,6 +11,7 @@ type Config struct {
 	Port        string // PORT — gRPC listen port (default "8082")
 	DatabaseURL string // DATABASE_URL — PostgreSQL connection string
 	LogLevel    string // LOG_LEVEL (default "info")
+	MetricsPort string // METRICS_PORT — /metrics listen port, container-internal (default "9102", #55)
 }
 
 // Load reads the configuration from the environment with local-development
@@ -21,6 +22,7 @@ func Load() Config {
 		Port:        envOr("PORT", "8082"),
 		DatabaseURL: envOr("DATABASE_URL", "postgres://eprocurement:eprocurement@localhost:5432/eprocurement?sslmode=disable"),
 		LogLevel:    envOr("LOG_LEVEL", "info"),
+		MetricsPort: envOr("METRICS_PORT", "9102"),
 	}
 }
 

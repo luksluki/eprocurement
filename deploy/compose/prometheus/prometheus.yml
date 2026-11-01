@@ -1,0 +1,30 @@
+# Prometheus scrape + rule configuration (#55, PRD §18).
+#
+# The five Go processes publish /metrics on their container-internal
+# METRICS_PORT (9100 gateway, 9101 identity, 9102 procurement, 9103
+# documents, 9104 worker — compose.yaml sets the same values). The ports
+# are reachable only on the backend compose network: nothing but this
+# scraper can touch them, and they are never published to the host.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: gateway
+    static_configs:
+      - targets: ["gateway:9100"]
+  - job_name: identity
+    static_configs:
+      - targets: ["identity:9101"]
+  - job_name: procurement
+    static_configs:
+      - targets: ["procurement:9102"]
+  - job_name: documents
+    static_configs:
+      - targets: ["documents:9103"]
+  - job_name: worker
+    static_configs:
+      - targets: ["worker:9104"]

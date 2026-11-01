@@ -20,6 +20,7 @@ type Config struct {
 	LogLevel        string        // LOG_LEVEL (default "info")
 	LoginRatePerMin int           // GATEWAY_LOGIN_RATE_PER_MIN — per-IP login limiter budget (default 30)
 	TrustedProxies  []string      // GATEWAY_TRUSTED_PROXIES — comma-separated IPs/CIDRs whose X-Forwarded-For is honored (#44); empty trusts no proxy
+	MetricsPort     string        // METRICS_PORT — /metrics listen port, container-internal (default "9100", #55)
 }
 
 // Load reads the configuration from the environment.
@@ -35,6 +36,7 @@ func Load() Config {
 		LogLevel:        envOr("LOG_LEVEL", "info"),
 		LoginRatePerMin: envInt("GATEWAY_LOGIN_RATE_PER_MIN", 30),
 		TrustedProxies:  envCSV("GATEWAY_TRUSTED_PROXIES"),
+		MetricsPort:     envOr("METRICS_PORT", "9100"),
 	}
 }
 

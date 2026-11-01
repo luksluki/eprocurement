@@ -68,7 +68,9 @@
     healthy) before procurement has applied migration 0006.
 - **`compose.yaml`** — `worker` service: build from the shared Dockerfile
   (`SERVICE: worker`), DATABASE_URL → postgres, RABBITMQ_URL → rabbitmq,
-  no ports, no healthcheck (nothing listens), `depends_on` postgres +
+  no ports, no healthcheck (nothing listens at #45; since #55 the worker
+  serves a container-internal `/metrics` port — still unpublished to the
+  host), `depends_on` postgres +
   rabbitmq healthy only (deliberately NOT procurement — see Decisions).
   The stale "remaining application services" comment is gone.
 - **`.env.example`** — documents the three WORKER_* overrides as
@@ -109,12 +111,15 @@
   has no create event name (`pr.submitted` is the first catalog step), so
   inventing one is a catalog decision, not a publisher wiring — documented
   two-ways in the schema doc as the plan required.
-- **Observability deferred to #54 explicitly** (AGENTS asks for spans/
+- **Observability deferred explicitly** (AGENTS asks for spans/
   metrics on new jobs; §18 lists outbox lag): the repo has zero OTel/
   Prometheus code (grep over internal/ services/ scripts/ matches nothing)
-  and compose's observability profile is parked for #54; #45 ships the
+  and compose's observability profile was parked; #45 ships the
   structured publish log (event_id, tenant_id, event_type, trace_id) and
-  records AMQP trace-header propagation + the lag metric as #54 follow-ups.
+  recorded AMQP trace-header propagation + the lag metric as follow-ups.
+  *(Numbering corrected by #55: originally both were parked under #54
+  here — the lag metric landed with #55 as `outbox_lag_seconds`; OTel
+  spans and AMQP trace headers stay #54's.)*
 - **Cross-tenant read is the publisher's sanctioned exception**: Pending/
   MarkPublished use `app.rls_bypass`; writer-side RLS stays enforced and
   the multi-tenant test also proves a tenant-scoped read still sees only
@@ -199,9 +204,10 @@ compose on :5672); commands run from the repo root:
 
 ## Follow-ups
 
-- **#54**: OTel spans for the publish path, trace-context propagation into
-  AMQP message headers, and the outbox lag metric (§18) — deferred
-  deliberately (no observability stack exists yet).
+- **#54**: OTel spans for the publish path and trace-context propagation
+  into AMQP message headers — still deferred (the OTel SDK is #54's).
+  The outbox lag metric (§18) landed with #55 as `outbox_lag_seconds`
+  *(this line originally deferred all three to #54; corrected by #55)*.
 - AMQP consumers (documents.history already dedupes by event_id in Mongo
   per #42; notifications reading `payload.requester_id`; exports), the
   consumer-side retry queues (5 s → 30 s → 5 m) and real DLQ semantics

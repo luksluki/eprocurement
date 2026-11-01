@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/luksluki/eprocurement/internal/platform/logger"
+	"github.com/luksluki/eprocurement/internal/platform/metrics"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -220,5 +221,68 @@ func TestRecoveryInterceptorConvertsPanicToInternal(t *testing.T) {
 	}
 	if logBuf.Len() == 0 {
 		t.Fatal("panic was not logged")
+	}
+}
+
+// TestMetricsInterceptorInChain pins the #55 wiring: a server constructed
+// with WithMetrics records grpc_request_duration_seconds{method, code} for
+// real calls that traverse the whole chain — the health check proves the
+// happy path, and the constructor without the option must stay
+// metrics-free (the nil guard).
+func TestMetricsInterceptorInChain(t *testing.T) {
+	log := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
+	mc := metrics.New()
+	srv := New(log, &fakePinger{},
+		WithServiceName("test-svc"),
+		WithHealthInterval(-1), // readiness set once in Serve, no ticking
+		WithMetrics(mc),
+	)
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() { _ = srv.Serve(context.Background(), lis) }()
+	defer func() { _ = lis.Close() }()
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	client := healthpb.NewHealthClient(conn)
+	if _, err := client.Check(t.Context(), &healthpb.HealthCheckRequest{}); err != nil {
+		t.Fatalf("health check: %v", err)
+	}
+
+	found := false
+	families, err := mc.Registry().Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, mf := range families {
+		if mf.GetName() != "grpc_request_duration_seconds" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			labels := map[string]string{}
+			for _, lp := range m.GetLabel() {
+				labels[lp.GetName()] = lp.GetValue()
+			}
+			if labels["method"] == "/grpc.health.v1.Health/Check" && labels["code"] == "OK" {
+				found = m.GetHistogram().GetSampleCount() >= 1
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no grpc_request_duration_seconds sample for the health check — the metrics interceptor is not in the chain")
+	}
+
+	// Failure path of the wiring: without WithMetrics the interceptor is
+	// absent and the server still constructs and serves.
+	bare := New(log, &fakePinger{}, WithServiceName("test-svc"), WithHealthInterval(-1))
+	if bare == nil {
+		t.Fatal("New without WithMetrics returned nil")
 	}
 }

@@ -1,0 +1,11 @@
+# Grafana datasource provisioning (#55): the compose-network Prometheus.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    uid: eproc-prometheus
+    isDefault: true
+    editable: false

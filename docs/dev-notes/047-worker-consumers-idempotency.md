@@ -118,11 +118,13 @@
   integration tests prove it the same way: every test gets a fresh scratch
   database whose indexes come from the same `EnsureIndexes` calls boot
   makes, then dedupe is asserted on it.
-- **DLQ metric deferred to #54** (PRD §14.5 "DLQ + metric"): the repo has
-  no observability stack yet (compose's observability profile is parked,
+- **DLQ metric deferred** (PRD §14.5 "DLQ + metric"): the repo had
+  no observability stack yet (compose's observability profile was parked,
   same finding as dev-note 045); the per-delivery structured log with
   `status=dlq` is the interim visibility, and `procurement.dlq` is
   admin-visible through RabbitMQ's management surface.
+  *(Numbering corrected by #55: originally deferred to #54 here — the
+  depth landed with #55 as `dlq_depth_messages`.)*
 - **Post-merge composition — DONE in this branch's merge of develop**
   (PRs #94/#95 both landed; resolved 2026-10-23):
   1. ~~one binary, two runners~~ — `cmd/worker` now boots the publisher
@@ -228,9 +230,10 @@ compose on :5672, MongoDB on :27017):
   `cmd/worker` under one signal context; compose `MONGO_URI` +
   `depends_on: mongo` verified already present on develop (no change
   needed).
-- **#54**: DLQ metric (PRD §14.5 "DLQ + metric"), OTel spans for the
-  consume path, and trace-context propagation into AMQP headers — deferred
-  with the observability stack, same as #45.
+- **#54**: OTel spans for the consume path and trace-context propagation
+  into AMQP headers — deferred with the observability stack, same as #45.
+  The DLQ metric (PRD §14.5) landed with #55 as `dlq_depth_messages`
+  *(originally listed under #54 here; corrected by #55)*.
 - Read side for notifications (a future issue decides what surfaces them);
   the collection and its `tenant_occurred` index are ready for it.
 - PR description must flag: the maintainer-approved envelope extension
