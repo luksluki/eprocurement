@@ -142,19 +142,21 @@ message ListEventsResponse {
   string next_cursor = 2;  // empty on the last page
 }
 
-// ExportRun is one nightly-export run record as stored in MongoDB
-// export_runs (#49, FR-10). object_key stays internal — clients download
-// through the presigned URL, never the raw key (the attachment convention).
+// ExportRun is one export run record as stored in MongoDB export_runs
+// (#49 nightly, #53 manual; FR-10). object_key stays internal — clients
+// download through the presigned URL, never the raw key (the attachment
+// convention).
 message ExportRun {
   string run_id = 1;
   string tenant_id = 2;
-  string scheduled_for = 3;  // RFC 3339 — the slot this run belongs to
+  string scheduled_for = 3;  // RFC 3339 — the slot this run belongs to (manual: the event's occurred_at)
   string status = 4;         // "success" | "failed"
   int32 row_count = 5;       // PO rows written to the CSV
   bool missed_previous = 6;  // detection found no successful run in the previous slot
   string error_message = 7;  // failure detail; empty on success
   string started_at = 8;     // RFC 3339
   string finished_at = 9;    // RFC 3339
+  string trigger = 10;       // "scheduled" (nightly #49) | "manual" (#53); empty on pre-#53 rows = scheduled
 }
 
 message ListExportRunsRequest {

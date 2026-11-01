@@ -33,6 +33,15 @@ const (
 	StatusFailed  = "failed"
 )
 
+// Run triggers (#53): what started the run. Nightly records set
+// TriggerScheduled explicitly; records written before #53 carry no field and
+// decode as "" — every reader treats "" as scheduled (the only trigger that
+// existed), so the detection semantics of #49 are preserved verbatim.
+const (
+	TriggerScheduled = "scheduled"
+	TriggerManual    = "manual"
+)
+
 // Machine-readable failure codes — the gRPC message text at the API
 // boundary, following the history package's convention.
 var (
@@ -48,16 +57,19 @@ const (
 )
 
 // Run is one export run record: what the worker did for one tenant in one
-// scheduled slot. ObjectKey stays internal — it crosses no API surface
-// (clients download through presigned URLs, the attachment convention).
+// scheduled slot (nightly) or for one export.requested event (manual, #53 —
+// ScheduledFor then carries the event's occurred_at). ObjectKey stays
+// internal — it crosses no API surface (clients download through presigned
+// URLs, the attachment convention).
 type Run struct {
 	RunID          string    // uuid, regenerated on overwrite
 	TenantID       string    // tenant scoping
-	ScheduledFor   time.Time // the slot this run belongs to (the fire time)
+	ScheduledFor   time.Time // the slot this run belongs to (nightly: the fire time; manual: the event's occurred_at)
 	Status         string    // success | failed
-	ObjectKey      string    // exports/{tenant}/{yyyy-mm-dd}/purchase-orders.csv; empty on failure
+	Trigger        string    // scheduled | manual ("" = pre-#53 nightly rows)
+	ObjectKey      string    // exports/{tenant}/{yyyy-mm-dd}/purchase-orders[-manual-{HHMMSS}].csv; empty on failure
 	RowCount       int       // PO rows written to the CSV
-	MissedPrevious bool      // detection found no successful run in the previous slot
+	MissedPrevious bool      // detection found no successful run in the previous slot (nightly only)
 	ErrorMessage   string    // failure detail; empty on success
 	StartedAt      time.Time
 	FinishedAt     time.Time
@@ -115,6 +127,7 @@ func RunBSON(r Run) bson.M {
 		"tenant_id":       r.TenantID,
 		"scheduled_for":   r.ScheduledFor,
 		"status":          r.Status,
+		"trigger":         r.Trigger,
 		"object_key":      r.ObjectKey,
 		"row_count":       r.RowCount,
 		"missed_previous": r.MissedPrevious,
@@ -155,6 +168,7 @@ type runDoc struct {
 	TenantID       string    `bson:"tenant_id"`
 	ScheduledFor   time.Time `bson:"scheduled_for"`
 	Status         string    `bson:"status"`
+	Trigger        string    `bson:"trigger"`
 	ObjectKey      string    `bson:"object_key"`
 	RowCount       int       `bson:"row_count"`
 	MissedPrevious bool      `bson:"missed_previous"`
@@ -167,17 +181,27 @@ type runDoc struct {
 func (d runDoc) toRun() Run {
 	return Run{
 		RunID: d.RunID, TenantID: d.TenantID, ScheduledFor: d.ScheduledFor,
-		Status: d.Status, ObjectKey: d.ObjectKey, RowCount: d.RowCount,
-		MissedPrevious: d.MissedPrevious, ErrorMessage: d.ErrorMessage,
-		StartedAt: d.StartedAt, FinishedAt: d.FinishedAt, UpdatedAt: d.UpdatedAt,
+		Status: d.Status, Trigger: d.Trigger, ObjectKey: d.ObjectKey,
+		RowCount: d.RowCount, MissedPrevious: d.MissedPrevious,
+		ErrorMessage: d.ErrorMessage,
+		StartedAt:    d.StartedAt, FinishedAt: d.FinishedAt, UpdatedAt: d.UpdatedAt,
 	}
 }
 
-// Latest returns the tenant's newest run record by scheduled_for, or nil
-// when the tenant has none (the cold-start signal for missed-run
-// detection).
+// scheduledOnly scopes a query to nightly runs (#53): manual runs never
+// feed the missed-run detection — a manual success must not satisfy the
+// previous slot nor reset the heartbeat clock, and the boot pass must flag
+// the newest SCHEDULED record, not a newer manual one. $ne keeps documents
+// written before #53 (no trigger field) in scope: they are nightly by
+// definition.
+func scheduledOnly() bson.M { return bson.M{"$ne": TriggerManual} }
+
+// Latest returns the tenant's newest scheduled run record by scheduled_for,
+// or nil when the tenant has none (the cold-start signal for missed-run
+// detection). Manual runs (#53) are invisible here — see scheduledOnly; the
+// List/Get read side serves them.
 func (s *Store) Latest(ctx context.Context, tenantID string) (*Run, error) {
-	cursor, err := s.coll.Find(ctx, bson.M{"tenant_id": tenantID},
+	cursor, err := s.coll.Find(ctx, bson.M{"tenant_id": tenantID, "trigger": scheduledOnly()},
 		options.Find().SetSort(bson.D{{Key: "scheduled_for", Value: -1}}).SetLimit(1))
 	if err != nil {
 		return nil, fmt.Errorf("export: latest run: %w", err)
@@ -197,14 +221,16 @@ func (s *Store) Latest(ctx context.Context, tenantID string) (*Run, error) {
 	return nil, nil
 }
 
-// HasSuccess reports whether the tenant has a successful run whose slot
-// falls in [from, to). The missed-run detection asks it about the previous
-// slot; the half-open range tolerates clock skew that exact-equality
-// matching on scheduled_for would not.
+// HasSuccess reports whether the tenant has a successful SCHEDULED run
+// whose slot falls in [from, to). The missed-run detection asks it about
+// the previous slot; the half-open range tolerates clock skew that
+// exact-equality matching on scheduled_for would not. Manual successes
+// (#53) do not count — a manual run is not the nightly slot happening.
 func (s *Store) HasSuccess(ctx context.Context, tenantID string, from, to time.Time) (bool, error) {
 	count, err := s.coll.CountDocuments(ctx, bson.M{
 		"tenant_id":     tenantID,
 		"status":        StatusSuccess,
+		"trigger":       scheduledOnly(),
 		"scheduled_for": bson.M{"$gte": from, "$lt": to},
 	}, options.Count().SetLimit(1))
 	if err != nil {
@@ -213,11 +239,13 @@ func (s *Store) HasSuccess(ctx context.Context, tenantID string, from, to time.T
 	return count > 0, nil
 }
 
-// MarkNewestMissedPrevious flags the tenant's newest run record with
-// missed_previous=true — the boot-time pass of the missed-run detection
-// (#49: a miss surfaces in the run history without waiting for the next
-// fire). Idempotent: an already-flagged newest record stays flagged, and a
-// tenant with no records is a no-op (cold start).
+// MarkNewestMissedPrevious flags the tenant's newest SCHEDULED run record
+// with missed_previous=true — the boot-time pass of the missed-run
+// detection (#49: a miss surfaces in the run history without waiting for
+// the next fire). Idempotent: an already-flagged newest record stays
+// flagged, and a tenant with no records is a no-op (cold start). A newer
+// manual record (#53) is never the flagged one — Latest scopes to
+// scheduled runs.
 func (s *Store) MarkNewestMissedPrevious(ctx context.Context, tenantID string) error {
 	latest, err := s.Latest(ctx, tenantID)
 	if err != nil {

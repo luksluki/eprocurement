@@ -25,6 +25,7 @@ Fixed catalog (seeded in `identity.roles`): **admin, requester, approver, buyer,
 | `invoice:write` | | | | ✓ | |
 | `match:configure` | | | | | |
 | `export:run` | | | | ✓ | |
+| `export:trigger` | | | | | |
 | `audit:read` | | | | | ✓ |
 | `users:manage` | | | | | |
 | `dlq:manage` | | | | | |
@@ -50,6 +51,8 @@ Read permissions are broad by design (everyone in the tenant sees the flow they 
 - **Audit log (#44)** — `GET /api/v1/audit` and `GET /api/v1/audit/export` are **`audit:read` at both layers** (gateway `RequirePermission` + documents' `MethodPermissions` on `ListAudit`/`ExportAudit`) — **viewer + admin only**, the permission's first real consumer, per the maintainer decision on issue #44. No ownership rule — a tenant's decision log belongs to the tenant; the store scopes every query by `tenant_id`, so cross-tenant reads are invisible (empty result). The audit surface is read-only over an append-only collection (PRD §17). The web nav entry renders only for `audit:read` holders (`layout.tsx`), and the page itself answers the gateway's 403 with a dedicated sentence for anyone reaching it by URL.
 
 - **Dashboard (#52)** — `GET /api/v1/dashboard/summary` and its gRPC twin `GetDashboard` are the broad **`dashboard:read`** — every role, tenant-wide. The widget aggregates only reads the roles already hold (pending approval steps over submitted requisitions, the PO register behind the spend windows, the PO status distribution — all behind `requisition:read`/`po:read` individually), so the landing page (PRD §11) is as broad as its ingredients; no ownership rule applies. The store scopes every query by tenant (RLS via `WithTenant`), so a cross-tenant dashboard is an empty snapshot, not a leak.
+
+- **Manual export trigger (#53)** — `POST /api/v1/exports` and its gRPC twin `TriggerExport` are **`export:trigger` — admin-only by design** (the `approval:configure`/`match:configure`/`dlq:manage` pattern; triggering a manual export is an operational act, not a business-role one — the issue #53 decision comment). Finance is denied here even though it holds `export:run` from #49: that permission governs reading the run history and downloading, which is deliberately **not** demoted. No ownership rule — the request is tenant-wide by nature; procurement writes one `export.requested` outbox row in the caller's tenant and the worker's exports consumer runs it.
 
 ## Enforcement layers (defense in depth)
 

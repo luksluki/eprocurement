@@ -25,11 +25,18 @@ reaper → pending older than ATTACHMENT_PENDING_TTL (default 24h):
   become key segments; accepted owner kinds are `vendor` (#26),
   `requisition` (#33), and `invoice` (#39).
 - Export artifacts live in the **same single bucket** under
-  `exports/{tenant_id}/{yyyy-mm-dd}/purchase-orders.csv` (#49): the worker
-  writes them (Put) and documents presigns the downloads (PresignGet) —
-  one `S3_BUCKET`, no second bucket env. The `{yyyy-mm-dd}` segment is the
-  fire time's date in `EXPORT_TZ`, not raw UTC; the per-date key makes a
-  re-run overwrite idempotently.
+  `exports/{tenant_id}/{yyyy-mm-dd}/purchase-orders.csv` (nightly, #49) or
+  `exports/{tenant_id}/{yyyy-mm-dd}/purchase-orders-manual-{HHMMSS}.csv`
+  (manual, #53 — date and clock in `EXPORT_TZ`): the worker writes them
+  (Put) and documents presigns the downloads (PresignGet) — one
+  `S3_BUCKET`, no second bucket env. The `{yyyy-mm-dd}` segment is the
+  fire/anchor time's date in `EXPORT_TZ`, not raw UTC; the per-date nightly
+  key makes a re-run overwrite idempotently, and the manual key's clock
+  segment keeps manual runs off the nightly artifact. **Known edge
+  (accepted, #53 decision):** two manual triggers within the same second
+  produce the same key — the later run's bytes win (last-write-wins on the
+  object) while both run records exist, so the earlier run's presigned
+  download serves the later run's CSV.
 - Declarations are bounded: mime allowlist (pdf, png, jpeg, webp, docx,
   xlsx), `ATTACHMENT_MAX_SIZE_MB` (default 25), filename 1–255 chars with no
   path separators, checksum must be sha256 hex (lowercased on accept).
@@ -369,9 +376,10 @@ on `{tenant_id, scheduled_for}` (a re-run of a date overwrites, regenerating
 |---|---|---|
 | `run_id` | string | uuid, regenerated on overwrite |
 | `tenant_id` | string | tenant scoping |
-| `scheduled_for` | date | the slot this run belongs to (the fire time) |
+| `scheduled_for` | date | the slot this run belongs to (nightly: the fire time; manual #53: the event's occurred_at — the `{tenant_id, scheduled_for}` upsert key, so broker retries overwrite one record) |
 | `status` | string | `success` \| `failed` |
-| `object_key` | string | `exports/{tenant}/{yyyy-mm-dd}/purchase-orders.csv`; empty on failure |
+| `trigger` | string | `scheduled` (nightly #49) \| `manual` (#53); absent on pre-#53 rows = scheduled. Detection reads (`Latest`, `HasSuccess`, `MarkNewestMissedPrevious`) filter `trigger != "manual"` — a manual run never satisfies a nightly slot nor gets the missed flag; `List`/`Get` serve both |
+| `object_key` | string | `exports/{tenant}/{yyyy-mm-dd}/purchase-orders.csv` (nightly) or `…/purchase-orders-manual-{HHMMSS}.csv` (manual); empty on failure |
 | `row_count` | int | PO rows written to the CSV |
 | `missed_previous` | bool | detection found no successful run in the previous slot (boot + fire passes) |
 | `error_message` | string | failure detail (#53's error display); empty on success |
@@ -416,4 +424,32 @@ REST (gateway): `GET /api/v1/exports/runs?limit=` and
 `RequirePermission(export:run)`; `object_key` never crosses the wire.
 Machine codes: `export_run_id_invalid` (400), `export_run_not_found`
 (404, cross-tenant indistinguishable), `export_not_succeeded` (412).
-`POST /api/v1/exports` (manual export, PRD §15) belongs to #53.
+
+## Manual export trigger (#53)
+
+`POST /api/v1/exports` (PRD §15) queues one manual export per call —
+**`export:trigger`, admin-only** at the gateway (`RequirePermission`) and
+at procurement's service layer (`MethodPermissions`), the `dlq:manage`
+twin; finance's #49 `export:run` read access is deliberately not demoted
+(docs/rbac.md). The handler is procurement's `TriggerExport` RPC: ONE
+`export.requested` outbox row (§14.6 catalog; entity `export`, entity id =
+event id, actor from the propagated context) inside its own
+`tenant.WithTenant` transaction — no business state changes with it
+(ADR-0001: procurement is the single outbox writer). The gateway answers
+`202 {"status":"requested","event_id":…}`.
+
+The worker runs it: a **second consumer runner** dedicated to the `exports`
+queue (binding `export.requested`, topology #46) with
+`DeliveryTimeout = EXPORT_JOB_BUDGET + RecordWriteBudget + margin` and
+prefetch 1 — the #47 runner's 10 s cap stays untouched for
+history/notifications. The handler (`services/worker/export/manual.go`)
+exports the trailing-24 h window anchored on the event's `occurred_at`
+(deterministic across retries), writes the manual object key, and upserts
+the run record with `trigger="manual"`, `scheduled_for=occurred_at`. No
+Redis lock, no heartbeat, no missed-run interaction. A failure records
+`status=failed` + `error_message` on a fresh (`WithoutCancel`) context AND
+returns the error, so the broker retry ladder (5 s/30 s/5 m → DLQ)
+applies; a redelivery re-exports the same window and overwrites the same
+record. `export.completed`/`export.failed` remain unemitted — #49's
+documented gap, kept by the #53 decision (the worker must not write the
+procurement outbox; the Mongo run history is the record).

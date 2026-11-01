@@ -6,6 +6,10 @@
 //     publish the §14.5 envelopes to RabbitMQ, mark published_at;
 //   - the Mongo projection consumers (#47): consume documents.history and
 //     notifications idempotently (unique event_id dedupe);
+//   - the exports consumer (#53): a second runner dedicated to the exports
+//     queue, running one manual export per export.requested event under a
+//     DeliveryTimeout sized from the export job budget (the #47 runner's
+//     10 s cap would kill real exports);
 //   - the DLQ depth monitor (#48): log an hourly structured summary of
 //     procurement.dlq's depth (PRD §16) and publish the depth gauge (#55);
 //   - the nightly export scheduler (#49): fire EXPORT_SCHEDULE in EXPORT_TZ,
@@ -192,6 +196,38 @@ func run() error {
 		return err
 	}
 
+	// Exports consumer (#53): a SECOND consumer runner dedicated to the
+	// exports queue. Its DeliveryTimeout is sized from the same numbers as
+	// the scheduler (job budget + record budget + margin) — the #47
+	// runner's 10 s default cap would kill every real export mid-flight,
+	// and the history/notifications guarantees stay untouched on the first
+	// runner. Prefetch 1: one long job at a time, no buffering. The
+	// topology.Declare both runners make is idempotent, and consumer.New
+	// accepts a handler subset of the same topology.
+	manualRunnerHandler, err := export.NewManualRunner(export.ManualConfig{
+		Timezone: cfg.ExportTZ,
+		Budget:   cfg.ExportJobBudget,
+	}, export.NewRegister(db), objects, runsStore, log)
+	if err != nil {
+		return err
+	}
+	manualTimeout, err := export.ManualDeliveryTimeout(cfg.ExportJobBudget)
+	if err != nil {
+		return err // fail-fast boot guard: timeout must strictly exceed the budget
+	}
+	exportsRunner, err := consumer.New(consumer.Config{
+		URL: cfg.RabbitMQURL,
+		Handlers: map[string]consumer.Handler{
+			topology.ExportsQueue: manualRunnerHandler,
+		},
+		Logger:          log,
+		Prefetch:        1,
+		DeliveryTimeout: manualTimeout,
+	})
+	if err != nil {
+		return err
+	}
+
 	// Export-age refresher (#55): export_age_seconds{tenant} from the same
 	// register + heartbeat KV the scheduler uses.
 	ageMonitor := export.NewAgeMonitor(export.NewRegister(db), export.NewRedisKV(rdb),
@@ -201,11 +237,14 @@ func run() error {
 		"poll_interval", cfg.PollInterval.String(), "batch_size", cfg.BatchSize,
 		"dlq_summary_interval", cfg.DLQSummaryInterval.String(),
 		"queues", []string{topology.DocumentsHistoryQueue, topology.NotificationsQueue},
+		"export_queues", []string{topology.ExportsQueue},
+		"export_delivery_timeout", manualTimeout.String(),
 		"export_schedule", cfg.ExportSchedule, "export_tz", cfg.ExportTZ,
 		"export_age_interval", cfg.ExportAgeInterval.String(), "metrics_port", cfg.MetricsPort)
 	return runComponents(ctx, log,
 		component{"publisher", loop.Run},
 		component{"consumers", runner.Run},
+		component{"exports-consumer", exportsRunner.Run},
 		component{"dlq-monitor", monitor.Run},
 		component{"exports", scheduler.Run},
 		component{"export-age", ageMonitor.Run},

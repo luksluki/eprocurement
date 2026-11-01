@@ -443,6 +443,10 @@ export type Dictionary = {
     download: string;
     downloading: string;
     downloadFailed: string;
+    trigger: string;
+    triggering: string;
+    triggerFailed: string;
+    manualBadge: string;
   };
   localeNames: { id: string; en: string };
 };
@@ -975,6 +979,10 @@ const id: Dictionary = {
     download: "Unduh CSV",
     downloading: "Menyiapkan…",
     downloadFailed: "Gagal menyiapkan tautan unduhan.",
+    trigger: "Jalankan ekspor sekarang",
+    triggering: "Mengantre…",
+    triggerFailed: "Gagal mengantre ekspor — coba lagi.",
+    manualBadge: "manual",
   },
   auditPage: {
     caption: "Log audit keputusan — hanya tambah, tanpa ubah/hapus",
@@ -1523,6 +1531,10 @@ const en: Dictionary = {
     download: "Download CSV",
     downloading: "Preparing…",
     downloadFailed: "Failed to prepare the download link.",
+    trigger: "Run export now",
+    triggering: "Queuing…",
+    triggerFailed: "Failed to queue the export — try again.",
+    manualBadge: "manual",
   },
   auditPage: {
     caption: "Decision audit log — append-only, no edits or deletes",

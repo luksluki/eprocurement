@@ -34,6 +34,7 @@ const (
 	InvoiceWrite      = "invoice:write"
 	MatchConfigure    = "match:configure"
 	ExportRun         = "export:run"
+	ExportTrigger     = "export:trigger"
 	AuditRead         = "audit:read"
 	UsersManage       = "users:manage"
 	DLQManage         = "dlq:manage"
@@ -75,6 +76,11 @@ var matrix = []entry{
 	// /admin/settings surface): no non-admin role grants it.
 	{MatchConfigure, nil},
 	{ExportRun, []string{RoleFinance}},
+	// Admin-only by design (#53, the issue's decision comment: triggering
+	// a manual export is an operational act, not a business-role one — the
+	// dlq:manage twin; finance's export:run READ of the run history from
+	// #49 is deliberately not demoted): no non-admin role grants it.
+	{ExportTrigger, nil},
 	{AuditRead, []string{RoleViewer}},
 	{UsersManage, nil},
 	// Admin-only by design (#48: the tenant admin operates the DLQ —

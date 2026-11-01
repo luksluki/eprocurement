@@ -60,6 +60,7 @@ import (
 	"github.com/luksluki/eprocurement/services/documents/notifications"
 	"github.com/luksluki/eprocurement/services/procurement/approval"
 	"github.com/luksluki/eprocurement/services/procurement/dashboard"
+	"github.com/luksluki/eprocurement/services/procurement/export"
 	"github.com/luksluki/eprocurement/services/procurement/goodsreceipt"
 	"github.com/luksluki/eprocurement/services/procurement/invoice"
 	"github.com/luksluki/eprocurement/services/procurement/match"
@@ -476,7 +477,7 @@ func newP2P(t *testing.T) *p2pEnv {
 	srv := server.New(log, r.db,
 		vendor.NewStore(r.db), requisition.NewStore(r.db), approval.NewStore(r.db),
 		purchaseorder.NewStore(r.db), goodsreceipt.NewStore(r.db), invoice.NewStore(r.db),
-		match.NewStore(r.db), dashboard.NewStore(r.db))
+		match.NewStore(r.db), dashboard.NewStore(r.db), export.NewStore(r.db))
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)

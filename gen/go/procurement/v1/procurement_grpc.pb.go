@@ -47,6 +47,7 @@ const (
 	Procurement_GetMatchSettings_FullMethodName         = "/procurement.v1.Procurement/GetMatchSettings"
 	Procurement_ReplaceMatchSettings_FullMethodName     = "/procurement.v1.Procurement/ReplaceMatchSettings"
 	Procurement_GetDashboard_FullMethodName             = "/procurement.v1.Procurement/GetDashboard"
+	Procurement_TriggerExport_FullMethodName            = "/procurement.v1.Procurement/TriggerExport"
 )
 
 // ProcurementClient is the client API for Procurement service.
@@ -241,6 +242,15 @@ type ProcurementClient interface {
 	// issued-then-cancelled POs), and the purchase
 	// order status distribution over all seven FR-06 statuses including zeros.
 	GetDashboard(ctx context.Context, in *GetDashboardRequest, opts ...grpc.CallOption) (*DashboardSummary, error)
+	// TriggerExport records a manual export request for the caller's tenant
+	// (#53, FR-10's manual half): exactly one export.requested outbox row
+	// (§14.6 catalog) committed in its own tenant transaction — no business
+	// state changes with it. The worker's exports consumer owns the run: the
+	// trailing-24 h PO register, the manual object key, and the run-history
+	// record. export:trigger — admin-only (docs/rbac.md). The gateway answers
+	// 202 {"status":"requested","event_id":…}; the id correlates the request
+	// with the queued event.
+	TriggerExport(ctx context.Context, in *TriggerExportRequest, opts ...grpc.CallOption) (*TriggerExportResponse, error)
 }
 
 type procurementClient struct {
@@ -531,6 +541,16 @@ func (c *procurementClient) GetDashboard(ctx context.Context, in *GetDashboardRe
 	return out, nil
 }
 
+func (c *procurementClient) TriggerExport(ctx context.Context, in *TriggerExportRequest, opts ...grpc.CallOption) (*TriggerExportResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TriggerExportResponse)
+	err := c.cc.Invoke(ctx, Procurement_TriggerExport_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ProcurementServer is the server API for Procurement service.
 // All implementations must embed UnimplementedProcurementServer
 // for forward compatibility.
@@ -723,6 +743,15 @@ type ProcurementServer interface {
 	// issued-then-cancelled POs), and the purchase
 	// order status distribution over all seven FR-06 statuses including zeros.
 	GetDashboard(context.Context, *GetDashboardRequest) (*DashboardSummary, error)
+	// TriggerExport records a manual export request for the caller's tenant
+	// (#53, FR-10's manual half): exactly one export.requested outbox row
+	// (§14.6 catalog) committed in its own tenant transaction — no business
+	// state changes with it. The worker's exports consumer owns the run: the
+	// trailing-24 h PO register, the manual object key, and the run-history
+	// record. export:trigger — admin-only (docs/rbac.md). The gateway answers
+	// 202 {"status":"requested","event_id":…}; the id correlates the request
+	// with the queued event.
+	TriggerExport(context.Context, *TriggerExportRequest) (*TriggerExportResponse, error)
 	mustEmbedUnimplementedProcurementServer()
 }
 
@@ -816,6 +845,9 @@ func (UnimplementedProcurementServer) ReplaceMatchSettings(context.Context, *Rep
 }
 func (UnimplementedProcurementServer) GetDashboard(context.Context, *GetDashboardRequest) (*DashboardSummary, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetDashboard not implemented")
+}
+func (UnimplementedProcurementServer) TriggerExport(context.Context, *TriggerExportRequest) (*TriggerExportResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method TriggerExport not implemented")
 }
 func (UnimplementedProcurementServer) mustEmbedUnimplementedProcurementServer() {}
 func (UnimplementedProcurementServer) testEmbeddedByValue()                     {}
@@ -1342,6 +1374,24 @@ func _Procurement_GetDashboard_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Procurement_TriggerExport_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TriggerExportRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProcurementServer).TriggerExport(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Procurement_TriggerExport_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProcurementServer).TriggerExport(ctx, req.(*TriggerExportRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Procurement_ServiceDesc is the grpc.ServiceDesc for Procurement service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1460,6 +1510,10 @@ var Procurement_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetDashboard",
 			Handler:    _Procurement_GetDashboard_Handler,
+		},
+		{
+			MethodName: "TriggerExport",
+			Handler:    _Procurement_TriggerExport_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

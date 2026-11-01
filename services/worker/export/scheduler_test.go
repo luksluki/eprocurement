@@ -270,6 +270,12 @@ func TestRunTenantSuccess(t *testing.T) {
 		run.MissedPrevious || run.ScheduledFor != fire || run.ErrorMessage != "" {
 		t.Fatalf("run record = %+v", run)
 	}
+	// #53: nightly records carry trigger=scheduled explicitly — the enum is
+	// filled on BOTH paths (manual runs write trigger=manual), and the
+	// detection filters on it.
+	if run.Trigger != export.TriggerScheduled {
+		t.Fatalf("nightly trigger = %q, want %q", run.Trigger, export.TriggerScheduled)
+	}
 	if _, ok := kv.values[HeartbeatKey("t-1")]; !ok {
 		t.Fatal("heartbeat not stamped on success")
 	}
