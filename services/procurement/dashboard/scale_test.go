@@ -25,6 +25,16 @@ const (
 
 // summaryBudgetMs is the whole-summary budget the dashboard must meet at
 // ~100k rows — the PRD §19 NFR table's "dashboard p95 < 500 ms" (FR-09).
+//
+// #56 measured the reconciled FR-09 < 300 ms question on both sides: the
+// clean dev fixture reads p95 ≈ 199 ms (under 300), but the CI runner —
+// where this budget is enforced, with the five fixtures' measurement loops
+// overlapping — read median ~275–282 ms / p95 307–783 ms across attempts
+// (CI run 41290280970 round 1 failed the 300 ms budget 3/3 attempts). Per
+// the maintainer decision on #56 ("jika terdapat banyak pertimbangan,
+// update sesuaikan PRD menjadi < 500ms"), closing that gap would take a
+// query redesign of the spend/pending widgets, so the enforced budget stays
+// §19's 500 ms and PRD FR-09 is reconciled to < 500 ms instead.
 const summaryBudgetMs = 500
 
 // shapeAttempts bounds the budget's retries. The budget is a steady-state

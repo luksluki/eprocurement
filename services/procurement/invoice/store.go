@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/luksluki/eprocurement/internal/platform/pgbatch"
 	"github.com/luksluki/eprocurement/internal/platform/tenant"
 	"github.com/luksluki/eprocurement/services/procurement/purchaseorder"
 )
@@ -294,12 +295,19 @@ func insertInvoice(ctx context.Context, tx pgx.Tx, tenantID string, po purchaseo
 		return Invoice{}, err
 	}
 	inv.Items = append([]Item(nil), in.Items...)
-	for _, it := range inv.Items {
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO procurement.invoice_lines (invoice_id, po_item_id, qty, unit_price_cents)
-			VALUES ($1, $2, $3, $4)`, inv.ID, it.POItemID, it.Qty, it.UnitPriceCents); err != nil {
-			return Invoice{}, err
-		}
+	// The lines go out as one batched pipeline (one network round trip,
+	// issue #56's write-path N+1) with the plain loop's per-row error
+	// semantics: the first failing row's error surfaces and the transaction
+	// fails as a whole either way — the header's 23505 duplicate-number
+	// mapping above is untouched.
+	lines := make([][]any, len(inv.Items))
+	for i, it := range inv.Items {
+		lines[i] = []any{inv.ID, it.POItemID, it.Qty, it.UnitPriceCents}
+	}
+	if err := pgbatch.Exec(ctx, tx, `
+		INSERT INTO procurement.invoice_lines (invoice_id, po_item_id, qty, unit_price_cents)
+		VALUES ($1, $2, $3, $4)`, lines); err != nil {
+		return Invoice{}, err
 	}
 	return inv, nil
 }

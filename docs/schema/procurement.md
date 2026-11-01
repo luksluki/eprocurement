@@ -1125,7 +1125,12 @@ All shapes pass with >4× headroom. Two facts from the EXPLAIN output
    the ~1,500-page heap is cheaper than index+heap lookups at 100k rows.
    The same plans appear even without RLS. The btree/trigram indexes above
    exist for the shapes where they pay off: deeper pages, more selective
-   prefixes, and scales where the heap stops fitting in cache.
+   prefixes, and scales where the heap stops fitting in cache. (#56's index
+   review sharpened this for the RLS reality: a `LIKE`/`ILIKE` qual is a
+   leaky function and cannot become an index condition on an
+   RLS-protected table at all — the prefix shapes keep their seq scans at
+   every selectivity until the policy question below is decided; migration
+   0015 is the experiment record, docs/perf.md the summary.)
 2. **The RLS policy's bypass arm keeps tenant-leading index quals
    unavailable.** `tenant_id = current_setting(...) OR app.rls_bypass='on'`
    cannot be planned as an index constraint (the planner cannot prove
@@ -1211,6 +1216,12 @@ Steady-state plans (from the test log's EXPLAIN (ANALYZE)):
 The prefix sort cost is also why the RLS policy's per-row
 `tenant_id::text = current_setting(…)` evaluation matters at this scale —
 same #27 trade-off; a platform-level policy reshaping remains a follow-up.
+#56 added the sharper constraint: the prefix qual itself (`number LIKE …`)
+is a leaky function and cannot become an index condition on an
+RLS-protected table at any selectivity (candidate `(number
+text_pattern_ops)` indexes present and `ANALYZE`d still seq-scanned; the
+experiment record is migration 0015, the mechanism summary in docs/perf.md
+and the invoice list's #56 section).
 
 ## Purchase order list — filters, pagination, query plans (#38)
 
@@ -1355,24 +1366,80 @@ shape's selectivity once a tenant's invoices reach list scale. There is no
 superseded index to drop (0009 created none on this pair); the prefix shapes
 keep tenant-leading scans under the #27 RLS-bypass-arm trade-off.
 
-### Measured plan (the #41 EXPLAIN evidence; the 100k fixture + p95 budget
-is deferred to #56 per the maintainer decision 2026-10-29)
+### Measured plans at 100k rows (the #56 budget test)
 
-60k invoices seeded in one tenant (10% `matched`), `VACUUM (ANALYZE)` run,
-then the exact list statement EXPLAINed under the real RLS context
-(`SET ROLE eproc_app` + `app.tenant_id`). The status-filter shape — the
-shape 0012 exists for — runs both arms on the new index:
+The #41 evidence below was 60k rows with the p95 budget deferred; #56 closed
+the deferral with the full fixture. `TestStoreListScale100k`
+(services/procurement/invoice) seeds one tenant on the #27/#32/#38/#52
+pattern — 16 vendors, 10k requisitions, 10k POs (two `po_items` each), **100k
+invoices** (one `invoice_line` each; statuses 80% `pending` / 10% `matched` /
+10% `discrepancy`; numbers `INV-56xxxxx`; `created_at` spread monotonically
+over 30 days so the `created_at DESC, id DESC` order is generation order) —
+via batched multi-row INSERTs under the bypass context, serializes the load
+phase on the scalegate advisory lock, brings the tables to their production
+steady state (`VACUUM (ANALYZE)` + `CHECKPOINT`), then reconciles every
+shape's total and newest page-1 row against the counts tracked while writing
+(unfiltered 100,000 · `matched` 10,000 · prefix `INV-5609` 1,000 · combined
+100) before timing: 3 warm-ups + 20 timed runs per shape, a bust retries
+after a cooldown (3 attempts, final decisive — the #38 protocol). Budget:
+**p95 < 300 ms** per shape (PRD §19). Measured on the dev machine, solo run
+2026-11-01 (dev collation; the Linux/CI numbers are lower):
 
-- **Count arm (InitPlan)**: `Index Only Scan using
-  invoices_tenant_status_idx`, `Index Cond: (status = 'matched')`,
-  `Heap Fetches: 0`, 50 buffers, ~2.4 ms.
-- **Page arm**: `Bitmap Index Scan on invoices_tenant_status_idx` (`Index
-  Cond: (status = 'matched')`, 6k rows) → Bitmap Heap Scan → top-N heapsort
-  on `(created_at DESC, id DESC)`, ~8.5 ms total execution.
+| Shape | median | p95 |
+|---|---|---|
+| unfiltered page 1 | ~79 ms | ~82 ms |
+| status = matched (10% of rows) | ~11 ms | ~14 ms |
+| number prefix (~1k rows) | ~49 ms | ~55 ms |
+| status + number prefix combined | ~13 ms | ~18 ms |
 
-The unfiltered count arm runs as an `Index Only Scan` over the same index
-(60k entries, `Heap Fetches: 0`, ~22 ms) — the planner prefers the 0012
-index even without the status predicate because `tenant_id` leads it.
+Steady-state plans (from the test log's `EXPLAIN (ANALYZE, BUFFERS)`):
+
+- **Unfiltered**: the count arm runs as `InitPlan 1 → Aggregate → Index Only
+  Scan using invoices_tenant_idx` (100k index entries, `Heap Fetches: 0`
+  thanks to the vacuumed visibility map, ~30 ms); the page arm is a parallel
+  seq scan + top-N heapsort over `created_at DESC, id DESC` (~54 ms, 1,924
+  buffers) — the #32/#38 twin: reading the heap is cheaper than any index
+  walk that must visit every row anyway.
+- **Status filter**: the shape 0012 exists for — count arm `Index Only Scan
+  using invoices_tenant_status_idx` (`Index Cond: (status = 'matched')`,
+  `Heap Fetches: 0`), page arm `Bitmap Index Scan` on the same index →
+  Bitmap Heap Scan → top-N heapsort; ~10 ms total.
+- **Number prefix / combined**: the prefix arm runs as a parallel seq scan
+  evaluating `upper(number) LIKE 'INV-5609%'` per row (~45 ms; the LIKE, not
+  the sort, dominates); the combined shape rides the 0012 status bitmap
+  (10k `discrepancy` rows) and filters the prefix per row (~5 ms of the
+  ~11 ms total).
+
+**The #56 prefix-index finding (why no 0015 index closes the prefix
+shapes):** the plan for #56 was to add prefix indexes "wherever the planner
+demonstrably benefits". The experiments (candidate indexes physically
+present and `ANALYZE`d — invoices `(upper(number) text_pattern_ops)`,
+requisitions/POs `(number text_pattern_ops)`, vendors `(code
+text_pattern_ops)`) measured the exact list statements at ~1k, ~100 and ~10
+matching rows (1%, 0.1%, 0.01% selectivity) under the real RLS context: the
+planner kept the (parallel) seq scan in every case and never touched the
+indexes. The mechanism, verified by isolating the predicate shape under an
+identical plan context: **a user qual containing a leaky function (`~~`
+LIKE, `~~*` ILIKE — `textlike.proleakproof = f`) can never become an index
+condition on a row-security-protected table** — the planner pulls it out of
+the scan so the policy filter is guaranteed to evaluate first. The control:
+the same statement with leakproof range quals (`number >= 'X' AND number <
+'Y'`; `text_ge`/`text_lt` are leakproof) on a plain btree index produced
+`Index Scan … Index Cond` under the same RLS context, and the status
+equalities above keep their bitmap scans for the same reason
+(`texteq` is leakproof). So no prefix index can serve these lists while the
+#23 single-policy RLS design stands — closing them needs the policy
+reshaping / read-role split (platform decision, the #27 trade-off below) or
+a leakproof range-bound rewrite of the prefix predicates (a
+collation-sensitive query-semantics change — recorded as a follow-up in
+docs/perf.md). The full experiment record is migration
+`0015_list_prefix_index_review.sql`; the summary lives in docs/perf.md.
+
+The #41 60k-row evidence (superseded in scale, same plan shapes): the
+status-filter shape ran both arms on 0012 — count arm `Index Only Scan`
+(6k entries, `Heap Fetches: 0`, ~2.4 ms), page arm `Bitmap Index Scan` →
+top-N heapsort (~8.5 ms); the unfiltered count arm preferred the same index
+as an `Index Only Scan` over 60k entries (~22 ms).
 
 ## Invoice UI with match result (#41)
 
@@ -1517,11 +1584,20 @@ windows), brings the tables to production steady state (`VACUUM (ANALYZE)` +
 `CHECKPOINT`), then measures the whole `Summary` call: warm-ups + 20 timed
 iterations, a bust retries after a cooldown (final attempt decisive — the
 #38 CI-contention protocol). Budget: **p95 < 500 ms per whole-summary call**
-(PRD §19's dashboard row). Measured on the dev machine: **median ~254–404 ms,
+(PRD §19's dashboard row; FR-09's < 300 ms figure was reconciled to it in
+#56 per the maintainer decision 2026-11-01 — measured on both sides: the
+#56 clean dev run read median ~165 ms / p95 ~199 ms with the 0014 indexes,
+under 300, but the CI runner where the budget is enforced read median
+~275–282 ms / p95 307–783 ms under the concurrent five-fixture run
+(CI run 41290280970 round 1 failed a 300 ms trial budget 3/3 attempts), so
+closing the gap would take a spend/pending query redesign and the enforced
+budget stays §19's 500 ms).
+Measured on the dev machine at the #52 decision: **median ~254–404 ms,
 p95 ~265–456 ms** across runs (the spread tracks database churn between
 immediately preceding runs; the passing steady-state run landed p95 341 ms —
-the EXPLAIN timings below sum to ~313 ms). Per-query EXPLAIN (ANALYZE,
-BUFFERS) from the passing run, logged by the test:
+the EXPLAIN timings below sum to ~313 ms), improved to **median ~165 ms /
+p95 ~199 ms** in the #56 clean run (no other fixtures' data in the tables).
+Per-query EXPLAIN (ANALYZE, BUFFERS) from the passing run, logged by the test:
 
 | Query | Plan shape | Execution |
 |---|---|---|

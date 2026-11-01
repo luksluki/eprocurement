@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/luksluki/eprocurement/internal/platform/logger"
+	"github.com/luksluki/eprocurement/internal/platform/pgbatch"
 	"github.com/luksluki/eprocurement/internal/platform/tenant"
 	"github.com/luksluki/eprocurement/services/procurement/outbox"
 	"github.com/luksluki/eprocurement/services/procurement/requisition"
@@ -527,13 +528,18 @@ func insertPO(ctx context.Context, tx pgx.Tx, agg *PurchaseOrder) (PurchaseOrder
 		agg.Currency, agg.TotalCents, agg.CreatedBy), &out); err != nil {
 		return PurchaseOrder{}, err
 	}
-	for _, it := range agg.Items {
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO procurement.po_items (po_id, description, qty_ordered, unit_price_cents)
-			VALUES ($1, $2, $3, $4)`,
-			out.ID, it.Description, it.Qty, it.UnitPriceCents); err != nil {
-			return PurchaseOrder{}, err
-		}
+	// The item basket goes out as one batched pipeline (one network round
+	// trip, issue #56's write-path N+1) with the plain loop's per-row error
+	// semantics: the first failing row's error surfaces, the transaction
+	// fails as a whole either way.
+	rows := make([][]any, len(agg.Items))
+	for i, it := range agg.Items {
+		rows[i] = []any{out.ID, it.Description, it.Qty, it.UnitPriceCents}
+	}
+	if err := pgbatch.Exec(ctx, tx, `
+		INSERT INTO procurement.po_items (po_id, description, qty_ordered, unit_price_cents)
+		VALUES ($1, $2, $3, $4)`, rows); err != nil {
+		return PurchaseOrder{}, err
 	}
 	out.Items = append([]Item(nil), agg.Items...)
 	return out, nil
