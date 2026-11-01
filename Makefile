@@ -1,4 +1,4 @@
-.PHONY: help install build lint test fmt compose-up compose-down compose-logs compose-ps seed seed-reset reset gen-proto cover test-integration test-p2p e2e perf-budget
+.PHONY: help install build lint test fmt compose-up compose-down compose-logs compose-ps seed seed-reset reset gen-proto cover cover-procurement test-unit test-integration test-p2p e2e perf-budget
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -11,11 +11,13 @@ help: ## Show available targets
 	@echo "  compose-down     Stop local stack (keeps volumes)"
 	@echo "  compose-logs     Follow local stack logs"
 	@echo "  compose-ps       Show service health"
-	@echo "  seed             Reset demo data and generate the dataset"
+	@echo "  seed             Reset demo data and generate the dataset (budget SEED_MAX_SECONDS)"
 	@echo "  seed-reset       Wipe demo data (PostgreSQL + MongoDB)"
 	@echo "  reset            Drop volumes and recreate the local stack"
 	@echo "  gen-proto        Regenerate gen/go from proto/ (needs protoc; see docs/onboarding.md)"
 	@echo "  cover            Identity-domain coverage, enforced threshold (stack must be up)"
+	@echo "  cover-procurement Procurement coverage, enforced threshold (stack must be up)"
+	@echo "  test-unit        Duration-gated unit suite, no TEST_* env (issue #57)"
 	@echo "  test-integration Full go test ./... against the compose database"
 	@echo "  test-p2p         Procure-to-pay cross-service suite (postgres+mongo+rabbitmq up)"
 	@echo "  e2e              Playwright happy path against the compose stack (stack must be up)"
@@ -51,8 +53,19 @@ compose-logs: ## Follow local stack logs
 compose-ps: ## Show service health
 	docker compose ps
 
-seed: ## Reset demo data and generate the deterministic dataset
-	go run ./scripts/seed
+# The #57 measured seed gate: wall time is printed on every run and fails
+# past SEED_MAX_SECONDS (default 120s — the AGENTS.md "under 2 minutes"
+# contract as a measurable gate, one convention with the unit-suite knob).
+seed: ## Reset demo data and generate the deterministic dataset (budget SEED_MAX_SECONDS)
+	@start=$$(date +%s); \
+	go run ./scripts/seed || exit $$?; \
+	elapsed=$$(( $$(date +%s) - start )); \
+	echo "seed: completed in $${elapsed}s (budget $(SEED_MAX_SECONDS)s)"; \
+	if [ "$$elapsed" -gt "$(SEED_MAX_SECONDS)" ]; then \
+		echo "FAIL: seed took $${elapsed}s, over the $(SEED_MAX_SECONDS)s budget (SEED_MAX_SECONDS)"; \
+		exit 1; \
+	fi; \
+	echo "OK: seed within the $(SEED_MAX_SECONDS)s budget (SEED_MAX_SECONDS)"
 
 seed-reset: ## Wipe demo data (PostgreSQL + MongoDB)
 	go run ./scripts/seed --reset
@@ -70,6 +83,13 @@ TEST_MONGO_URI ?= $(shell sed -n 's/^MONGO_URI=//p' .env 2>/dev/null)
 TEST_RABBITMQ_URL ?= $(shell sed -n 's/^RABBITMQ_URL=//p' .env 2>/dev/null)
 TEST_S3_ENDPOINT ?= $(shell sed -n 's/^S3_ENDPOINT=//p' .env 2>/dev/null)
 IDENTITY_COVERAGE_THRESHOLD ?= 80
+PROCUREMENT_COVERAGE_THRESHOLD ?= 80
+
+# Duration gates (#57): the unit suite and make seed each fail past their
+# budget, both defaulting to the AGENTS.md 2-minute contract. Env-tunable so
+# slow CI runners surface as a measured failure, not a frozen number.
+UNIT_SUITE_MAX_SECONDS ?= 120
+SEED_MAX_SECONDS ?= 120
 
 gen-proto: ## Regenerate gen/go from proto/
 	@test -n "$(PROTOC)" || (echo "protoc not found: install it into .tools/protoc (see docs/onboarding.md)" && exit 1)
@@ -86,6 +106,22 @@ cover: ## Identity-domain coverage with enforced threshold (compose stack must b
 	go tool cover -func=coverage.out | tail -1
 	@go tool cover -func=coverage.out | awk -v t=$(IDENTITY_COVERAGE_THRESHOLD) \
 		'/^total:/ {gsub("%","",$$3); if ($$3+0 < t) {print "FAIL: identity coverage " $$3 "% is below the " t "% threshold"; exit 1} print "OK: identity coverage " $$3 "% meets the " t "% threshold"}'
+
+# The #57 procurement guard: same shape as `cover` (dev-note 024's "apply the
+# same coverage guard to future domains"), over the parity set with the
+# maintainer's pinned coverpkg list (domain + server + config, cmd excluded).
+# Needs the compose database — the DB-backed store tests carry most of the
+# covered lines (unit-only reads ~22%).
+cover-procurement: ## Procurement coverage with enforced threshold (compose stack must be up)
+	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test ./services/procurement/... -count=1 -skip 'Scale100k' \
+		-coverprofile=coverage-procurement.out \
+		-coverpkg=./services/procurement/approval,./services/procurement/config,./services/procurement/dashboard,./services/procurement/goodsreceipt,./services/procurement/invoice,./services/procurement/match,./services/procurement/outbox,./services/procurement/purchaseorder,./services/procurement/requisition,./services/procurement/server,./services/procurement/vendor
+	go tool cover -func=coverage-procurement.out | tail -1
+	@go tool cover -func=coverage-procurement.out | awk -v t=$(PROCUREMENT_COVERAGE_THRESHOLD) \
+		'/^total:/ {gsub("%","",$$3); if ($$3+0 < t) {print "FAIL: procurement coverage " $$3 "% is below the " t "% threshold"; exit 1} print "OK: procurement coverage " $$3 "% meets the " t "% threshold"}'
+
+test-unit: ## Duration-gated unit suite — no TEST_* env, budget UNIT_SUITE_MAX_SECONDS (default 120s)
+	UNIT_SUITE_MAX_SECONDS="$(UNIT_SUITE_MAX_SECONDS)" bash scripts/dev/test-unit.sh
 
 test-integration: ## Full go test ./... against the compose database and object store
 	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" TEST_MONGO_URI="$(TEST_MONGO_URI)" \
