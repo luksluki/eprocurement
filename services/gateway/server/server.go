@@ -58,6 +58,7 @@ type ProcurementClient interface {
 	GetMatchSettings(ctx context.Context, in *procurementv1.GetMatchSettingsRequest, opts ...grpc.CallOption) (*procurementv1.MatchSettings, error)
 	ReplaceMatchSettings(ctx context.Context, in *procurementv1.ReplaceMatchSettingsRequest, opts ...grpc.CallOption) (*procurementv1.MatchSettings, error)
 	GetDashboard(ctx context.Context, in *procurementv1.GetDashboardRequest, opts ...grpc.CallOption) (*procurementv1.DashboardSummary, error)
+	TriggerExport(ctx context.Context, in *procurementv1.TriggerExportRequest, opts ...grpc.CallOption) (*procurementv1.TriggerExportResponse, error)
 }
 
 type gatewayOptions struct {
@@ -183,9 +184,13 @@ func New(log *slog.Logger, verifier *token.Verifier, opts ...Option) *fiber.App 
 	}
 	if o.documents != nil {
 		registerEventRoutes(app, verifier, o.documents)
-		registerExportRoutes(app, verifier, o.documents)
 		registerAuditRoutes(app, verifier, o.documents)
 	}
+	// #53: the export surface spans two backends — documents serves the run
+	// history (GET, export:run) and procurement takes the manual trigger
+	// (POST, export:trigger). registerExportRoutes nil-guards each half, so
+	// an app wired with only one of them exposes exactly that half.
+	registerExportRoutes(app, verifier, o.documents, o.procurement)
 	if o.dlq != nil {
 		registerDLQRoutes(app, verifier, o.dlq)
 	}

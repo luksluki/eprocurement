@@ -243,3 +243,75 @@ func TestListLimitClamp(t *testing.T) {
 		t.Fatal("empty tenant id must fail")
 	}
 }
+
+// TestManualRunsInvisibleToDetection pins #53's core store contract: manual
+// run records (trigger="manual") are served by List/Get but invisible to
+// the #49 detection inputs — Latest, HasSuccess, and the boot flagging all
+// scope to scheduled runs (a manual success is not the nightly slot
+// happening; a newer manual record is never the flagged newest).
+func TestManualRunsInvisibleToDetection(t *testing.T) {
+	store := newStore(t)
+	ctx := t.Context()
+	tenant := "t-53"
+	nightly := run(tenant, day("2026-10-28T01:00:00Z"), StatusFailed)
+	nightly.Trigger = TriggerScheduled
+	if err := store.UpsertRun(ctx, nightly); err != nil {
+		t.Fatalf("upsert nightly: %v", err)
+	}
+
+	// A newer manual run exists — Latest must still answer the nightly one.
+	manual := run(tenant, day("2026-10-28T09:30:00Z"), StatusSuccess)
+	manual.Trigger = TriggerManual
+	if err := store.UpsertRun(ctx, manual); err != nil {
+		t.Fatalf("upsert manual: %v", err)
+	}
+
+	latest, err := store.Latest(ctx, tenant)
+	if err != nil {
+		t.Fatalf("latest: %v", err)
+	}
+	if latest == nil || latest.Trigger != TriggerScheduled || latest.ScheduledFor != nightly.ScheduledFor {
+		t.Fatalf("latest = %+v, want the nightly record despite the newer manual run", latest)
+	}
+
+	// HasSuccess over the manual run's window: the manual success does not
+	// satisfy the slot — only a scheduled success does.
+	from, to := day("2026-10-28T00:00:00Z"), day("2026-10-29T00:00:00Z")
+	if ok, err := store.HasSuccess(ctx, tenant, from, to); err != nil || ok {
+		t.Fatalf("has success with only a manual run = %v/%v, want false", ok, err)
+	}
+	scheduled := run(tenant, day("2026-10-28T01:00:00Z"), StatusSuccess)
+	scheduled.Trigger = TriggerScheduled
+	if err := store.UpsertRun(ctx, scheduled); err != nil {
+		t.Fatalf("upsert scheduled success: %v", err)
+	}
+	if ok, err := store.HasSuccess(ctx, tenant, from, to); err != nil || !ok {
+		t.Fatalf("has success with a scheduled run = %v/%v, want true", ok, err)
+	}
+
+	// Boot flagging targets the newest SCHEDULED record: the manual record
+	// above stays unflagged.
+	if err := store.MarkNewestMissedPrevious(ctx, tenant); err != nil {
+		t.Fatalf("mark newest missed: %v", err)
+	}
+	manualBack, err := store.Get(ctx, tenant, manual.RunID)
+	if err != nil {
+		t.Fatalf("get manual: %v", err)
+	}
+	if manualBack.MissedPrevious {
+		t.Fatal("the manual record must never carry the missed flag")
+	}
+	if manualBack.Trigger != TriggerManual {
+		t.Fatalf("manual trigger lost on roundtrip: %+v", manualBack)
+	}
+
+	// The read side serves both: List returns the manual record (newest
+	// first by scheduled_for) with its trigger.
+	listed, err := store.List(ctx, tenant, 10)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(listed) != 2 || listed[0].Trigger != TriggerManual || listed[1].Trigger != TriggerScheduled {
+		t.Fatalf("list = %+v, want manual first then scheduled with triggers intact", listed)
+	}
+}

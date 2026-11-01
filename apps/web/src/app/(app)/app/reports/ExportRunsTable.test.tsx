@@ -6,7 +6,7 @@
 // wrapper supplies the TanStack Query context (the RequisitionsTable
 // pattern).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import ExportRunsTable, { type ExportRunsTableCopy } from "./ExportRunsTable";
 import type { ExportRunEntry, ExportRunsPage } from "@/lib/gateway";
@@ -30,6 +30,10 @@ const copy: ExportRunsTableCopy = {
   download: "Download CSV",
   downloading: "Preparing…",
   downloadFailed: "Failed to prepare the download link.",
+  trigger: "Run export now",
+  triggering: "Queuing…",
+  triggerFailed: "Failed to queue the export — try again.",
+  manualBadge: "manual",
 };
 
 function run(overrides: Partial<ExportRunEntry>): ExportRunEntry {
@@ -38,6 +42,7 @@ function run(overrides: Partial<ExportRunEntry>): ExportRunEntry {
     tenant_id: "t-1",
     scheduled_for: "2026-10-28T01:00:00Z",
     status: "success",
+    trigger: "scheduled",
     row_count: 7,
     missed_previous: false,
     error_message: "",
@@ -54,13 +59,13 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function renderTable() {
+function renderTable(canTrigger = false) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   return render(
     <QueryClientProvider client={client}>
-      <ExportRunsTable copy={copy} />
+      <ExportRunsTable copy={copy} canTrigger={canTrigger} />
     </QueryClientProvider>,
   );
 }
@@ -162,5 +167,77 @@ describe("ExportRunsTable", () => {
     await waitFor(() => expect(screen.getByTestId("state-error")).toBeTruthy());
     expect(screen.getByTestId("state-error").textContent).toContain(copy.error);
     expect(screen.getByTestId("retry").textContent).toBe(copy.retry);
+  });
+
+  it("renders the manual badge on manual runs (#53)", async () => {
+    const page: ExportRunsPage = {
+      runs: [run({ run_id: "m", trigger: "manual" }), run({ run_id: "n", trigger: "scheduled" })],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(page)));
+
+    renderTable();
+
+    await waitFor(() => expect(screen.getByTestId("run-m")).toBeTruthy());
+    expect(screen.getByTestId("run-manual").textContent).toBe(copy.manualBadge);
+    // Scheduled rows carry no manual badge.
+    expect(screen.queryByTestId("run-manual")).toBeTruthy(); // the manual row still has it
+    expect(within(screen.getByTestId("run-n")).queryByTestId("run-manual")).toBeNull();
+  });
+
+  it("renders the trigger button only when canTrigger (admin)", async () => {
+    const page: ExportRunsPage = { runs: [run({ run_id: "a" })] };
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(page)));
+
+    renderTable(false);
+    await waitFor(() => expect(screen.getByTestId("run-a")).toBeTruthy());
+    expect(screen.queryByTestId("trigger-export")).toBeNull();
+    cleanup();
+
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(page)));
+    renderTable(true);
+    await waitFor(() => expect(screen.getByTestId("trigger-export")).toBeTruthy());
+    expect(screen.getByTestId("trigger-export").textContent).toBe(copy.trigger);
+  });
+
+  it("queues a manual export on click and refetches the history", async () => {
+    const page: ExportRunsPage = { runs: [run({ run_id: "a" })] };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(page)) // history
+      .mockResolvedValueOnce(jsonResponse({ status: "requested", event_id: "ev-53" }, 202)) // trigger
+      .mockResolvedValueOnce(
+        jsonResponse({ runs: [run({ run_id: "a" }), run({ run_id: "b", trigger: "manual" })] }),
+      ); // refetch after invalidation
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderTable(true);
+    await waitFor(() => expect(screen.getByTestId("trigger-export")).toBeTruthy());
+
+    fireEvent.click(screen.getByTestId("trigger-export"));
+
+    await waitFor(() => expect(screen.getByTestId("run-b")).toBeTruthy());
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[1][0]).toBe("/api/exports");
+    expect((fetchMock.mock.calls[1][1] as RequestInit).method).toBe("POST");
+    // The manual run appears in the refreshed history (AC: manual export
+    // appears in run history).
+    expect(screen.getByTestId("run-manual").textContent).toBe(copy.manualBadge);
+  });
+
+  it("shows the trigger failure state when the queue POST fails", async () => {
+    const page: ExportRunsPage = { runs: [run({ run_id: "a" })] };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(page))
+      .mockResolvedValueOnce(jsonResponse({ error: "forbidden", code: "permission_denied" }, 403));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderTable(true);
+    await waitFor(() => expect(screen.getByTestId("trigger-export")).toBeTruthy());
+
+    fireEvent.click(screen.getByTestId("trigger-export"));
+
+    await waitFor(() => expect(screen.getByTestId("trigger-error").textContent).toBe(copy.triggerFailed));
+    expect(window.location.assign).not.toHaveBeenCalled();
   });
 });

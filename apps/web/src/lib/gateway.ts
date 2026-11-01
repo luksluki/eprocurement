@@ -783,16 +783,18 @@ export async function listEvents(accessToken: string, query: string): Promise<Ev
   }
 }
 
-// ExportRunEntry is one nightly-export run record as served by
-// GET /api/v1/exports/runs (issue #49, FR-10). status is "success" |
-// "failed"; a failed run carries error_message (the basis of #53's error
-// display) and no file; missed_previous flags a slot the detection found
-// without a successful run.
+// ExportRunEntry is one export run record as served by
+// GET /api/v1/exports/runs (issue #49 nightly + #53 manual, FR-10). status
+// is "success" | "failed"; a failed run carries error_message (the basis
+// of #53's error display) and no file; missed_previous flags a slot the
+// detection found without a successful run; trigger is "scheduled" |
+// "manual" ("" on pre-#53 rows renders as scheduled).
 export type ExportRunEntry = {
   run_id: string;
   tenant_id: string;
   scheduled_for: string;
   status: string;
+  trigger: string;
   row_count: number;
   missed_previous: boolean;
   error_message: string;
@@ -822,6 +824,20 @@ export type ExportDownload = ExportRunEntry & {
 // export_not_succeeded; another tenant's run id answers 404.
 export function getExportDownloadUrl(accessToken: string, runId: string): Promise<GatewayResult<ExportDownload>> {
   return callGateway(accessToken, `/api/v1/exports/runs/${encodeURIComponent(runId)}/download-url`);
+}
+
+// ExportRequested is the POST /api/v1/exports 202 envelope (issue #53):
+// the request is queued as an export.requested event; event_id correlates
+// it. The trigger is admin-only (export:trigger) — a finance token
+// answers 403 permission_denied.
+export type ExportRequested = {
+  status: "requested";
+  event_id: string;
+};
+
+// triggerExport queues a manual export run for the tenant (issue #53).
+export function triggerExport(accessToken: string): Promise<GatewayResult<ExportRequested>> {
+  return callGateway(accessToken, "/api/v1/exports", { method: "POST" });
 }
 
 // ---------------------------------------------------------------------------

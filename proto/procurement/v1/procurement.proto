@@ -192,6 +192,22 @@ service Procurement {
   // issued-then-cancelled POs), and the purchase
   // order status distribution over all seven FR-06 statuses including zeros.
   rpc GetDashboard(GetDashboardRequest) returns (DashboardSummary);
+
+  // TriggerExport records a manual export request for the caller's tenant
+  // (#53, FR-10's manual half): exactly one export.requested outbox row
+  // (§14.6 catalog) committed in its own tenant transaction — no business
+  // state changes with it. The worker's exports consumer owns the run: the
+  // trailing-24 h PO register, the manual object key, and the run-history
+  // record. export:trigger — admin-only (docs/rbac.md). The gateway answers
+  // 202 {"status":"requested","event_id":…}; the id correlates the request
+  // with the queued event.
+  rpc TriggerExport(TriggerExportRequest) returns (TriggerExportResponse);
+}
+
+message TriggerExportRequest {}
+
+message TriggerExportResponse {
+  string event_id = 1; // uuid of the export.requested outbox row
 }
 
 message Vendor {

@@ -18,6 +18,7 @@ var wantPermission = map[string][]string{
 	InvoiceWrite:      {RoleFinance},
 	MatchConfigure:    {},
 	ExportRun:         {RoleFinance},
+	ExportTrigger:     {},
 	AuditRead:         {RoleViewer},
 	UsersManage:       {},
 	DLQManage:         {},

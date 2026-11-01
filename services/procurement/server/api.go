@@ -14,9 +14,11 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	procurementv1 "github.com/luksluki/eprocurement/gen/go/procurement/v1"
+	"github.com/luksluki/eprocurement/internal/platform/logger"
 	"github.com/luksluki/eprocurement/internal/platform/rbac"
 	"github.com/luksluki/eprocurement/services/procurement/approval"
 	"github.com/luksluki/eprocurement/services/procurement/dashboard"
+	"github.com/luksluki/eprocurement/services/procurement/export"
 	"github.com/luksluki/eprocurement/services/procurement/goodsreceipt"
 	"github.com/luksluki/eprocurement/services/procurement/invoice"
 	"github.com/luksluki/eprocurement/services/procurement/match"
@@ -41,6 +43,7 @@ type api struct {
 	invoices       *invoice.Store
 	matches        *match.Store
 	dashboards     *dashboard.Store
+	exports        *export.Store
 	log            *slog.Logger
 }
 
@@ -1022,6 +1025,29 @@ func dashboardPB(s dashboard.Summary) *procurementv1.DashboardSummary {
 		PoStatusDistribution: dist,
 		SpendTotals:           totals,
 	}
+}
+
+// TriggerExport records a manual export request (#53, FR-10's manual half;
+// export:trigger — admin-only at both layers, docs/rbac.md). The whole
+// effect is one export.requested outbox row committed in the caller's
+// tenant: no business state changes with it, and the worker's exports
+// consumer owns the actual run — procurement never exports itself. The
+// returned event id is the caller's correlation handle (the gateway's 202
+// body). IO failures map to Internal like every other write mapper.
+func (a *api) TriggerExport(ctx context.Context, _ *procurementv1.TriggerExportRequest) (*procurementv1.TriggerExportResponse, error) {
+	auth, err := authTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	eventID, err := a.exports.Request(ctx, auth.TenantID, auth.UserID,
+		logger.ActorIP(ctx), logger.TraceID(ctx), time.Now().UTC())
+	if err != nil {
+		a.log.Error("export trigger failed", "tenant_id", auth.TenantID, "error", err.Error())
+		return nil, status.Error(codes.Internal, "internal error")
+	}
+	a.log.Info("manual export requested",
+		"tenant_id", auth.TenantID, "actor_id", auth.UserID, "event_id", eventID)
+	return &procurementv1.TriggerExportResponse{EventId: eventID}, nil
 }
 
 func vendorPB(v vendor.Vendor) *procurementv1.Vendor {

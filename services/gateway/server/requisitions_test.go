@@ -167,6 +167,12 @@ func (f *fakeRequisitionClient) GetDashboard(ctx context.Context, in *procuremen
 	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
 }
 
+// The #53 export-trigger method satisfies the widened ProcurementClient
+// interface; the export tests use their own fake with recording.
+func (f *fakeRequisitionClient) TriggerExport(ctx context.Context, in *procurementv1.TriggerExportRequest, opts ...grpc.CallOption) (*procurementv1.TriggerExportResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "not called in requisition tests")
+}
+
 func (f *fakeRequisitionClient) GetApprovalRules(ctx context.Context, in *procurementv1.GetApprovalRulesRequest, opts ...grpc.CallOption) (*procurementv1.ApprovalRulesResponse, error) {
 	return &procurementv1.ApprovalRulesResponse{}, nil
 }

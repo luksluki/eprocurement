@@ -806,20 +806,22 @@ func (x *ListEventsResponse) GetNextCursor() string {
 	return ""
 }
 
-// ExportRun is one nightly-export run record as stored in MongoDB
-// export_runs (#49, FR-10). object_key stays internal — clients download
-// through the presigned URL, never the raw key (the attachment convention).
+// ExportRun is one export run record as stored in MongoDB export_runs
+// (#49 nightly, #53 manual; FR-10). object_key stays internal — clients
+// download through the presigned URL, never the raw key (the attachment
+// convention).
 type ExportRun struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	RunId          string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
 	TenantId       string                 `protobuf:"bytes,2,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
-	ScheduledFor   string                 `protobuf:"bytes,3,opt,name=scheduled_for,json=scheduledFor,proto3" json:"scheduled_for,omitempty"`        // RFC 3339 — the slot this run belongs to
+	ScheduledFor   string                 `protobuf:"bytes,3,opt,name=scheduled_for,json=scheduledFor,proto3" json:"scheduled_for,omitempty"`        // RFC 3339 — the slot this run belongs to (manual: the event's occurred_at)
 	Status         string                 `protobuf:"bytes,4,opt,name=status,proto3" json:"status,omitempty"`                                        // "success" | "failed"
 	RowCount       int32                  `protobuf:"varint,5,opt,name=row_count,json=rowCount,proto3" json:"row_count,omitempty"`                   // PO rows written to the CSV
 	MissedPrevious bool                   `protobuf:"varint,6,opt,name=missed_previous,json=missedPrevious,proto3" json:"missed_previous,omitempty"` // detection found no successful run in the previous slot
 	ErrorMessage   string                 `protobuf:"bytes,7,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`        // failure detail; empty on success
 	StartedAt      string                 `protobuf:"bytes,8,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`                 // RFC 3339
 	FinishedAt     string                 `protobuf:"bytes,9,opt,name=finished_at,json=finishedAt,proto3" json:"finished_at,omitempty"`              // RFC 3339
+	Trigger        string                 `protobuf:"bytes,10,opt,name=trigger,proto3" json:"trigger,omitempty"`                                     // "scheduled" (nightly #49) | "manual" (#53); empty on pre-#53 rows = scheduled
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -913,6 +915,13 @@ func (x *ExportRun) GetStartedAt() string {
 func (x *ExportRun) GetFinishedAt() string {
 	if x != nil {
 		return x.FinishedAt
+	}
+	return ""
+}
+
+func (x *ExportRun) GetTrigger() string {
+	if x != nil {
+		return x.Trigger
 	}
 	return ""
 }
@@ -1526,7 +1535,7 @@ const file_documents_v1_documents_proto_rawDesc = "" +
 	"\x12ListEventsResponse\x12+\n" +
 	"\x06events\x18\x01 \x03(\v2\x13.documents.v1.EventR\x06events\x12\x1f\n" +
 	"\vnext_cursor\x18\x02 \x01(\tR\n" +
-	"nextCursor\"\xa7\x02\n" +
+	"nextCursor\"\xc1\x02\n" +
 	"\tExportRun\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
 	"\ttenant_id\x18\x02 \x01(\tR\btenantId\x12#\n" +
@@ -1538,7 +1547,9 @@ const file_documents_v1_documents_proto_rawDesc = "" +
 	"\n" +
 	"started_at\x18\b \x01(\tR\tstartedAt\x12\x1f\n" +
 	"\vfinished_at\x18\t \x01(\tR\n" +
-	"finishedAt\"-\n" +
+	"finishedAt\x12\x18\n" +
+	"\atrigger\x18\n" +
+	" \x01(\tR\atrigger\"-\n" +
 	"\x15ListExportRunsRequest\x12\x14\n" +
 	"\x05limit\x18\x01 \x01(\x05R\x05limit\"E\n" +
 	"\x16ListExportRunsResponse\x12+\n" +

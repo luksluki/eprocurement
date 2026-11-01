@@ -385,13 +385,15 @@ func mapExportError(err error) error {
 
 // runPB maps a stored run record to the wire message. Timestamps are
 // RFC 3339; object_key never crosses the wire (the presigned URL is the
-// only download path, the attachment convention).
+// only download path, the attachment convention). trigger surfaces for the
+// #53 manual badge ("" on pre-#53 nightly rows renders as scheduled).
 func runPB(r export.Run) *documentsv1.ExportRun {
 	return &documentsv1.ExportRun{
 		RunId:          r.RunID,
 		TenantId:       r.TenantID,
 		ScheduledFor:   r.ScheduledFor.UTC().Format(time.RFC3339),
 		Status:         r.Status,
+		Trigger:        r.Trigger,
 		RowCount:       int32(r.RowCount),
 		MissedPrevious: r.MissedPrevious,
 		ErrorMessage:   r.ErrorMessage,

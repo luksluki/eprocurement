@@ -17,11 +17,16 @@ import (
 // — NewScheduler rejects anything else at boot rather than letting two
 // schedulers overlap silently.
 const (
-	DefaultSchedule   = "01:00"
-	DefaultTimezone   = "UTC"
-	DefaultLockTTL    = 15 * time.Minute
-	DefaultJobBudget  = 10 * time.Minute
-	recordWriteBudget = 10 * time.Second
+	DefaultSchedule  = "01:00"
+	DefaultTimezone  = "UTC"
+	DefaultLockTTL   = 15 * time.Minute
+	DefaultJobBudget = 10 * time.Minute
+	// RecordWriteBudget bounds the run-record write on the fresh context —
+	// the amount of time a failed run may still take to BE recorded after
+	// its job budget (or SIGTERM) killed the work. Exported because the
+	// #53 manual runner's consumer DeliveryTimeout is sized from the same
+	// numbers (job budget + this + margin).
+	RecordWriteBudget = 10 * time.Second
 )
 
 // TenantLister enumerates the tenants to export (the PO register).
@@ -200,6 +205,7 @@ func (s *Scheduler) runOwned(ctx context.Context, tenantID string, fireTime time
 		RunID:          uuid.NewString(),
 		TenantID:       tenantID,
 		ScheduledFor:   fireTime,
+		Trigger:        export.TriggerScheduled,
 		MissedPrevious: missed,
 		StartedAt:      started,
 		FinishedAt:     finished,
@@ -209,7 +215,7 @@ func (s *Scheduler) runOwned(ctx context.Context, tenantID string, fireTime time
 	// ctx.Err) yet the failed record must still be written — symmetric with
 	// the budget-exceeded case, where the budget, not the parent, expired
 	// the run and the record lands anyway.
-	recordCtx, recordCancel := context.WithTimeout(context.WithoutCancel(ctx), recordWriteBudget)
+	recordCtx, recordCancel := context.WithTimeout(context.WithoutCancel(ctx), RecordWriteBudget)
 	defer recordCancel()
 
 	if exportErr != nil {

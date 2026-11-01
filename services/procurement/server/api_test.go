@@ -28,6 +28,7 @@ import (
 	"github.com/luksluki/eprocurement/internal/platform/tenant"
 	"github.com/luksluki/eprocurement/services/procurement/approval"
 	"github.com/luksluki/eprocurement/services/procurement/dashboard"
+	"github.com/luksluki/eprocurement/services/procurement/export"
 	"github.com/luksluki/eprocurement/services/procurement/goodsreceipt"
 	"github.com/luksluki/eprocurement/services/procurement/invoice"
 	"github.com/luksluki/eprocurement/services/procurement/match"
@@ -70,7 +71,7 @@ func startProcurement(t *testing.T) (procurementv1.ProcurementClient, *pgxpool.P
 	}
 
 	log := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
-	srv := New(log, db, vendor.NewStore(db), requisition.NewStore(db), approval.NewStore(db), purchaseorder.NewStore(db), goodsreceipt.NewStore(db), invoice.NewStore(db), match.NewStore(db), dashboard.NewStore(db))
+	srv := New(log, db, vendor.NewStore(db), requisition.NewStore(db), approval.NewStore(db), purchaseorder.NewStore(db), goodsreceipt.NewStore(db), invoice.NewStore(db), match.NewStore(db), dashboard.NewStore(db), export.NewStore(db))
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -3047,5 +3048,99 @@ func TestDashboardGRPC(t *testing.T) {
 	if _, err := client.GetDashboard(noRead,
 		&procurementv1.GetDashboardRequest{}); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("unknown role: code = %v, want PermissionDenied", status.Code(err))
+	}
+}
+
+// grpcCleanupExportTrigger wipes the export.requested outbox rows this test
+// family writes (targeted — the shared requisition cleanup would do, but
+// this test creates nothing else).
+func grpcCleanupExportTrigger(t *testing.T, db *pgxpool.Pool) {
+	t.Helper()
+	_ = tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		_, err := tx.Exec(context.Background(),
+			`DELETE FROM procurement.outbox WHERE tenant_id IN ($1, $2) AND event_type = 'export.requested'`,
+			gTenantA, gTenantB)
+		return err
+	})
+}
+
+// TestTriggerExportGRPC pins the manual-export trigger (#53): an admin call
+// writes EXACTLY one export.requested outbox row in the caller's tenant
+// (entity export, actor the caller) and returns its id; finance and buyer
+// are denied by the interceptor's export:trigger re-check (finance holds
+// export:run — the read permission — never the trigger); an anonymous call
+// is rejected before the store is touched.
+func TestTriggerExportGRPC(t *testing.T) {
+	client, db, cleanup := startProcurement(t)
+	defer cleanup()
+	grpcCleanupExportTrigger(t, db)
+	t.Cleanup(func() { grpcCleanupExportTrigger(t, db) })
+
+	triggeredRows := func() int {
+		var n int
+		if err := tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+			return tx.QueryRow(context.Background(),
+				`SELECT count(*) FROM procurement.outbox WHERE tenant_id = $1 AND event_type = 'export.requested'`,
+				gTenantA).Scan(&n)
+		}); err != nil {
+			t.Fatalf("count export.requested: %v", err)
+		}
+		return n
+	}
+	if n := triggeredRows(); n != 0 {
+		t.Fatalf("pre-existing export.requested rows = %d, want 0", n)
+	}
+
+	resp, err := client.TriggerExport(callerCtx(gTenantA, rbac.RoleAdmin),
+		&procurementv1.TriggerExportRequest{})
+	if err != nil {
+		t.Fatalf("trigger export: %v", err)
+	}
+	if resp.GetEventId() == "" {
+		t.Fatal("event id missing from the response")
+	}
+
+	// Exactly one outbox row, committed in the caller's tenant with the
+	// caller as actor and the export aggregate as entity.
+	var eventType, entityID, actorID string
+	var payload []byte
+	if err := tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
+		return tx.QueryRow(context.Background(),
+			`SELECT event_type, entity_id, actor_id::text, payload FROM procurement.outbox WHERE id = $1`,
+			resp.GetEventId()).Scan(&eventType, &entityID, &actorID, &payload)
+	}); err != nil {
+		t.Fatalf("read outbox row: %v", err)
+	}
+	if eventType != "export.requested" || entityID == "" || actorID != gUser {
+		t.Fatalf("outbox row = %s/%s/%s, want export.requested/<uuid>/%s", eventType, entityID, actorID, gUser)
+	}
+	if n := triggeredRows(); n != 1 {
+		t.Fatalf("export.requested rows = %d, want exactly 1", n)
+	}
+
+	// RBAC: export:trigger is admin-only — finance (which holds export:run,
+	// the read side from #49) and buyer are both denied with the machine
+	// message naming the required permission.
+	for _, role := range []string{rbac.RoleFinance, rbac.RoleBuyer} {
+		_, err := client.TriggerExport(callerCtx(gTenantA, role),
+			&procurementv1.TriggerExportRequest{})
+		if status.Code(err) != codes.PermissionDenied {
+			t.Fatalf("trigger as %s: code = %v, want PermissionDenied", role, status.Code(err))
+		}
+		if !strings.Contains(err.Error(), "export:trigger") {
+			t.Fatalf("trigger as %s: error = %v, want it to name export:trigger", role, err)
+		}
+	}
+	if n := triggeredRows(); n != 1 {
+		t.Fatalf("denied roles changed the outbox: rows = %d, want 1", n)
+	}
+
+	// Anonymous: no caller metadata, Unauthenticated before any write.
+	if _, err := client.TriggerExport(context.Background(),
+		&procurementv1.TriggerExportRequest{}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("anonymous: code = %v, want Unauthenticated", status.Code(err))
+	}
+	if n := triggeredRows(); n != 1 {
+		t.Fatalf("anonymous call changed the outbox: rows = %d, want 1", n)
 	}
 }
