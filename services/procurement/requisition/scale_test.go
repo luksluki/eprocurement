@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/luksluki/eprocurement/internal/platform/scalegate"
 	"github.com/luksluki/eprocurement/internal/platform/tenant"
 )
 
@@ -46,6 +47,22 @@ const (
 func TestStoreListScale100k(t *testing.T) {
 	s, db := testStoreDB(t)
 
+	// Serialize the ~100k fixtures' LOAD phase (see
+	// internal/platform/scalegate): four concurrent bulk loads starved every
+	// one past go test's package timeout (CI run 41198373932). The gate is
+	// released after the steady-state prep so the short, retry-protected
+	// measurement loops overlap instead of queueing (whole-body
+	// serialization re-busts the timeout from the other side — the queued
+	// package pays the wait plus its own run against 10m). The t.Cleanup
+	// release is the early-exit safety net; the explicit release below is
+	// the real one.
+	releaseGate, err := scalegate.Acquire(t.Context(), db)
+	if err != nil {
+		t.Fatalf("scale gate: %v", err)
+	}
+	t.Cleanup(releaseGate)
+
+	cleanupScale(t, s) // a stale fixture must not wedge the seed on duplicate keys
 	if err := seedScale(t, s, 100_000); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -170,7 +187,12 @@ func seedScale(t *testing.T, s *Store, n int) error {
 
 func cleanupScale(t *testing.T, s *Store) {
 	t.Helper()
-	_ = tenant.WithBypass(context.Background(), s.db, func(tx pgx.Tx) error {
+	// One retry: right after a bulk load the compose/CI PostgreSQL
+	// intermittently answers the big DELETE with "MultiXactId … has not
+	// been created yet" (XX000, transient — the #52 dashboard cleanup saw
+	// the same). A swallowed failure here leaves the fixture behind and the
+	// next run dies on duplicate keys (CI run 41198373932's leftovers).
+	deleteRows := func(tx pgx.Tx) error {
 		if _, err := tx.Exec(context.Background(),
 			`DELETE FROM procurement.requisitions WHERE tenant_id = $1`, scaleTenant); err != nil {
 			return err
@@ -178,7 +200,14 @@ func cleanupScale(t *testing.T, s *Store) {
 		_, err := tx.Exec(context.Background(),
 			`DELETE FROM procurement.requisition_counters WHERE tenant_id = $1`, scaleTenant)
 		return err
-	})
+	}
+	if err := tenant.WithBypass(context.Background(), s.db, deleteRows); err != nil {
+		t.Logf("cleanupScale delete: %v — retrying once after a pause", err)
+		time.Sleep(2 * time.Second)
+		if err := tenant.WithBypass(context.Background(), s.db, deleteRows); err != nil {
+			t.Fatalf("cleanupScale delete failed twice: %v", err)
+		}
+	}
 	// Reclaim the fixture's dead tuples so a re-run of the suite measures a
 	// table of 100k live rows, not 100k live + the previous run's dead ones.
 	_, _ = s.db.Exec(context.Background(), `VACUUM ANALYZE procurement.requisitions`)

@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/luksluki/eprocurement/internal/platform/scalegate"
 	"github.com/luksluki/eprocurement/internal/platform/tenant"
 )
 
@@ -58,6 +59,21 @@ func TestStoreListScale100k(t *testing.T) {
 	db := openTestDB(t)
 	s := NewStore(db)
 
+	// Serialize the ~100k fixtures' LOAD phase (see
+	// internal/platform/scalegate): four concurrent bulk loads starved every
+	// one past go test's package timeout (CI run 41198373932). The gate is
+	// released after the steady-state prep so the short, retry-protected
+	// measurement loops overlap instead of queueing (whole-body
+	// serialization re-busts the timeout from the other side — the queued
+	// package pays the wait plus its own run against 10m). The t.Cleanup
+	// release is the early-exit safety net; the explicit release below is
+	// the real one.
+	releaseGate, err := scalegate.Acquire(t.Context(), db)
+	if err != nil {
+		t.Fatalf("scale gate: %v", err)
+	}
+	t.Cleanup(releaseGate)
+
 	cleanupScale(t, s)
 	if err := seedScale(t, s, 100_000); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -78,6 +94,7 @@ func TestStoreListScale100k(t *testing.T) {
 	if _, err := s.db.Exec(t.Context(), `CHECKPOINT`); err != nil {
 		t.Fatalf("checkpoint: %v", err)
 	}
+	releaseGate() // load phase done — measurements overlap under the retry protocol
 
 	shapes := []struct {
 		name string
@@ -232,7 +249,7 @@ func commitBatch(t *testing.T, s *Store, query string, args []any) error {
 // counters and the vendor — FK-safe order.
 func cleanupScale(t *testing.T, s *Store) {
 	t.Helper()
-	_ = tenant.WithBypass(context.Background(), s.db, func(tx pgx.Tx) error {
+	deleteRows := func(tx pgx.Tx) error {
 		ctx := context.Background()
 		for _, stmt := range []string{
 			`DELETE FROM procurement.purchase_orders WHERE tenant_id = $1`,
@@ -246,7 +263,19 @@ func cleanupScale(t *testing.T, s *Store) {
 			}
 		}
 		return nil
-	})
+	}
+	// One retry: right after a bulk load the compose/CI PostgreSQL
+	// intermittently answers the big DELETE with "MultiXactId … has not
+	// been created yet" (XX000, transient — the #52 dashboard cleanup saw
+	// the same). A swallowed failure here leaves the fixture behind and the
+	// next run dies on duplicate keys (CI run 41198373932's leftovers).
+	if err := tenant.WithBypass(context.Background(), s.db, deleteRows); err != nil {
+		t.Logf("cleanupScale delete: %v — retrying once after a pause", err)
+		time.Sleep(2 * time.Second)
+		if err := tenant.WithBypass(context.Background(), s.db, deleteRows); err != nil {
+			t.Fatalf("cleanupScale delete failed twice: %v", err)
+		}
+	}
 	// Reclaim the fixture's dead tuples so a re-run of the suite measures
 	// tables of live rows, not live + the previous run's dead ones.
 	_, _ = s.db.Exec(context.Background(), `VACUUM ANALYZE procurement.purchase_orders`)

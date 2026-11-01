@@ -37,6 +37,7 @@ const (
 	AuditRead         = "audit:read"
 	UsersManage       = "users:manage"
 	DLQManage         = "dlq:manage"
+	DashboardRead     = "dashboard:read"
 )
 
 // AllPermissions returns every permission in the matrix (tests and docs).
@@ -79,6 +80,10 @@ var matrix = []entry{
 	// Admin-only by design (#48: the tenant admin operates the DLQ —
 	// poison messages are an operational, not business-role, surface).
 	{DLQManage, nil},
+	// The dashboard aggregates reads every role already holds
+	// (requisition/po/invoice lists — FR-09's landing page), so it is broad
+	// like them: every non-admin role (#52).
+	{DashboardRead, []string{RoleRequester, RoleApprover, RoleBuyer, RoleFinance, RoleViewer}},
 }
 
 var granted map[string]map[string]bool

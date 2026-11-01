@@ -183,6 +183,15 @@ service Procurement {
   // (match:configure, admin-only). Values apply to match runs that start
   // after the commit; stored match results are immutable history.
   rpc ReplaceMatchSettings(ReplaceMatchSettingsRequest) returns (MatchSettings);
+  // GetDashboard returns the operational-health summary (FR-09) of the
+  // caller's tenant in one round trip: the count and first page of pending
+  // approvals (the current pending step — the smallest pending step_no — of
+  // each submitted requisition, oldest-submitted first), the spend per
+  // vendor+currency over trailing 30- and 90-day windows (issued POs only:
+  // status not draft/cancelled — the #49 register basis minus
+  // issued-then-cancelled POs), and the purchase
+  // order status distribution over all seven FR-06 statuses including zeros.
+  rpc GetDashboard(GetDashboardRequest) returns (DashboardSummary);
 }
 
 message Vendor {
@@ -578,4 +587,77 @@ message GetMatchSettingsRequest {}
 message ReplaceMatchSettingsRequest {
   int32 qty_pct = 1;   // 0..100; else 400 match_qty_pct_invalid
   int32 price_pct = 2; // 0..100; else 400 match_price_pct_invalid
+}
+
+// GetDashboardRequest is empty: the caller's tenant comes from the auth
+// metadata and every window is anchored on the server clock.
+message GetDashboardRequest {}
+
+// DashboardSummary is the FR-09 operational-health snapshot, all three
+// widgets from one round trip. The numbers reconcile with the list reads by
+// construction (same tables, same tenant scoping).
+message DashboardSummary {
+  PendingApprovals pending_approvals = 1;
+  // Top vendors by 90-day spend, vendor+currency granularity. Vendors with
+  // no issued PO in the 90-day window are absent (they have nothing to
+  // show); the 30-day arm of a listed vendor may be zero.
+  repeated VendorSpend spend_by_vendor = 2;
+  // All seven FR-06 statuses in canonical lifecycle order, zeros included.
+  repeated PurchaseOrderStatusCount po_status_distribution = 3;
+  // The spend KPI totals per currency over ALL vendors (spend_by_vendor is
+  // bounded to the top rows; these are the unbounded sums the KPI cards
+  // render). One row per currency with issued spend in the 90-day window,
+  // ordered by the 90-day sum descending.
+  repeated CurrencySpend spend_totals = 4;
+}
+
+// PendingApprovals is the approvals widget: the total count of current
+// pending steps across the tenant's submitted requisitions plus the first
+// page of them, oldest-submitted first.
+message PendingApprovals {
+  int32 total = 1; // current pending steps across all submitted requisitions
+  repeated PendingApproval items = 2; // first page, oldest-submitted first
+}
+
+// PendingApproval is one current pending step with the requisition header it
+// blocks: the requisition id links to the detail view, the step fields say
+// who may decide. Only the smallest pending step_no of a submitted
+// requisition appears — the same step the decide API accepts.
+message PendingApproval {
+  string requisition_id = 1;
+  string number = 2;         // requisition number, e.g. "PR-000042"
+  string currency = 3;       // IDR | USD
+  int64 total_cents = 4;     // the requisition's server-computed total
+  string submitted_at = 5;   // RFC 3339
+  string step_id = 6;        // the decide API's {stepId}
+  int32 step_no = 7;
+  string role_required = 8;  // the role a decider must hold
+}
+
+// VendorSpend is one vendor+currency row of the spend widget: the sum of
+// purchase_orders.total_cents over POs with issued_at inside each trailing
+// window and status neither draft nor cancelled (the #49 register basis
+// minus issued-then-cancelled POs).
+message VendorSpend {
+  string vendor_id = 1;
+  string vendor_name = 2;
+  string currency = 3;        // IDR | USD
+  int64 thirty_day_cents = 4; // issued_at >= now - 30 days
+  int64 ninety_day_cents = 5; // issued_at >= now - 90 days
+}
+
+// CurrencySpend is one currency's unbounded window sum — the KPI cards'
+// spend numbers (money never mixes currencies: a tenant may hold IDR and
+// USD side by side, so the totals stay per currency and the cards render
+// each row, the largest first).
+message CurrencySpend {
+  string currency = 1;       // IDR | USD
+  int64 thirty_day_cents = 2;
+  int64 ninety_day_cents = 3;
+}
+
+// PurchaseOrderStatusCount is one FR-06 status with its live row count.
+message PurchaseOrderStatusCount {
+  string status = 1; // draft | issued | acknowledged | partially_received | received | closed | cancelled
+  int32 count = 2;
 }

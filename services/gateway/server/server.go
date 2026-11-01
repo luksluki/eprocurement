@@ -28,8 +28,9 @@ type Option func(*gatewayOptions)
 // ProcurementClient is the full procurement surface the gateway proxies: the
 // vendor API, the requisition create/edit/submit/read API, the approval
 // decide/rules API, the PO conversion API, the PO lifecycle actions, the
-// goods-receipt posting API, and the PO (#38) and invoice (#41) read pairs.
-// The generated gRPC client satisfies it; tests substitute a fake.
+// goods-receipt posting API, the PO (#38) and invoice (#41) read pairs, and
+// the dashboard summary (#52). The generated gRPC client satisfies it; tests
+// substitute a fake.
 type ProcurementClient interface {
 	VendorClient
 	CreateRequisition(ctx context.Context, in *procurementv1.CreateRequisitionRequest, opts ...grpc.CallOption) (*procurementv1.Requisition, error)
@@ -54,6 +55,7 @@ type ProcurementClient interface {
 	MatchInvoice(ctx context.Context, in *procurementv1.MatchInvoiceRequest, opts ...grpc.CallOption) (*procurementv1.Invoice, error)
 	GetMatchSettings(ctx context.Context, in *procurementv1.GetMatchSettingsRequest, opts ...grpc.CallOption) (*procurementv1.MatchSettings, error)
 	ReplaceMatchSettings(ctx context.Context, in *procurementv1.ReplaceMatchSettingsRequest, opts ...grpc.CallOption) (*procurementv1.MatchSettings, error)
+	GetDashboard(ctx context.Context, in *procurementv1.GetDashboardRequest, opts ...grpc.CallOption) (*procurementv1.DashboardSummary, error)
 }
 
 type gatewayOptions struct {
@@ -160,6 +162,7 @@ func New(log *slog.Logger, verifier *token.Verifier, opts ...Option) *fiber.App 
 		registerPurchaseOrderRoutes(app, verifier, o.procurement)
 		registerInvoiceRoutes(app, verifier, o.procurement, o.documents)
 		registerMatchSettingsRoutes(app, verifier, o.procurement)
+		registerDashboardRoutes(app, verifier, o.procurement)
 	}
 	if o.documents != nil {
 		registerEventRoutes(app, verifier, o.documents)
