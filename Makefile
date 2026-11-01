@@ -1,4 +1,4 @@
-.PHONY: help install build lint test fmt compose-up compose-down compose-logs compose-ps seed seed-reset reset gen-proto cover test-integration e2e perf-budget
+.PHONY: help install build lint test fmt compose-up compose-down compose-logs compose-ps seed seed-reset reset gen-proto cover test-integration test-p2p e2e perf-budget
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -17,6 +17,7 @@ help: ## Show available targets
 	@echo "  gen-proto        Regenerate gen/go from proto/ (needs protoc; see docs/onboarding.md)"
 	@echo "  cover            Identity-domain coverage, enforced threshold (stack must be up)"
 	@echo "  test-integration Full go test ./... against the compose database"
+	@echo "  test-p2p         Procure-to-pay cross-service suite (postgres+mongo+rabbitmq up)"
 	@echo "  e2e              Playwright happy path against the compose stack (stack must be up)"
 	@echo "  perf-budget      Run the 100k scale fixtures and report p95 vs budget (stack must be up)"
 
@@ -66,6 +67,7 @@ PROTOC := $(shell command -v .tools/protoc/bin/protoc 2>/dev/null || command -v 
 # not set in the environment. Same pattern for the documents test stores.
 TEST_DATABASE_URL ?= $(shell sed -n 's/^DATABASE_URL=//p' .env 2>/dev/null)
 TEST_MONGO_URI ?= $(shell sed -n 's/^MONGO_URI=//p' .env 2>/dev/null)
+TEST_RABBITMQ_URL ?= $(shell sed -n 's/^RABBITMQ_URL=//p' .env 2>/dev/null)
 TEST_S3_ENDPOINT ?= $(shell sed -n 's/^S3_ENDPOINT=//p' .env 2>/dev/null)
 IDENTITY_COVERAGE_THRESHOLD ?= 80
 
@@ -88,6 +90,19 @@ cover: ## Identity-domain coverage with enforced threshold (compose stack must b
 test-integration: ## Full go test ./... against the compose database and object store
 	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" TEST_MONGO_URI="$(TEST_MONGO_URI)" \
 	TEST_S3_ENDPOINT="$(TEST_S3_ENDPOINT)" go test ./... -count=1
+
+# The #58 procure-to-pay cross-service suite (ADR-0002 CI stage 3): the real
+# gRPC procurement API in-process → transactional outbox → publisher loop →
+# RabbitMQ → consumer runner → MongoDB projection, against the compose
+# infrastructure (postgres + mongo + rabbitmq must be healthy: make
+# compose-up). Scoped to ./tests/integration ONLY on purpose: with
+# TEST_RABBITMQ_URL exported for ./... and the full stack running, the older
+# broker tests that share the compose database (e.g. the publisher's
+# scratch-database loop test) would race the live worker — the new suite
+# avoids exactly that with its own scratch database.
+test-p2p: ## Run the procure-to-pay integration suite (stack must be up)
+	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" TEST_MONGO_URI="$(TEST_MONGO_URI)" \
+	TEST_RABBITMQ_URL="$(TEST_RABBITMQ_URL)" go test ./tests/integration/... -count=1 -v
 
 # Playwright happy path (#59) — the same sequence the CI e2e job runs:
 # fixtures are installed by the suite's globalSetup (cmd/useradmin needs

@@ -112,10 +112,11 @@ These are the same gates CI runs. They must pass before you push.
 
 ```bash
 make test-integration   # full go test ./... against the compose database
+make test-p2p           # procure-to-pay cross-service suite (gRPC → outbox → RabbitMQ → Mongo)
 make cover              # identity-domain coverage; fails below the 80% threshold
 ```
 
-CI runs the same suite with `TEST_DATABASE_URL` pointing at a Postgres service container (plus MongoDB and MinIO containers for the attachment flow) and enforces the coverage threshold — so a change that only passes without the dependencies never merges.
+`make test-p2p` additionally needs `TEST_RABBITMQ_URL` (read from `.env`'s `RABBITMQ_URL`, same as the other connections) and drives the whole PR → approval → PO → GRN → invoice-match story through the real procurement gRPC API, the real outbox publisher loop, RabbitMQ, the real consumer runner, and the Mongo projections — each run against its own scratch Postgres/Mongo databases and a suffixed broker topology, so it is safe with the full stack (live worker included) running. CI runs the same suite as its own `integration` job (ADR-0002 stage 3), plus the Postgres/Mongo/MinIO-backed suites in the `go` job — so a change that only passes without the dependencies never merges.
 
 You now have a working environment. Head to [CONTRIBUTING.md](../CONTRIBUTING.md) for the Git Flow workflow, or [`AGENTS.md`](../AGENTS.md) if you are an AI coding agent.
 

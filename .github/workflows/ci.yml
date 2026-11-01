@@ -126,6 +126,43 @@ jobs:
       - name: Test
         run: pnpm test
 
+  # ADR-0002 stage 3 — "integration: dockerized Postgres/Mongo/Redis/RabbitMQ
+  # services; run integration tests". The #58 procure-to-pay suite runs the
+  # same `make test-p2p` sequence as locally against the compose
+  # infrastructure services only (no service images are built; the suite
+  # boots the procurement gRPC API in-process and the worker halves itself,
+  # each against its own scratch database and a suffixed broker topology).
+  # The go/web jobs keep running without a broker; e2e is unchanged.
+  integration:
+    name: Integration · procure-to-pay
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [go]
+    env:
+      # Compose's no-.env defaults on the runner (credentials are the public
+      # local-dev defaults from .env.example, not secrets).
+      TEST_DATABASE_URL: postgres://eprocurement:eprocurement@localhost:5432/eprocurement?sslmode=disable
+      TEST_MONGO_URI: mongodb://eprocurement:eprocurement@localhost:27017/?authSource=admin
+      TEST_RABBITMQ_URL: amqp://eprocurement:eprocurement@localhost:5672/
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Start compose infrastructure
+        run: docker compose up -d --wait postgres mongo rabbitmq
+
+      - name: Run procure-to-pay integration suite
+        run: make test-p2p
+
+      - name: Infrastructure health (diagnostics)
+        if: failure() || cancelled()
+        run: docker compose ps postgres mongo rabbitmq
+
   # ADR-0002 stage 5: Playwright against the compose stack. Self-contained —
   # it builds the five service images (no layer cache on the runner, hence
   # the much longer timeout than the go/web jobs), runs the web app with

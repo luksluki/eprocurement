@@ -26,6 +26,7 @@ import (
 	"github.com/luksluki/eprocurement/internal/platform/tenant"
 	"github.com/luksluki/eprocurement/services/procurement/migrations"
 	"github.com/luksluki/eprocurement/services/procurement/outbox"
+	"github.com/luksluki/eprocurement/services/worker/topology"
 )
 
 func testLogger() *slog.Logger {
@@ -626,5 +627,105 @@ func TestPublishContextWithoutTraceIDInjectsNothing(t *testing.T) {
 	telemetry.InjectAMQP(ctx, headers)
 	if _, ok := headers["traceparent"]; ok {
 		t.Fatal("traceparent injected although no trace context exists")
+	}
+}
+
+// AC #58 (topology-aware constructor, pure half): the zero Topology resolves
+// to topology.Default (the consumer.New convention — ConnectTopology's
+// default is production), and a suffixed variant passes through unchanged so
+// the integration harness keeps its isolated names.
+func TestResolveTopology(t *testing.T) {
+	if got := resolveTopology(topology.Topology{}); got.EventsExchange != topology.Default.EventsExchange ||
+		got.DLXExchange != topology.Default.DLXExchange || got.DLQQueue != topology.Default.DLQQueue ||
+		len(got.Queues) != len(topology.Default.Queues) {
+		t.Fatalf("zero topology = %+v, want topology.Default", got)
+	}
+
+	suffixed := topology.Default.Suffixed("-resolve")
+	if got := resolveTopology(suffixed); got.EventsExchange != suffixed.EventsExchange ||
+		got.DLQQueue != suffixed.DLQQueue || len(got.Queues) != len(suffixed.Queues) {
+		t.Fatalf("suffixed topology = %+v, want the variant passed through", got)
+	}
+}
+
+// AC #58 (topology-aware constructor, broker half): ConnectTopology declares
+// the FULL topology of its variant (every queue, not just the bootstrap
+// exchange/DLX/DLQ of Connect) and publishes to the variant's events
+// exchange — the proof the procure-to-pay harness relies on for its isolated
+// suffixed copy of the production topology. This is a broker integration
+// test, not a hermetic unit test: Connect dials at construction
+// (publisher.go Connect), amqp091-go's Channel is a concrete type, so the
+// declaration path needs a socket — it skips without TEST_RABBITMQ_URL (the
+// TestAMQPPublisherEndToEnd pattern). The production Connect regression is
+// that existing test's passive check set (production exchange/DLX/DLQ).
+func TestConnectTopologyDeclaresSuffixedTopology(t *testing.T) {
+	amqpURL := os.Getenv("TEST_RABBITMQ_URL")
+	if amqpURL == "" {
+		t.Skip("TEST_RABBITMQ_URL not set; skipping integration test")
+	}
+	topo := topology.Default.Suffixed(fmt.Sprintf("-pub58-%d", time.Now().UnixNano()))
+	topo.RetryTTLs = []time.Duration{150 * time.Millisecond, 150 * time.Millisecond, 150 * time.Millisecond}
+
+	pub, err := ConnectTopology(context.Background(), amqpURL, 5*time.Second, topo)
+	if err != nil {
+		t.Fatalf("connect topology: %v", err)
+	}
+	defer pub.Close()
+	defer func() {
+		ch, err := pub.conn.Channel()
+		if err != nil {
+			return
+		}
+		_ = topo.Delete(ch)
+	}()
+
+	// The variant's whole queue set exists after connect (mains, retry
+	// ladder, DLQ) and Publish targets the variant's exchange, not the
+	// production one.
+	ch, err := pub.conn.Channel()
+	if err != nil {
+		t.Fatalf("test channel: %v", err)
+	}
+	for _, q := range topo.QueueNames() {
+		if _, err := ch.QueueDeclarePassive(q, true, false, false, false, nil); err != nil {
+			t.Fatalf("passive declare %s: %v", q, err)
+		}
+	}
+	if err := ch.ExchangeDeclarePassive(topo.EventsExchange, "topic", true, false, false, false, nil); err != nil {
+		t.Fatalf("passive declare exchange %s: %v", topo.EventsExchange, err)
+	}
+	capture, err := ch.QueueDeclare("", false, true, true, false, nil)
+	if err != nil {
+		t.Fatalf("declare capture queue: %v", err)
+	}
+	if err := ch.QueueBind(capture.Name, "#", topo.EventsExchange, false, nil); err != nil {
+		t.Fatalf("bind capture queue: %v", err)
+	}
+
+	env := Envelope{
+		EventID: "eeeeeeee-0000-0000-0000-000000000058", TenantID: "eeeeeeee-0000-0000-0000-000000000045",
+		Type: "pr.submitted", Version: 1, EntityType: "requisition",
+		EntityID: "eeeeeeee-0000-0000-0000-000000000047",
+		Payload:  json.RawMessage(`{"number":"PR-000001"}`),
+	}
+	if err := pub.Publish(context.Background(), env); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	msg, ok := fetchMessage(t, ch, capture.Name, env.EventID)
+	if !ok {
+		t.Fatal("no message arrived on the suffixed capture queue")
+	}
+	if msg.RoutingKey != "pr.submitted" {
+		t.Fatalf("routing key = %s, want pr.submitted", msg.RoutingKey)
+	}
+}
+
+// Failure path of the variant constructor: a cancelled context fails before
+// any dial attempt, same contract as Connect.
+func TestConnectTopologyCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := ConnectTopology(ctx, "amqp://127.0.0.1:1/", time.Second, topology.Default); err == nil {
+		t.Fatal("connect with cancelled context succeeded, want error")
 	}
 }
