@@ -111,11 +111,13 @@ These are the same gates CI runs. They must pass before you push.
 **Unit vs integration.** Plain `go test ./...` runs the unit tests; the DB-backed integration tests (auth flows, RLS, migrations) skip unless `TEST_DATABASE_URL` is set, and the documents attachment tests skip unless `TEST_MONGO_URI` + `TEST_S3_ENDPOINT` are set. With the compose stack up:
 
 ```bash
+make test-unit          # unit-only suite with a duration gate (fails past UNIT_SUITE_MAX_SECONDS, default 120s)
 make test-integration   # full go test ./... against the compose database
 make cover              # identity-domain coverage; fails below the 80% threshold
+make cover-procurement  # procurement coverage (same parity set as CI); fails below PROCUREMENT_COVERAGE_THRESHOLD, default 80%
 ```
 
-CI runs the same suite with `TEST_DATABASE_URL` pointing at a Postgres service container (plus MongoDB and MinIO containers for the attachment flow) and enforces the coverage threshold — so a change that only passes without the dependencies never merges.
+CI runs the same suite with `TEST_DATABASE_URL` pointing at a Postgres service container (plus MongoDB and MinIO containers for the attachment flow) and enforces the coverage thresholds — so a change that only passes without the dependencies never merges. The CI Go job also runs the duration-gated unit suite (`scripts/dev/test-unit.sh`) and reports documents coverage ungated (report-only; a future issue pins its threshold).
 
 You now have a working environment. Head to [CONTRIBUTING.md](../CONTRIBUTING.md) for the Git Flow workflow, or [`AGENTS.md`](../AGENTS.md) if you are an AI coding agent.
 
@@ -165,7 +167,9 @@ You now have a working environment. Head to [CONTRIBUTING.md](../CONTRIBUTING.md
 | `make build` | `go build ./...` + `pnpm build` | After pulling changes; also a CI gate. |
 | `make lint` | `go vet ./...` + `pnpm lint` | Before every push; CI gate. |
 | `make test` | `go test ./...` + `pnpm test` | Before every push; CI gate. |
+| `make test-unit` | Unit-only suite with a duration gate (`UNIT_SUITE_MAX_SECONDS`, default 120s) | Before every push; the CI Go job runs the same gate. |
 | `make fmt` | `gofmt -w services internal scripts` | Before committing Go changes. |
+| `make cover` / `make cover-procurement` | Identity / procurement coverage vs their thresholds (compose stack must be up) | After touching those services' logic. |
 
 Compose lifecycle:
 

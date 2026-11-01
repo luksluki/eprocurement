@@ -2,13 +2,19 @@ package objectstore
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 
 	"github.com/luksluki/eprocurement/services/documents/attachment"
 	"github.com/luksluki/eprocurement/services/documents/internal/testenv"
@@ -163,5 +169,59 @@ func TestMinIOPutAndOverwrite(t *testing.T) {
 
 	if err := storage.Remove(ctx, key); err != nil {
 		t.Fatalf("Remove: %v", err)
+	}
+}
+
+// TestEnsureBucketConcurrentBoot reproduces the CI e2e worker crash
+// (diagnosed for #57, dev-note 057): documents and the worker both ensure
+// the single shared bucket at boot, so on a FRESH MinIO both BucketExists
+// checks return false and the two MakeBucket calls race — the loser got
+// BucketAlreadyOwnedByYou and its boot died ("container worker-1 exited
+// (1)" in compose up --wait). A per-run unique bucket makes the race
+// reachable here; the shared attachments-test bucket already exists, so
+// without it no MakeBucket would fire at all.
+func TestEnsureBucketConcurrentBoot(t *testing.T) {
+	endpoint, accessKey, secretKey, _ := testenv.MinIOEnv(t)
+	bucket := fmt.Sprintf("ensure-race-%d", time.Now().UnixNano())
+
+	clients := make([]*MinIO, 2)
+	for i := range clients {
+		s, err := New(endpoint, "", accessKey, secretKey, bucket, false)
+		if err != nil {
+			t.Fatalf("connect client %d: %v", i, err)
+		}
+		clients[i] = s
+	}
+	admin, err := minio.New(endpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
+		Secure: false,
+	})
+	if err != nil {
+		t.Fatalf("connect cleanup client: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = admin.RemoveBucket(context.Background(), bucket)
+	})
+
+	// Both "services" start together (the barrier mirrors compose up
+	// starting documents and the worker at the same moment).
+	start := make(chan struct{})
+	errs := make([]error, len(clients))
+	var wg sync.WaitGroup
+	for i, s := range clients {
+		wg.Add(1)
+		go func(i int, s *MinIO) {
+			defer wg.Done()
+			<-start
+			errs[i] = s.EnsureBucket(t.Context())
+		}(i, s)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("boot client %d: EnsureBucket = %v, want nil (the losing MakeBucket must not fail boot)", i, err)
+		}
 	}
 }

@@ -406,3 +406,19 @@ func TestStepEventPull(t *testing.T) {
 		t.Fatalf("events after pull = %+v", got)
 	}
 }
+
+// The rule-currency allowlist mirrors the requisition domain's {IDR, USD}
+// (FR-03): exact, case-sensitive membership; a rule only ever matches a
+// requisition in its own currency.
+func TestCurrencyAllowed(t *testing.T) {
+	for _, c := range []string{requisition.CurrencyIDR, requisition.CurrencyUSD} {
+		if !CurrencyAllowed(c) {
+			t.Errorf("CurrencyAllowed(%q) = false, want true", c)
+		}
+	}
+	for _, c := range []string{"EUR", "", "idr", "usd", "USDT"} {
+		if CurrencyAllowed(c) {
+			t.Errorf("CurrencyAllowed(%q) = true, want false", c)
+		}
+	}
+}

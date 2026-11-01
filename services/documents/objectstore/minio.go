@@ -54,13 +54,25 @@ func New(endpoint, presignEndpoint, accessKey, secretKey, bucket string, useSSL 
 }
 
 // EnsureBucket creates the bucket when missing (idempotent, safe on boot).
+// documents and the worker both ensure the same single bucket at boot, so
+// on a fresh MinIO the two MakeBucket calls can race (the CI e2e worker
+// crash, diagnosed in dev-note 057): the loser gets
+// BucketAlreadyOwnedByYou. A follow-up BucketExists re-check resolves that
+// — the bucket existing now (created by the sibling with these very
+// credentials) is exactly the outcome both boot paths want — and any other
+// failure still surfaces.
 func (m *MinIO) EnsureBucket(ctx context.Context) error {
 	exists, err := m.client.BucketExists(ctx, m.bucket)
 	if err != nil {
 		return err
 	}
 	if !exists {
-		return m.client.MakeBucket(ctx, m.bucket, minio.MakeBucketOptions{})
+		if err := m.client.MakeBucket(ctx, m.bucket, minio.MakeBucketOptions{}); err != nil {
+			if exists, checkErr := m.client.BucketExists(ctx, m.bucket); checkErr == nil && exists {
+				return nil
+			}
+			return err
+		}
 	}
 	return nil
 }
