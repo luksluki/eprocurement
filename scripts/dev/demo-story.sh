@@ -97,7 +97,26 @@ wait_for_gateway() {
 	exit 1
 }
 
+# wait_projection_queues_drained blocks until the two Mongo-projection
+# queues are empty (or 60 s pass). A reset that runs while the worker still
+# holds the abandoned rehearsal's messages would let them re-project
+# events/export_runs rows right after the wipe — so the reset waits for the
+# broker to settle first; a stuck wait means the worker is down (fix the
+# stack, then rerun) rather than a silently poisoned demo.
+wait_projection_queues_drained() {
+	for _ in $(seq 1 30); do
+		depth=$(docker compose exec -T rabbitmq rabbitmqctl list_queues name messages 			--no-table-headers 2>/dev/null 			| awk '$1 == "documents.history" || $1 == "notifications" { n += $2 } END { print n + 0 }')
+		if [ "${depth:-1}" -eq 0 ]; then
+			return 0
+		fi
+		sleep 2
+	done
+	log "projection queues still hold ${depth:-?} message(s) after 60s — the worker looks down; run: make compose-up, then retry the reset"
+	return 1
+}
+
 reset_demo_tenant() {
+	wait_projection_queues_drained || exit 1
 	log "resetting tenant $TENANT_ID (PostgreSQL: procurement + identity; MongoDB: 5 collections)"
 	docker compose exec -T postgres psql \
 		-v ON_ERROR_STOP=1 -q \
