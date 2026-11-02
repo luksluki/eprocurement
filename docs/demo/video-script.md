@@ -163,7 +163,7 @@ inside the cues only; timecodes, chapters, and README links stay as-is.
 | 49 | 5:20.7 → 5:28.7 | Outbox lag read the backlog's age when the worker restarted, then returned to zero as it drained. |
 | 50 | 5:29.0 → 5:34.6 | DLQ depth: where a poison message would surface. That's the demo — thanks for watching. |
 
-Pacing target ≈2.5 words/second; every cue sits inside its chapter window, so
+Pacing ≈1.9 words/second (measured over the committed cue table: ~620 words across 317.7 s of cue time); every cue sits inside its chapter window, so
 chapter boundaries stay clean if a cue needs a small nudge at record time.
 
 ## Recording checklist (pre-flight)
