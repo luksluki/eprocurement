@@ -4,7 +4,7 @@
 
 Multi-tenant eProcurement platform (procure-to-pay slice) and reference implementation: **Go microservices + Next.js**, PostgreSQL + MongoDB + Redis + RabbitMQ + MinIO, OpenTelemetry, Docker Compose.
 
-**Status:** the procure-to-pay slice is **implemented and running** — PR → approval → PO → GRN → 3-way invoice match, event history, exports, observability, and a Playwright e2e suite (happy path + worker-crash resilience), all gated in CI. Milestone M5 demo artifacts (the demo video #64) and the Kubernetes kind manifests (D4) are still open — see [Demo & review artifacts](#demo--review-artifacts) and the [capability matrix](#capability-to-evidence-matrix) for exactly what is real and what is pending. PRD: [`docs/prd/prd-v0.2.md`](docs/prd/prd-v0.2.md).
+**Status:** the procure-to-pay slice is **implemented and running** — PR → approval → PO → GRN → 3-way invoice match, event history, exports, observability, and a Playwright e2e suite (happy path + worker-crash resilience), all gated in CI. Of the M5 demo artifacts, the script (#63, merged) and the video production package (#64, this PR — the unlisted video link lands here with the upload) are in place; the tunnel runbook (#65) and the Kubernetes kind manifests (D4) are still open — see [Demo & review artifacts](#demo--review-artifacts) and the [capability matrix](#capability-to-evidence-matrix) for exactly what is real and what is pending. PRD: [`docs/prd/prd-v0.2.md`](docs/prd/prd-v0.2.md).
 
 ## Architecture (implemented)
 
@@ -204,12 +204,12 @@ Every must-have from [PRD §20](docs/prd/prd-v0.2.md) (technology stack) and [PR
 
 ## Demo & review artifacts
 
-- **Demo script (seeded story)** — issue #63 (open; will walk PRD §22's 5-minute story)
-- **5-minute demo video (EN subtitles)** — issue #64 (open)
+- **Demo script (seeded story)** — #63, merged: [`docs/demo-script.md`](docs/demo-script.md), the presenter runbook behind `make demo` (PRD §22's 5-minute story, with a determinism contract)
+- **5-minute demo video (EN subtitles)** — #64: production package in [`docs/demo/video-script.md`](docs/demo/video-script.md) (chapter budget, EN narration, [`demo-captions.en.srt`](docs/demo/demo-captions.en.srt), YouTube chapters); the unlisted video link is added here once uploaded
 - **Live-demo tunnel runbook (Cloudflare Tunnel)** — [docs/ops/live-demo-tunnel.md](docs/ops/live-demo-tunnel.md) (#65)
 - **Hosting context** — [ADR-0003](docs/adr/0003-demo-hosting.md): local-first demo; no always-on public deployment in Phase 0
 
-The reproducible stand-ins for the demo story are `make e2e` (the same sequence, asserted, plus the worker-crash resilience of step 6) and the resilience flow in `make test-p2p`.
+To walk the same story yourself, run `make demo` and follow [`docs/demo-script.md`](docs/demo-script.md); `make e2e` (the same happy path, asserted) and `make test-p2p` (incl. the resilience flow) are the CI-gated equivalents.
 
 ## Development workflow (Git Flow)
 

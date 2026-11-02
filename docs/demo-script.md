@@ -13,7 +13,9 @@ The seeded story is installed by [`make demo`](#0-pre-demo-once) — it
 resets the demo tenant and (re)installs the fixtures idempotently, so
 running it twice produces the same story. The acceptance test for this
 script is exactly that: two runs, identical observable results (see the
-[determinism contract](#determinism-contract)).
+[determinism contract](#determinism-contract)). A timed video production
+package — chapter budget, EN narration, captions — built on this runbook
+lives in [`docs/demo/video-script.md`](demo/video-script.md) (#64).
 
 ## 0. Pre-demo (once)
 

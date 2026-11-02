@@ -1,0 +1,199 @@
+1
+00:00:00,500 --> 00:00:04,500
+This is eProcurement: one tenant, one procure-to-pay story, end to end.
+
+2
+00:00:04,800 --> 00:00:09,300
+Everything runs locally on Docker Compose, seeded by make demo.
+
+3
+00:00:09,600 --> 00:00:14,400
+We sign in as the requester and pin the UI to English.
+
+4
+00:00:14,700 --> 00:00:19,700
+The locale is a cookie — it survives navigation for the whole demo.
+
+5
+00:00:20,200 --> 00:00:26,200
+New requisition: a four-step wizard — details, items, attachments, review.
+
+6
+00:00:26,500 --> 00:00:33,000
+Currency IDR. One line — two laptops; the price field is cents: seven and a half million.
+
+7
+00:00:33,300 --> 00:00:38,300
+The basket autosaves as a draft — the badge confirms it.
+
+8
+00:00:38,600 --> 00:00:46,200
+Attachments go straight to MinIO on a presigned URL — and only while the requisition is still a draft.
+
+9
+00:00:46,500 --> 00:00:52,300
+Review shows the total — fifteen million cents, one hundred fifty thousand rupiah.
+
+10
+00:00:52,600 --> 00:00:58,200
+Submit. PR-000001, status submitted.
+
+11
+00:00:58,500 --> 00:01:06,500
+One honesty note: the vendor came pre-created by make demo — the vendors page is read-only, no create form yet.
+
+12
+00:01:06,800 --> 00:01:09,800
+PT Demo Makmur, active — the vendor this story uses.
+
+13
+00:01:10,200 --> 00:01:16,200
+Switch to the approver — self-approval is forbidden, even for admins.
+
+14
+00:01:16,500 --> 00:01:21,700
+The approval panel appears. Approve, with a note.
+
+15
+00:01:22,000 --> 00:01:27,800
+Status flips to approved; the step records the reason.
+
+16
+00:01:28,100 --> 00:01:39,700
+The timeline is the MongoDB event history — submitted, step approved, approved — each decision lands within seconds.
+
+17
+00:01:40,200 --> 00:01:46,400
+Now the buyer leg. Convert-to-PO has no UI yet — issue one-twelve — so it's one API call.
+
+18
+00:01:46,700 --> 00:01:53,900
+Three commands: log in, look up the vendor, create the PO from the requisition.
+
+19
+00:01:54,200 --> 00:02:00,000
+The answer: PO-000001. In the UI, the requisition is closed.
+
+20
+00:02:00,300 --> 00:02:06,000
+Issue the purchase order — issued.
+
+21
+00:02:06,300 --> 00:02:11,700
+Acknowledge the vendor — acknowledged.
+
+22
+00:02:12,000 --> 00:02:24,600
+Convert, issue and acknowledge all wrote events through the same transactional outbox — remember that for the resilience chapter.
+
+23
+00:02:25,200 --> 00:02:31,000
+Record a partial goods receipt. The line shows two remaining — receive one.
+
+24
+00:02:31,300 --> 00:02:39,300
+GRN-000001: two ordered, one received, one remaining — partially received, deliberately not received.
+
+25
+00:02:39,600 --> 00:02:46,800
+Now attempt the over-receipt: two, against a remaining of one.
+
+26
+00:02:47,100 --> 00:02:53,600
+The form refuses, inline — nothing is submitted.
+
+27
+00:02:53,900 --> 00:02:59,800
+The server holds the same guard as a typed backstop: 409, grn_over_receipt.
+
+28
+00:03:00,200 --> 00:03:06,400
+Finance. Create the invoice on the partial receipt — bill what was received.
+
+29
+00:03:06,700 --> 00:03:12,500
+INV-DEMO-001, quantity one, at the PO price — pending.
+
+30
+00:03:12,800 --> 00:03:20,300
+Upload the vendor invoice document. Until an attachment is ready, Run match stays disabled — the hard gate.
+
+31
+00:03:20,600 --> 00:03:25,200
+Run match — verdict: Matched.
+
+32
+00:03:25,500 --> 00:03:34,500
+The line reads: ordered two, received one, invoiced one — deltas zero. The match compares invoiced against received, not ordered.
+
+33
+00:03:34,800 --> 00:03:44,600
+The tolerances — five percent quantity, two percent price — are per-tenant config; today that's an API call.
+
+34
+00:03:45,200 --> 00:03:52,200
+Dashboard. Thirty-ninety-day spend: one hundred fifty thousand rupiah — the issued PO total.
+
+35
+00:03:52,500 --> 00:03:58,500
+Spend by vendor: PT Demo Makmur. PO status: partially received, one.
+
+36
+00:03:58,800 --> 00:04:04,800
+Reports. The export history starts empty — every demo reset begins here.
+
+37
+00:04:05,100 --> 00:04:10,700
+Run export now — a manual run succeeds, one row.
+
+38
+00:04:11,000 --> 00:04:17,700
+In MinIO the CSV lands under exports, tenant, today — a clock-stamped filename.
+
+39
+00:04:18,000 --> 00:04:24,600
+One data row: PO-000001, PT Demo Makmur, one hundred fifty thousand rupiah.
+
+40
+00:04:25,200 --> 00:04:29,700
+Resilience. Stop the worker.
+
+41
+00:04:30,000 --> 00:04:36,500
+Trigger the export once, from the API: 202, requested. The run history does not move.
+
+42
+00:04:36,800 --> 00:04:42,300
+Nothing is lost — it is waiting in the outbox.
+
+43
+00:04:42,600 --> 00:04:48,400
+Start the worker — the backlog drains; the queued run appears exactly once.
+
+44
+00:04:48,700 --> 00:04:54,800
+Consumers are idempotent, keyed on event id. No duplicates.
+
+45
+00:04:55,200 --> 00:05:01,400
+Tracing. In Jaeger: the gateway service, the purchase-order-issue operation.
+
+46
+00:05:01,700 --> 00:05:09,400
+One trace across gateway, procurement, the outbox publish, RabbitMQ, the worker, and the documents projection.
+
+47
+00:05:09,700 --> 00:05:14,800
+Every hop a span — the same request you just watched.
+
+48
+00:05:15,200 --> 00:05:20,400
+The same system on Grafana's eProcurement overview.
+
+49
+00:05:20,700 --> 00:05:28,700
+Outbox lag read the backlog's age when the worker restarted, then returned to zero as it drained.
+
+50
+00:05:29,000 --> 00:05:34,600
+DLQ depth: where a poison message would surface. That's the demo — thanks for watching.
