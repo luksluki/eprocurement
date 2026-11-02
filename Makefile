@@ -1,4 +1,4 @@
-.PHONY: help install build lint test fmt compose-up compose-down compose-logs compose-ps seed seed-reset reset gen-proto cover cover-procurement test-unit test-integration test-p2p e2e perf-budget
+.PHONY: help install build lint test fmt compose-up compose-down compose-logs compose-ps seed seed-reset reset gen-proto cover cover-procurement test-unit test-integration test-p2p e2e demo demo-reset perf-budget
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -21,6 +21,8 @@ help: ## Show available targets
 	@echo "  test-integration Full go test ./... against the compose database"
 	@echo "  test-p2p         Procure-to-pay cross-service suite (postgres+mongo+rabbitmq up)"
 	@echo "  e2e              Playwright happy path against the compose stack (stack must be up)"
+	@echo "  demo             Reset the demo tenant and install the seeded story (see docs/demo-script.md)"
+	@echo "  demo-reset       Wipe the demo tenant's data only (no fixtures installed)"
 	@echo "  perf-budget      Run the 100k scale fixtures and report p95 vs budget (stack must be up)"
 
 install: ## Install JS workspace dependencies
@@ -149,6 +151,19 @@ test-p2p: ## Run the procure-to-pay integration suite (stack must be up)
 e2e: ## Run the Playwright happy path (compose stack must be up)
 	pnpm --filter @eprocurement/web build
 	DATABASE_URL="$(TEST_DATABASE_URL)" pnpm --filter @eprocurement/e2e e2e
+
+# The #63 demo story (PRD §22): scripts/dev/demo-story.sh resets the demo
+# tenant's data (PostgreSQL rows + the three per-tenant counters, MongoDB
+# collections including export_runs) and idempotently installs the fixtures
+# the presenter then drives through the UI — the runbook is
+# docs/demo-script.md. cmd/useradmin needs DATABASE_URL, hence the .env
+# passthrough (the make e2e pattern; an empty value falls back inside the
+# script to the compose default).
+demo: ## Reset the demo tenant and install the seeded story (stack must be up)
+	DATABASE_URL="$(TEST_DATABASE_URL)" bash scripts/dev/demo-story.sh
+
+demo-reset: ## Wipe the demo tenant's data only (no fixtures installed)
+	bash scripts/dev/demo-story.sh --reset
 
 # The #56 p95 budget re-run path: the five ~100k scale fixtures against the
 # compose database, with a per-shape p95-vs-budget report parsed from the
