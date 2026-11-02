@@ -138,6 +138,7 @@ The whole flow is also driven end-to-end by the Playwright suite: `make e2e` (co
 | `make test-integration` | full `go test ./...` against the compose database/object store |
 | `make test-p2p` | procure-to-pay cross-service suite: gRPC → outbox → RabbitMQ → Mongo projection |
 | `make e2e` | Playwright happy path against the compose stack |
+| `make demo` / `demo-reset` | seeded 5-minute demo story: reset demo tenant + install fixtures / wipe only ([runbook](docs/demo-script.md)) |
 | `make cover` / `make cover-procurement` | identity / procurement coverage vs 80% thresholds (stack up) |
 | `make perf-budget` | 100k-scale fixtures, per-shape p95 vs budget report (stack up) |
 | `make compose-up` / `compose-down` / `compose-logs` / `compose-ps` | stack lifecycle |
@@ -156,6 +157,8 @@ go run ./scripts/seed --tenants 2 --requisitions 10000 --events 100000   # light
 ```
 
 The seed data feeds the scale/perf fixtures (`make perf-budget`, `make test-integration`); the app-schema demo users/vendors for the UI are the §5.1 setup above (loading the seed dataset into the live schema is tracked in #110).
+
+For the 5-minute walkthrough, `make demo` resets a dedicated demo tenant and installs the seeded story (users, vendor, approval rules, tolerances) — the presenter runbook is [`docs/demo-script.md`](docs/demo-script.md).
 
 ## Capability-to-evidence matrix
 
