@@ -119,7 +119,7 @@ reset_load_tenant() {
 	# check below closes the last race — a publisher batch SELECTed before
 	# the wipe would still publish its ~50 rows into the freshly wiped
 	# tenant. Both must be zero before the delete runs.
-	wait_outbox_drained "$DRAIN_BUDGET" "pre-wipe" || exit 1
+	wait_outbox_drained "$DRAIN_BUDGET" "pre-wipe" >/dev/null || exit 1
 	log "resetting tenant $TENANT_ID (PostgreSQL: procurement + identity; MongoDB: 5 collections)"
 	docker compose exec -T postgres psql \
 		-v ON_ERROR_STOP=1 -q \
@@ -283,7 +283,7 @@ wait_for_gateway
 log "k6: $K6_VERSION — ${VUS} VUs x ${DURATION} against $GATEWAY_URL (drain budget ${DRAIN_BUDGET}s)"
 reset_load_tenant
 install_fixtures
-wait_outbox_drained "$DRAIN_BUDGET" "clean-start" || exit 1
+wait_outbox_drained "$DRAIN_BUDGET" "clean-start" >/dev/null || exit 1
 log "clean start: projection queues and outbox drained, tenant empty, fixtures installed"
 
 touch "$sample_stop"
