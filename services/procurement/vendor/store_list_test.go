@@ -47,7 +47,7 @@ func seedListVendors(t *testing.T, s *Store) {
 	t.Cleanup(func() {
 		_ = tenant.WithBypass(context.Background(), s.db, func(tx pgx.Tx) error {
 			_, err := tx.Exec(context.Background(),
-				`DELETE FROM procurement.vendors WHERE code LIKE $1`, listPrefix+"%")
+				`DELETE FROM procurement.vendors WHERE tenant_id IN ($1, $2) AND code LIKE $3`, tenantA, tenantB, listPrefix+"%")
 			return err
 		})
 	})
