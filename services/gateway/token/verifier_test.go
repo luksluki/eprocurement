@@ -2,6 +2,7 @@ package token
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -99,8 +100,17 @@ func TestVerifierRejects(t *testing.T) {
 		t.Fatalf("expired err = %v, want ErrInvalidToken", err)
 	}
 
-	// Tampered signature against a known kid.
-	tampered := valid[:len(valid)-3] + "AAA"
+	// Tampered signature against a known kid. The FIRST signature char is
+	// flipped (6 full bits): unlike the trailing chars — whose low bits
+	// can decode identically by luck (~1/16k keys, seen once on CI) — a
+	// first-char change always alters the signature bytes.
+	parts := strings.Split(valid, ".")
+	flip := byte('B')
+	if parts[2][0] == 'B' {
+		flip = 'C'
+	}
+	parts[2] = string(flip) + parts[2][1:]
+	tampered := strings.Join(parts, ".")
 	if _, err := verifier.Verify(t.Context(), tampered); err != ErrInvalidToken {
 		t.Fatalf("tampered err = %v, want ErrInvalidToken", err)
 	}
