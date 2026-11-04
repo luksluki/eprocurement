@@ -61,8 +61,38 @@ export const REQUISITION_ITEM = {
   category: "it",
 } as const;
 
+// The #60 resilience spec's own tenant (the #59 pattern, a third UUID far
+// from both the onboarding demo tenants and the e2e tenants). A dedicated
+// tenant keeps the spec's event-universe assertions exact: every event the
+// tenant ever sees was created by THIS run's story, so "exactly once" can
+// be asserted per entity without interference from the happy-path spec or
+// a CI retry's previous attempt.
+export const TENANT_C_ID = "66666666-6666-6666-6666-666666666666";
+export const TENANT_C_ADMIN_EMAIL = "e2e-res-admin@resilience.example";
+export const TENANT_C_APPROVER_EMAIL = "e2e-res-approver@resilience.example";
+
+export const TENANT_C_VENDOR = {
+  code: "E2E-RES-01",
+  name: "E2E Resilience Supplies",
+  contactEmail: "sales@e2e-res.example",
+  taxId: "03.666.666.6-066.666",
+} as const;
+
 // Gateway base URL — the compose stack's published gateway port.
 export const GATEWAY_URL = process.env.E2E_GATEWAY_URL || "http://localhost:8080";
 
 // Web app base URL (Playwright's baseURL and the webServer probe).
 export const WEB_URL = process.env.E2E_WEB_URL || "http://localhost:3000";
+
+// RabbitMQ management API (compose publishes 15672) and the broker/Mongo
+// credentials — the public local-dev defaults from .env.example / compose
+// interpolation (fixture credentials for throwaway stacks, not secrets).
+// The #60 spec reads queue depth/consumer counts from the management API
+// and runs mongosh inside the compose mongo container.
+export const RABBITMQ_MANAGEMENT_URL =
+  process.env.E2E_RABBITMQ_MANAGEMENT_URL || "http://localhost:15672";
+export const RABBITMQ_USER = process.env.RABBITMQ_USER || "eprocurement";
+export const RABBITMQ_PASSWORD = process.env.RABBITMQ_PASSWORD || "eprocurement";
+export const MONGO_ROOT_USER = process.env.MONGO_ROOT_USER || "eprocurement";
+export const MONGO_ROOT_PASSWORD = process.env.MONGO_ROOT_PASSWORD || "eprocurement";
+export const MONGO_DB = process.env.MONGO_DB || "eprocurement";
