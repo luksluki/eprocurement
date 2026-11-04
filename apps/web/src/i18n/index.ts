@@ -231,6 +231,7 @@ export type Dictionary = {
       vendorPlaceholder: string;
       submitting: string;
       noVendors: string;
+      vendorTruncated: string;
       loadFailed: string;
       createdTitle: string;
       replayedTitle: string;
@@ -700,6 +701,7 @@ const id: Dictionary = {
       vendorPlaceholder: "Pilih pemasok aktif…",
       submitting: "Membuat PO…",
       noVendors: "Tidak ada pemasok aktif — aktifkan pemasok di halaman Pemasok sebelum membuat PO.",
+      vendorTruncated: "Menampilkan {shown} pertama dari {total} pemasok aktif — cari pemasok lainnya di halaman Pemasok.",
       loadFailed: "Daftar pemasok gagal dimuat — muat ulang halaman untuk mencoba lagi.",
       createdTitle: "PO draft dibuat",
       replayedTitle: "Permintaan ini sudah dikonversi menjadi PO",
@@ -1277,6 +1279,7 @@ const en: Dictionary = {
       vendorPlaceholder: "Pick an active vendor…",
       submitting: "Creating the PO…",
       noVendors: "No active vendors — activate a vendor on the Vendors page before creating a PO.",
+      vendorTruncated: "Showing the first {shown} of {total} active vendors — find the others on the Vendors page.",
       loadFailed: "The vendor list failed to load — reload the page to retry.",
       createdTitle: "Draft PO created",
       replayedTitle: "This requisition was already converted to a PO",

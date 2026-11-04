@@ -34,6 +34,7 @@ export type ConvertToPOCopy = {
   vendorPlaceholder: string;
   submitting: string;
   noVendors: string;
+  vendorTruncated: string;
   loadFailed: string;
   createdTitle: string;
   replayedTitle: string;
@@ -51,10 +52,12 @@ type Confirmation = { po: PurchaseOrderDetail; created: boolean };
 export default function ConvertToPO({
   requisitionId,
   vendors,
+  vendorTotal,
   copy,
 }: {
   requisitionId: string;
   vendors: ConvertToPOVendor[] | null;
+  vendorTotal?: number;
   copy: ConvertToPOCopy;
 }) {
   const router = useRouter();
@@ -158,6 +161,13 @@ export default function ConvertToPO({
           ))}
         </select>
       </label>
+      {typeof vendorTotal === "number" && vendorTotal > vendors.length && (
+        <p className="mt-1 text-xs text-amber-600" data-testid="convert-vendors-truncated">
+          {copy.vendorTruncated
+            .replace("{shown}", String(vendors.length))
+            .replace("{total}", String(vendorTotal))}
+        </p>
+      )}
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <button
           type="button"

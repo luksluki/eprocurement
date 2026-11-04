@@ -115,7 +115,12 @@ export default async function RequisitionDetailPage({ params }: { params: Promis
           <PrintButton label={copy.print} />
           <ApprovalActions step={decidable} copy={copy.actions} />
           {convertible ? (
-            <ConvertToPO requisitionId={id} vendors={vendorPage?.vendors ?? null} copy={copy.convert} />
+            <ConvertToPO
+              requisitionId={id}
+              vendors={vendorPage?.vendors ?? null}
+              vendorTotal={vendorPage?.total}
+              copy={copy.convert}
+            />
           ) : null}
         </div>
       </div>

@@ -24,6 +24,7 @@ const copy = {
   vendorPlaceholder: "Pick an active vendor…",
   submitting: "Creating the PO…",
   noVendors: "No active vendors — activate a vendor on the Vendors page before creating a PO.",
+  vendorTruncated: "Showing the first {shown} of {total} active vendors — find the others on the Vendors page.",
   loadFailed: "The vendor list failed to load — reload the page to retry.",
   createdTitle: "Draft PO created",
   replayedTitle: "This requisition was already converted to a PO",
@@ -188,5 +189,22 @@ describe("ConvertToPO", () => {
       expect(mocks.assign).toHaveBeenCalledWith("/api/auth/refresh?next=%2Fapp%2Frequisitions%2Fpr-1"),
     );
     expect((await screen.findByTestId("convert-error")).textContent).toBe(copy.sessionExpired);
+  });
+
+  it("flags the picker when the active-vendor page is truncated at the gateway cap", () => {
+    // 2 options loaded, 105 active in total: the hint must appear with both
+    // numbers; without a total (or within it) the picker stays clean.
+    const { rerender } = render(
+      <ConvertToPO requisitionId="pr-1" vendors={vendors} vendorTotal={105} copy={copy} />,
+    );
+    const hint = screen.getByTestId("convert-vendors-truncated");
+    expect(hint.textContent).toContain("2");
+    expect(hint.textContent).toContain("105");
+
+    rerender(<ConvertToPO requisitionId="pr-1" vendors={vendors} copy={copy} />);
+    expect(screen.queryByTestId("convert-vendors-truncated")).toBeNull();
+
+    rerender(<ConvertToPO requisitionId="pr-1" vendors={vendors} vendorTotal={2} copy={copy} />);
+    expect(screen.queryByTestId("convert-vendors-truncated")).toBeNull();
   });
 });
