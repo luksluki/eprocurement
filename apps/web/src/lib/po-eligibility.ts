@@ -50,3 +50,17 @@ export function canAcknowledgePO(roles: string[], status: string): boolean {
 export function canPostGoodsReceipt(roles: string[], status: string): boolean {
   return holdsGRNPost(roles) && (status === STATUS_ACKNOWLEDGED || status === STATUS_PARTIALLY_RECEIVED);
 }
+
+// Requisition statuses on the conversion source (requisition.Status*).
+const REQUISITION_STATUS_APPROVED = "approved";
+
+// canCreatePOFromRequisition mirrors the #35 conversion gate for the
+// requisition detail's convert action (issue #112): the control renders only
+// for a po:write holder (buyer/admin, docs/rbac.md — the issue's
+// "PO-create permission", not a finance role) on an approved requisition.
+// The gateway re-checks po:write and procurement re-checks the status edge
+// (409 po_requisition_not_approved) — this only decides rendering; a lost
+// race (another buyer converted first) replays as 200, not an error.
+export function canCreatePOFromRequisition(roles: string[], requisitionStatus: string): boolean {
+  return holdsPOWrite(roles) && requisitionStatus === REQUISITION_STATUS_APPROVED;
+}

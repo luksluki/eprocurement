@@ -222,6 +222,23 @@ export type Dictionary = {
       sessionExpired: string;
       errorMessages: Record<string, string>;
     };
+    // Convert-to-PO action copy (issue #112): the buyer/admin action on an
+    // approved requisition. The success copy splits on the #35 contract —
+    // 201 created vs 200 idempotent replay.
+    convert: {
+      action: string;
+      vendorLabel: string;
+      vendorPlaceholder: string;
+      submitting: string;
+      noVendors: string;
+      loadFailed: string;
+      createdTitle: string;
+      replayedTitle: string;
+      openPo: string;
+      genericError: string;
+      sessionExpired: string;
+      errorMessages: Record<string, string>;
+    };
   };
   purchaseOrders: {
     title: string;
@@ -674,6 +691,29 @@ const id: Dictionary = {
         approval_reason_invalid: "Alasan maksimal 1000 karakter.",
         approval_idempotency_key_invalid: "Kunci idempotensi tidak valid.",
         approval_idempotency_key_conflict: "Kunci idempotensi sudah dipakai untuk langkah lain.",
+        gateway_unavailable: "Gateway tidak terjangkau.",
+      },
+    },
+    convert: {
+      action: "Buat PO",
+      vendorLabel: "Pemasok",
+      vendorPlaceholder: "Pilih pemasok aktif…",
+      submitting: "Membuat PO…",
+      noVendors: "Tidak ada pemasok aktif — aktifkan pemasok di halaman Pemasok sebelum membuat PO.",
+      loadFailed: "Daftar pemasok gagal dimuat — muat ulang halaman untuk mencoba lagi.",
+      createdTitle: "PO draft dibuat",
+      replayedTitle: "Permintaan ini sudah dikonversi menjadi PO",
+      openPo: "Buka PO",
+      genericError: "Gagal membuat PO — coba lagi.",
+      sessionExpired: "Sesi berakhir — mengalihkan ke halaman masuk…",
+      errorMessages: {
+        po_requisition_not_approved: "Hanya permintaan berstatus disetujui yang bisa dikonversi.",
+        po_vendor_id_invalid: "Pemasok harus dipilih.",
+        body_invalid: "Isian tidak valid.",
+        vendor_not_found: "Pemasok tidak ditemukan (atau milik tenant lain).",
+        vendor_deactivated: "Pemasok sudah dinonaktifkan — pilih pemasok lain.",
+        requisition_not_found: "Permintaan tidak ditemukan.",
+        permission_denied: "Anda tidak memegang izin membuat PO.",
         gateway_unavailable: "Gateway tidak terjangkau.",
       },
     },
@@ -1228,6 +1268,29 @@ const en: Dictionary = {
         approval_reason_invalid: "Reason must be at most 1000 characters.",
         approval_idempotency_key_invalid: "Invalid idempotency key.",
         approval_idempotency_key_conflict: "The idempotency key was already used for another step.",
+        gateway_unavailable: "The gateway is unreachable.",
+      },
+    },
+    convert: {
+      action: "Create PO",
+      vendorLabel: "Vendor",
+      vendorPlaceholder: "Pick an active vendor…",
+      submitting: "Creating the PO…",
+      noVendors: "No active vendors — activate a vendor on the Vendors page before creating a PO.",
+      loadFailed: "The vendor list failed to load — reload the page to retry.",
+      createdTitle: "Draft PO created",
+      replayedTitle: "This requisition was already converted to a PO",
+      openPo: "Open PO",
+      genericError: "Failed to create the PO — try again.",
+      sessionExpired: "Session expired — redirecting to sign-in…",
+      errorMessages: {
+        po_requisition_not_approved: "Only an approved requisition can be converted.",
+        po_vendor_id_invalid: "A vendor must be selected.",
+        body_invalid: "The submitted values are invalid.",
+        vendor_not_found: "Vendor not found (or it belongs to another tenant).",
+        vendor_deactivated: "That vendor is deactivated — pick another vendor.",
+        requisition_not_found: "Requisition not found.",
+        permission_denied: "You do not hold the permission to create POs.",
         gateway_unavailable: "The gateway is unreachable.",
       },
     },

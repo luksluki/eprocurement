@@ -2,23 +2,30 @@ import Link from "next/link";
 import Timeline from "@/components/Timeline";
 import { getDictionary, getLocale } from "@/i18n/server";
 import { decidableStep } from "@/lib/approval-eligibility";
-import { getRequisition } from "@/lib/gateway";
+import { getRequisition, listVendors } from "@/lib/gateway";
+import { canCreatePOFromRequisition } from "@/lib/po-eligibility";
 import { requireSession } from "@/lib/session";
 import ApprovalActions from "./ApprovalActions";
+import ConvertToPO from "./ConvertToPO";
 import PrintButton from "./PrintButton";
 
 export const dynamic = "force-dynamic";
 
-// PRD §11: /app/requisitions/:id — detail + timeline + actions (issue #34).
-// Server component: requireSession gates the page, the aggregate comes from
-// GET /api/v1/requisitions/:id (header + items + approval steps + embedded
-// attachments in one round trip), and the approve/reject actions render only
-// when the pure eligibility helper (lib/approval-eligibility, mirroring the
-// server's gates) says the viewer may decide the current step. The timeline
-// is the shared #43 component polling /api/events every 2 s (FR-11). Print:
-// the chrome (sidebar/top bar live in the shell layout, actions and timeline
-// here) is print:hidden, so the printed page is the document itself —
-// header, items, approval steps.
+// PRD §11: /app/requisitions/:id — detail + timeline + actions (issue #34;
+// convert-to-PO action issue #112). Server component: requireSession gates
+// the page, the aggregate comes from GET /api/v1/requisitions/:id (header +
+// items + approval steps + embedded attachments in one round trip), and the
+// approve/reject actions render only when the pure eligibility helper
+// (lib/approval-eligibility, mirroring the server's gates) says the viewer
+// may decide the current step. The convert action (issue #112) follows the
+// same pattern through lib/po-eligibility's canCreatePOFromRequisition
+// (po:write holder on an approved requisition); its active-vendor options
+// load here server-side (listVendors with status=active) so the client
+// component only handles the interaction. The timeline is the shared #43
+// component polling /api/events every 2 s (FR-11). Print: the chrome
+// (sidebar/top bar live in the shell layout, actions and timeline here) is
+// print:hidden, so the printed page is the document itself — header, items,
+// approval steps.
 export default async function RequisitionDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const pathname = `/app/requisitions/${id}`;
@@ -61,6 +68,17 @@ export default async function RequisitionDetailPage({ params }: { params: Promis
     steps: requisition.approval_steps,
   });
 
+  // The convert action's eligibility (#112): po:write holder on an approved
+  // requisition. The active-vendor options load only when the action can
+  // render — one extra round trip for buyers/admins, none for anyone else;
+  // null (failed load) is passed through so the component shows its
+  // actionable load-failed message instead of a dead picker. pageSize 100 =
+  // the gateway's MaxPageSize (services/procurement/vendor/vendor.go).
+  const convertible = canCreatePOFromRequisition(session.claims.roles, requisition.status);
+  const vendorPage = convertible
+    ? await listVendors(session.accessToken, { page: 1, pageSize: 100, status: "active" })
+    : null;
+
   const statusStyles: Record<string, string> = {
     draft: "bg-slate-100 text-slate-600",
     submitted: "bg-amber-50 text-amber-700",
@@ -96,6 +114,9 @@ export default async function RequisitionDetailPage({ params }: { params: Promis
         <div className="flex flex-col items-end gap-3 print:hidden">
           <PrintButton label={copy.print} />
           <ApprovalActions step={decidable} copy={copy.actions} />
+          {convertible ? (
+            <ConvertToPO requisitionId={id} vendors={vendorPage?.vendors ?? null} copy={copy.convert} />
+          ) : null}
         </div>
       </div>
 

@@ -24,10 +24,14 @@ export function isNextResponse(value: unknown): value is NextResponse {
   return value instanceof NextResponse;
 }
 
-// forwardGatewayResult renders a gateway result as the BFF response.
+// forwardGatewayResult renders a gateway result as the BFF response. The
+// success status prefers the gateway's own status when the ok-branch
+// carries it (POST /purchase-orders/from-requisition: 201 created vs 200
+// replay, #35/#112); the successStatus argument stays the default for every
+// caller whose contract does not distinguish.
 export function forwardGatewayResult<T>(result: GatewayResult<T>, successStatus = 200): NextResponse {
   if (result.ok) {
-    return NextResponse.json(result.data, { status: successStatus });
+    return NextResponse.json(result.data, { status: result.status ?? successStatus });
   }
   if (result.status === 401) {
     return NextResponse.json({ error: "Session expired.", code: "unauthorized" }, { status: 401 });

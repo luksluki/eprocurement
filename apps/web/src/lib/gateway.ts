@@ -103,16 +103,22 @@ export type VendorPage = {
 };
 
 // listVendors loads one tenant-scoped page of the vendor list (issue #27).
+// The optional status filter (active/deactivated — the gateway already
+// understands `status=active`, services/gateway/server/vendors.go) narrows
+// the page; #112 uses it to offer only active vendors for PO conversion.
 // Returns null on failure so the page can render an error state instead of
 // crashing.
 export async function listVendors(
   accessToken: string,
-  params: { page: number; pageSize: number },
+  params: { page: number; pageSize: number; status?: string },
 ): Promise<VendorPage | null> {
   try {
     const url = new URL(`${gatewayUrl()}/api/v1/vendors`);
     url.searchParams.set("page", String(params.page));
     url.searchParams.set("page_size", String(params.pageSize));
+    if (params.status) {
+      url.searchParams.set("status", params.status);
+    }
     const res = await fetch(url, {
       headers: { authorization: `Bearer ${accessToken}` },
       cache: "no-store",
@@ -208,7 +214,11 @@ export type GatewayFailure = {
   code: string;
 };
 
-export type GatewayResult<T> = { ok: true; data: T } | GatewayFailure;
+// The ok-branch carries the gateway's HTTP status when it is meaningful:
+// POST /purchase-orders/from-requisition answers 201 on creation vs 200 on
+// idempotent replay (#35/#112), and the BFF must forward that distinction.
+// Optional + backward-compatible — every other caller keeps the default.
+export type GatewayResult<T> = { ok: true; data: T; status?: number } | GatewayFailure;
 
 async function callGateway<T>(
   accessToken: string,
@@ -247,7 +257,7 @@ async function callGateway<T>(
         code: parsed?.code ?? "gateway_error",
       };
     }
-    return { ok: true, data: (await res.json()) as T };
+    return { ok: true, data: (await res.json()) as T, status: res.status };
   } catch {
     return { ok: false, status: 502, error: "gateway unreachable", code: "gateway_unavailable" };
   }
@@ -531,6 +541,29 @@ export function issuePurchaseOrder(
 ): Promise<GatewayResult<PurchaseOrderDetail>> {
   return callGateway(accessToken, `/api/v1/purchase-orders/${encodeURIComponent(id)}/issue`, {
     method: "POST",
+    forwardedFor,
+  });
+}
+
+// createPurchaseOrderFromRequisition converts an approved requisition into a
+// draft PO (po:write — buyer/admin; the #35 contract behind issue #112).
+// vendor_id is required — the requisition aggregate carries no vendor (PRD
+// §13) — and must name an active vendor of the tenant (400
+// po_vendor_id_invalid / 412 vendor_deactivated / 404 vendor_not_found; 409
+// po_requisition_not_approved for a not-yet-approved requisition). The
+// ok-branch's status draws the #35 line: 201 = this call created the draft,
+// 200 = idempotent replay returning the existing PO (never an error).
+// forwardedFor carries the caller's X-Forwarded-For for the po.created audit
+// row's actor_ip (#44).
+export function createPurchaseOrderFromRequisition(
+  accessToken: string,
+  requisitionId: string,
+  vendorId: string,
+  forwardedFor?: string,
+): Promise<GatewayResult<PurchaseOrderDetail>> {
+  return callGateway(accessToken, `/api/v1/purchase-orders/from-requisition/${encodeURIComponent(requisitionId)}`, {
+    method: "POST",
+    body: { vendor_id: vendorId },
     forwardedFor,
   });
 }
