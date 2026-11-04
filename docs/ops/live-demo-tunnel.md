@@ -134,7 +134,7 @@ first ends the exposure cleanly.
   tunnel needs no fixing.
 - **Login fails with 429 "Too many login attempts."** — identity
   throttles **5 logins/min per email** (`IDENTITY_LOGIN_RATE_PER_MIN`,
-  default 5 — see `apps/web/.env.example`). Rehearsals + the live demo on
+  default 5 — see the root `.env.example`). Rehearsals + the live demo on
   the same two demo emails exhaust the budget quickly. Wait a minute, or
   set `IDENTITY_LOGIN_RATE_PER_MIN=60` in `.env` and `make compose-up`
   for rehearsal-heavy days (demo-script's own advice). Note that remote
