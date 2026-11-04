@@ -12,6 +12,9 @@
 //      vendor_duplicate_code replay of a previous run);
 //   3. tenant A: the single-step IDR approval chain (PUT approval-rules).
 //
+// #60 adds tenant C's two users + vendor + approval chain the same way
+// (the resilience spec's dedicated tenant, see support/fixtures.ts).
+//
 // The tested entities (requisition, PO, GRN, invoice) are NOT seeded — the
 // spec creates them through the UI itself.
 import { execFile } from "node:child_process";
@@ -28,6 +31,10 @@ import {
   TENANT_B_ADMIN_EMAIL,
   TENANT_B_ID,
   TENANT_B_VENDOR,
+  TENANT_C_ADMIN_EMAIL,
+  TENANT_C_APPROVER_EMAIL,
+  TENANT_C_ID,
+  TENANT_C_VENDOR,
 } from "./fixtures";
 import { ensureVendor, gatewayLogin, installApprovalRules, waitForGateway } from "./gateway";
 
@@ -71,6 +78,10 @@ export default async function globalSetup(): Promise<void> {
   await createUser(TENANT_A_ADMIN_EMAIL, TENANT_A_ID, "E2E Acme Admin", ["admin"]);
   await createUser(TENANT_A_APPROVER_EMAIL, TENANT_A_ID, "E2E Acme Approver", ["admin"]);
   await createUser(TENANT_B_ADMIN_EMAIL, TENANT_B_ID, "E2E Glow Admin", ["admin"]);
+  // #60: the resilience spec's dedicated tenant (its own UUID so the
+  // spec's event-universe assertions stay exact — see support/fixtures.ts).
+  await createUser(TENANT_C_ADMIN_EMAIL, TENANT_C_ID, "E2E Resilience Admin", ["admin"]);
+  await createUser(TENANT_C_APPROVER_EMAIL, TENANT_C_ID, "E2E Resilience Approver", ["admin"]);
 
   const tokenA = await gatewayLogin(TENANT_A_ADMIN_EMAIL, E2E_ADMIN_PASSWORD);
   await ensureVendor(tokenA, TENANT_A_VENDOR);
@@ -78,6 +89,10 @@ export default async function globalSetup(): Promise<void> {
 
   const tokenB = await gatewayLogin(TENANT_B_ADMIN_EMAIL, E2E_ADMIN_PASSWORD);
   await ensureVendor(tokenB, TENANT_B_VENDOR);
+
+  const tokenC = await gatewayLogin(TENANT_C_ADMIN_EMAIL, E2E_ADMIN_PASSWORD);
+  await ensureVendor(tokenC, TENANT_C_VENDOR);
+  await installApprovalRules(tokenC, APPROVAL_RULES_BODY);
 
   console.log("[e2e setup] fixtures ready (users, vendors, approval rules)");
 }
