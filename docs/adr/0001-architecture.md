@@ -7,7 +7,7 @@
 
 ## Context
 
-The showcase must demonstrate enterprise Go microservices with clean architecture, gRPC, PostgreSQL + MongoDB + Redis + RabbitMQ, transactional outbox, scheduled jobs, and a data-heavy Next.js frontend — while staying deliverable in ~21 part-time days.
+The platform must provide enterprise Go microservices with clean architecture, gRPC, PostgreSQL + MongoDB + Redis + RabbitMQ, transactional outbox, scheduled jobs, and a data-heavy Next.js frontend — while staying deliverable in ~21 part-time days.
 
 ## Decision
 
@@ -31,15 +31,15 @@ Adopt five Go services plus a Next.js web app:
 
 | Alternative | Why rejected |
 |---|---|
-| Modular monolith (single Go binary) | Fastest to build, but weak evidence for the JD's microservices requirement |
-| BFF inside Next.js | Would remove the Go REST edge from the showcase |
+| Modular monolith (single Go binary) | Fastest to build, but weak support for the required microservices architecture |
+| BFF inside Next.js | Would remove the Go REST edge from the architecture |
 | Identity inside gateway | Simpler for M0, but creates a refactor later and blurs the auth boundary |
-| Kafka instead of RabbitMQ | RabbitMQ (exchanges, DLQ, retry) is explicitly named in the JD |
+| Kafka instead of RabbitMQ | RabbitMQ (exchanges, DLQ, retry) is an explicit architecture requirement |
 | Shared database across services | Couples deployments and breaks ownership; poor enterprise evidence |
 
 ## Consequences
 
-**Positive:** clear bounded contexts; strong JD evidence; failure isolation; independent scaling.
+**Positive:** clear bounded contexts; strong architectural evidence; failure isolation; independent scaling.
 
 **Negative:** more deployables (6 + infra); more local complexity; distributed tracing required from day one; more integration testing.
 

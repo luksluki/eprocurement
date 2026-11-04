@@ -1,0 +1,26 @@
+# Alerting rules wired via rule_files in prometheus.yml (#55).
+#
+# Scope note: only the FR-10 export-staleness alert lives here — it is the
+# "gauge + alert" pair dev-note 049 deferred from #49. DLQ-depth alerting
+# deliberately stays with #54 (dev-note 048); this file must not grow a
+# DLQ rule.
+groups:
+  - name: eprocurement-export
+    rules:
+      # FR-10: "missed-run detection (heartbeat age > 26 h → alert
+      # metric)". 93600 s = the 24 h slot + the 2 h grace of #49's
+      # MissedGrace. Tenants with no readable heartbeat carry no series at
+      # all (the refresher deletes them — see services/worker/export/
+      # age_monitor.go), so absence is a gap, never a fake 0, and this
+      # alert fires only on a genuinely measured age.
+      - alert: ExportAgeStale
+        expr: export_age_seconds > 93600
+        labels:
+          severity: warning
+        annotations:
+          summary: Nightly export stale for tenant {{ $labels.tenant }}
+          description: >-
+            No successful export in over 26 h (export_age_seconds {{
+            $value }}s > 93600s for tenant {{ $labels.tenant }}). Check the
+            worker's export scheduler and the run history
+            (GET /api/v1/exports/runs).

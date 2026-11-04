@@ -1,0 +1,216 @@
+syntax = "proto3";
+
+package documents.v1;
+
+option go_package = "github.com/luksluki/eprocurement/gen/go/documents/v1;documentsv1";
+
+// Documents owns attachment metadata (MongoDB document_meta) and the MinIO
+// object lifecycle (presigned upload/download, verification, orphan
+// cleanup). Reachable only inside the backend network; clients go through
+// the gateway. Callers upload bytes directly to the presigned URL — files
+// never stream through gateway or this service.
+service Documents {
+  // CreateUpload validates the declaration (mime allowlist, size limit,
+  // sha256 checksum) and returns a presigned PUT URL plus pending
+  // attachment metadata. The caller's tenant and user come from the auth
+  // metadata (x-tenant-id / x-user-id / x-role) injected by the gateway.
+  rpc CreateUpload(CreateUploadRequest) returns (CreateUploadResponse);
+  // CompleteUpload verifies the uploaded object (size, content type, sha256
+  // checksum) and marks the attachment ready. On mismatch the object is
+  // deleted, the metadata stays pending, and a typed error comes back — the
+  // caller may upload correct bytes and complete again.
+  rpc CompleteUpload(CompleteUploadRequest) returns (Attachment);
+  // ListAttachments returns the attachments of one owner (e.g. a vendor),
+  // pending and ready, oldest first.
+  rpc ListAttachments(ListAttachmentsRequest) returns (ListAttachmentsResponse);
+  // GetDownloadUrl returns a presigned GET URL for a ready attachment.
+  rpc GetDownloadUrl(GetDownloadUrlRequest) returns (GetDownloadUrlResponse);
+  // ListEvents returns the caller tenant's append-only event history,
+  // newest first (occurred_at DESC, event_id DESC as the tiebreaker —
+  // decision events share occurred_at). entity_type + entity_id filter the
+  // timeline of one aggregate (both or neither). Pages walk a keyset cursor:
+  // next_cursor is opaque, stable under concurrent inserts, and empty on the
+  // last page. payload_json is the raw event payload JSON — full fidelity of
+  // the procurement outbox JSONB, no restructuring.
+  rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
+  // ListExportRuns returns the caller tenant's nightly-export run history,
+  // newest first (scheduled_for DESC). Both export methods re-check
+  // export:run in the service-layer interceptor map (finance/admin only —
+  // the first real consumer of that permission, #49).
+  rpc ListExportRuns(ListExportRunsRequest) returns (ListExportRunsResponse);
+  // GetExportDownloadUrl returns a presigned GET URL for one successful
+  // run's CSV object. A failed run has no object (FailedPrecondition
+  // export_not_succeeded); another tenant's run id is indistinguishable
+  // from a missing one.
+  rpc GetExportDownloadUrl(GetExportDownloadUrlRequest) returns (GetExportDownloadUrlResponse);
+  // ListAudit returns the caller tenant's audit log — one row per decision
+  // event (approve/reject/issue/post/match, PRD §14.7) — newest first with
+  // the same keyset cursor contract as ListEvents. Both audit methods
+  // re-check audit:read in the service-layer interceptor map (#44:
+  // viewer/admin only).
+  rpc ListAudit(ListAuditRequest) returns (ListAuditResponse);
+  // ExportAudit returns the tenant's audit log as RFC 4180 CSV (CRLF),
+  // capped at the newest 10 000 rows with bounded metadata columns only —
+  // no details/payload column, so the unary response stays well under the
+  // gRPC message limit (#44's three-layer export bound).
+  rpc ExportAudit(ExportAuditRequest) returns (ExportAuditResponse);
+}
+
+message Attachment {
+  string id = 1;
+  string tenant_id = 2;
+  string entity_type = 3;    // owner kind, "vendor" today
+  string entity_id = 4;      // owner id, e.g. the vendor uuid
+  string filename = 5;       // display name
+  string mime_type = 6;
+  int64 size_bytes = 7;      // declared at create, verified at complete
+  string checksum_sha256 = 8; // lowercase hex
+  string status = 9;         // "pending" | "ready"
+  string object_key = 10;    // attachments/{tenant}/{entity}/{uuid}
+  string created_by = 11;    // user id
+  string created_at = 12;    // RFC 3339
+  string uploaded_at = 13;   // RFC 3339, set when ready
+}
+
+message CreateUploadRequest {
+  string entity_type = 1;
+  string entity_id = 2;
+  string filename = 3;
+  string mime_type = 4;
+  int64 size_bytes = 5;
+  string checksum_sha256 = 6;
+}
+
+message CreateUploadResponse {
+  Attachment attachment = 1;
+  string upload_url = 2;  // presigned PUT target on MinIO
+  string method = 3;      // always "PUT"
+  string expires_at = 4;  // RFC 3339
+}
+
+message CompleteUploadRequest {
+  string attachment_id = 1;
+}
+
+message ListAttachmentsRequest {
+  string entity_type = 1;
+  string entity_id = 2;
+}
+
+message ListAttachmentsResponse {
+  repeated Attachment attachments = 1;
+}
+
+message GetDownloadUrlRequest {
+  string attachment_id = 1;
+}
+
+message GetDownloadUrlResponse {
+  Attachment attachment = 1;
+  string download_url = 2; // presigned GET target on MinIO
+  string expires_at = 3;   // RFC 3339
+}
+
+// Event is one stored domain event (the PRD §14.5 envelope) as projected
+// into MongoDB by the history consumer.
+message Event {
+  string event_id = 1;
+  string tenant_id = 2;
+  string type = 3;           // catalog name, e.g. "pr.approved"
+  int32 version = 4;         // payload schema version, 1 today
+  string occurred_at = 5;    // RFC 3339
+  string actor_id = 6;       // user id, empty when unknown
+  string trace_id = 7;       // propagated trace, empty when unknown
+  string entity_type = 8;    // aggregate kind, e.g. "requisition"
+  string entity_id = 9;
+  string payload_json = 10;  // raw JSON payload, never restructured
+  // actor_ip is appended at the NEXT free number (11): renumbering already
+  // released fields breaks wire compatibility for mixed-version deploys.
+  string actor_ip = 11;      // acting client IP (#44 envelope delta), empty on pre-#44 rows
+}
+
+message ListEventsRequest {
+  // Optional aggregate filter: both must be set, or both empty.
+  string entity_type = 1;
+  string entity_id = 2;
+  int32 limit = 3;         // default 20, max 100 (clamped)
+  string next_cursor = 4;  // keyset cursor from a previous response
+}
+
+message ListEventsResponse {
+  repeated Event events = 1;
+  string next_cursor = 2;  // empty on the last page
+}
+
+// ExportRun is one export run record as stored in MongoDB export_runs
+// (#49 nightly, #53 manual; FR-10). object_key stays internal — clients
+// download through the presigned URL, never the raw key (the attachment
+// convention).
+message ExportRun {
+  string run_id = 1;
+  string tenant_id = 2;
+  string scheduled_for = 3;  // RFC 3339 — the slot this run belongs to (manual: the event's occurred_at)
+  string status = 4;         // "success" | "failed"
+  int32 row_count = 5;       // PO rows written to the CSV
+  bool missed_previous = 6;  // detection found no successful run in the previous slot
+  string error_message = 7;  // failure detail; empty on success
+  string started_at = 8;     // RFC 3339
+  string finished_at = 9;    // RFC 3339
+  string trigger = 10;       // "scheduled" (nightly #49) | "manual" (#53); empty on pre-#53 rows = scheduled
+}
+
+message ListExportRunsRequest {
+  int32 limit = 1;  // default 20, max 100 (clamped)
+}
+
+message ListExportRunsResponse {
+  repeated ExportRun runs = 1;  // newest first
+}
+
+message GetExportDownloadUrlRequest {
+  string run_id = 1;
+}
+
+message GetExportDownloadUrlResponse {
+  ExportRun run = 1;
+  string download_url = 2; // presigned GET target on MinIO
+  string expires_at = 3;   // RFC 3339
+}
+
+// AuditEntry is one audit_log row: the decision's actor, action, entity,
+// and trace (#44). Details (the raw payload JSON) is deliberately not on
+// this wire — the list and the export stay bounded; the same payload is
+// readable through ListEvents payload_json.
+message AuditEntry {
+  string event_id = 1;
+  string tenant_id = 2;
+  string actor_id = 3;     // user id, empty when unknown
+  string actor_ip = 4;     // acting client IP as the gateway resolved it, "" on pre-#44 rows
+  string action = 5;       // "approve" | "reject" | "issue" | "post" | "match"
+  string entity_type = 6;  // the decided aggregate, e.g. "requisition"
+  string entity_id = 7;
+  string trace_id = 8;     // propagated trace, empty when unknown
+  string occurred_at = 9;  // RFC 3339 — business time
+  string recorded_at = 10; // RFC 3339 — projection time
+}
+
+message ListAuditRequest {
+  // Optional filters: action must be one of the five audit actions; the
+  // entity pair must be both set or both empty.
+  string action = 1;
+  string entity_type = 2;
+  string entity_id = 3;
+  int32 limit = 4;         // default 20, max 100 (clamped)
+  string next_cursor = 5;  // keyset cursor from a previous response
+}
+
+message ListAuditResponse {
+  repeated AuditEntry entries = 1;  // newest first
+  string next_cursor = 2;           // empty on the last page
+}
+
+message ExportAuditRequest {}
+
+message ExportAuditResponse {
+  bytes csv = 1;  // RFC 4180, CRLF, bounded columns, newest 10 000 rows max
+}

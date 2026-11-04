@@ -1,0 +1,38 @@
+{
+  "name": "@eprocurement/web",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "test": "vitest run && node scripts/assert-ui-css.mjs"
+  },
+  "dependencies": {
+    "@eprocurement/ui": "workspace:*",
+    "@hookform/resolvers": "^6.0.0",
+    "@tanstack/react-query": "^5.104.5",
+    "@tanstack/react-table": "^8.21.3",
+    "next": "^15.5.9",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-hook-form": "^7.91.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3.3.7",
+    "@tailwindcss/postcss": "^4.3.3",
+    "@testing-library/react": "^16.3.3",
+    "@types/node": "^22.20.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "^15.5.9",
+    "jsdom": "^30.1.3",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.9.0",
+    "vitest": "^5.0.5"
+  }
+}

@@ -1,0 +1,121 @@
+// Package rbac holds the platform-wide role/permission model: one
+// declarative matrix shared by the gateway middleware and the gRPC service
+// interceptors, so the edge and the service layer enforce the same rules
+// (defense in depth, PRD §7). The matrix is documented for humans in
+// docs/rbac.md — keep both in sync.
+package rbac
+
+import "strings"
+
+// Role codes match the fixed catalog seeded in identity.roles.
+const (
+	RoleAdmin     = "admin"
+	RoleRequester = "requester"
+	RoleApprover  = "approver"
+	RoleBuyer     = "buyer"
+	RoleFinance   = "finance"
+	RoleViewer    = "viewer"
+)
+
+var allRoles = []string{RoleAdmin, RoleRequester, RoleApprover, RoleBuyer, RoleFinance, RoleViewer}
+
+// Permission names follow "<area>:<action>".
+const (
+	RequisitionRead   = "requisition:read"
+	RequisitionWrite  = "requisition:write"
+	ApprovalDecide    = "approval:decide"
+	ApprovalConfigure = "approval:configure"
+	VendorRead        = "vendor:read"
+	VendorWrite       = "vendor:write"
+	PORead            = "po:read"
+	POWrite           = "po:write"
+	GRNPost           = "grn:post"
+	InvoiceRead       = "invoice:read"
+	InvoiceWrite      = "invoice:write"
+	MatchConfigure    = "match:configure"
+	ExportRun         = "export:run"
+	ExportTrigger     = "export:trigger"
+	AuditRead         = "audit:read"
+	UsersManage       = "users:manage"
+	DLQManage         = "dlq:manage"
+	DashboardRead     = "dashboard:read"
+)
+
+// AllPermissions returns every permission in the matrix (tests and docs).
+func AllPermissions() []string {
+	ps := make([]string, 0, len(matrix))
+	for _, e := range matrix {
+		ps = append(ps, e.permission)
+	}
+	return ps
+}
+
+type entry struct {
+	permission string
+	roles      []string
+}
+
+// matrix is the single source of truth. admin implicitly holds everything
+// (see Check), so entries list the non-admin roles that grant the permission.
+var matrix = []entry{
+	{RequisitionRead, []string{RoleRequester, RoleApprover, RoleBuyer, RoleFinance, RoleViewer}},
+	{RequisitionWrite, []string{RoleRequester}},
+	{ApprovalDecide, []string{RoleApprover}},
+	// Admin-only by design (PRD §5: the tenant admin manages approval
+	// rules): no non-admin role grants it.
+	{ApprovalConfigure, nil},
+	{VendorRead, []string{RoleRequester, RoleApprover, RoleBuyer, RoleFinance, RoleViewer}},
+	{VendorWrite, []string{RoleBuyer}},
+	{PORead, []string{RoleRequester, RoleApprover, RoleBuyer, RoleFinance, RoleViewer}},
+	{POWrite, []string{RoleBuyer}},
+	{GRNPost, []string{RoleBuyer}},
+	{InvoiceRead, []string{RoleRequester, RoleApprover, RoleBuyer, RoleFinance, RoleViewer}},
+	{InvoiceWrite, []string{RoleFinance}},
+	// Admin-only by design (the approval:configure twin — #40's maintainer
+	// decision 2026-10-28: tolerances live on the tenant admin's
+	// /admin/settings surface): no non-admin role grants it.
+	{MatchConfigure, nil},
+	{ExportRun, []string{RoleFinance}},
+	// Admin-only by design (#53, the issue's decision comment: triggering
+	// a manual export is an operational act, not a business-role one — the
+	// dlq:manage twin; finance's export:run READ of the run history from
+	// #49 is deliberately not demoted): no non-admin role grants it.
+	{ExportTrigger, nil},
+	{AuditRead, []string{RoleViewer}},
+	{UsersManage, nil},
+	// Admin-only by design (#48: the tenant admin operates the DLQ —
+	// poison messages are an operational, not business-role, surface).
+	{DLQManage, nil},
+	// The dashboard aggregates reads every role already holds
+	// (requisition/po/invoice lists — FR-09's landing page), so it is broad
+	// like them: every non-admin role (#52).
+	{DashboardRead, []string{RoleRequester, RoleApprover, RoleBuyer, RoleFinance, RoleViewer}},
+}
+
+var granted map[string]map[string]bool
+
+func init() {
+	granted = make(map[string]map[string]bool, len(matrix))
+	for _, e := range matrix {
+		set := map[string]bool{}
+		for _, r := range e.roles {
+			set[r] = true
+		}
+		granted[e.permission] = set
+	}
+}
+
+// Check reports whether any of the caller's roles grants the permission.
+// Unknown roles grant nothing; admin grants everything; an empty role list
+// never passes.
+func Check(roles []string, permission string) bool {
+	for _, r := range roles {
+		if r == RoleAdmin {
+			return true
+		}
+		if granted[permission][strings.TrimSpace(r)] {
+			return true
+		}
+	}
+	return false
+}

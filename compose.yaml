@@ -1,0 +1,370 @@
+name: eprocurement
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-eprocurement}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-eprocurement}
+      POSTGRES_DB: ${POSTGRES_DB:-eprocurement}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-eprocurement} -d ${POSTGRES_DB:-eprocurement}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [backend]
+
+  mongo:
+    image: mongo:7.0
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-eprocurement}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-eprocurement}
+      MONGO_INITDB_DATABASE: ${MONGO_DB:-eprocurement}
+    ports:
+      - "${MONGO_PORT:-27017}:27017"
+    volumes:
+      - mongodata:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ ping: 1 }).ok' | grep 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [backend]
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks: [backend]
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-eprocurement}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-eprocurement}
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+    volumes:
+      - rabbitmqdata:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+    networks: [backend]
+
+  minio:
+    image: bitnamilegacy/minio:2025.7.23-debian-12-r5
+    # Local dev only: the Bitnami image needs write access to the named volume on Docker Desktop.
+    user: "0:0"
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-eprocurement}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-eprocurement}
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - miniodata:/bitnami/minio/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [backend]
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    command: ["--config=/etc/otel-collector.yaml"]
+    volumes:
+      - ./deploy/compose/otel-collector.yaml:/etc/otel-collector.yaml:ro
+    ports:
+      - "${OTEL_GRPC_PORT:-4317}:4317"
+      - "${OTEL_HTTP_PORT:-4318}:4318"
+      - "${OTEL_HEALTH_PORT:-13133}:13133"
+    networks: [backend]
+
+  # Observability profile (opt-in: `docker compose --profile observability
+  # up`). Prometheus + Grafana landed with #55; Jaeger with #54. PRD §14.9
+  # models them as default services trimmed by the demo profile — this
+  # stack inverts that (the default stays lean, observability opts in),
+  # per the issue note "Demo profile may skip Grafana"; the deviation is
+  # recorded in docs/dev-notes/055.
+  prometheus:
+    image: prom/prometheus:v3.6.0
+    profiles: [observability]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    volumes:
+      - ./deploy/compose/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/compose/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheusdata:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [backend]
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    profiles: [observability]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-eprocurement}
+    volumes:
+      - ./deploy/compose/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/compose/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    ports:
+      # Not 3000: the web dev server owns 3000 on the host.
+      - "${GRAFANA_PORT:-3001}:3000"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    networks: [backend]
+
+  # Traces UI (#54): the collector forwards OTLP traces here (see
+  # deploy/compose/otel-collector.yaml). all-in-one serves the UI on 16686
+  # and the OTLP gRPC receiver on its container-internal 4317 —
+  # deliberately NOT published to the host (the METRICS_PORT pattern);
+  # only the compose-network collector exports to it. No healthcheck: the
+  # modern all-in-one image ships no shell/wget, so a CMD-SHELL probe
+  # cannot run — `up --wait` treats a running container without a
+  # healthcheck as healthy; verify via the UI/API (docs/dev-notes/054).
+  # COLLECTOR_OTLP_ENABLED pins the (default-on) OTLP receivers explicitly.
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    profiles: [observability]
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "${JAEGER_UI_PORT:-16686}:16686"
+    networks: [backend]
+
+  identity:
+    build:
+      context: .
+      dockerfile: deploy/docker/service.Dockerfile
+      args:
+        SERVICE: identity
+    environment:
+      APP_ENV: ${APP_ENV:-local}
+      PORT: "8081"
+      # Container-internal /metrics port (#55); deliberately NOT published
+      # to the host — only Prometheus (profile observability) scrapes it.
+      METRICS_PORT: "9101"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # #54: OTLP gRPC endpoint for the process's span exporter.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      IDENTITY_LOGIN_RATE_PER_MIN: ${IDENTITY_LOGIN_RATE_PER_MIN:-5}
+      IDENTITY_JWT_KEY: ${IDENTITY_JWT_KEY:-}
+      IDENTITY_JWT_KEY_PREVIOUS: ${IDENTITY_JWT_KEY_PREVIOUS:-}
+      # Inside the compose network the database is reached by service name,
+      # not by the host-local URL in .env.
+      DATABASE_URL: postgres://${POSTGRES_USER:-eprocurement}:${POSTGRES_PASSWORD:-eprocurement}@postgres:5432/${POSTGRES_DB:-eprocurement}?sslmode=disable
+    ports:
+      - "${IDENTITY_PORT:-8081}:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/bin/grpc-health-probe", "-addr=localhost:8081", "-service=identity"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks: [backend]
+
+  procurement:
+    build:
+      context: .
+      dockerfile: deploy/docker/service.Dockerfile
+      args:
+        SERVICE: procurement
+    environment:
+      APP_ENV: ${APP_ENV:-local}
+      PORT: "8082"
+      METRICS_PORT: "9102" # container-internal (#55), not published
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # #54: OTLP gRPC endpoint for the process's span exporter.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      DATABASE_URL: postgres://${POSTGRES_USER:-eprocurement}:${POSTGRES_PASSWORD:-eprocurement}@postgres:5432/${POSTGRES_DB:-eprocurement}?sslmode=disable
+    ports:
+      - "${PROCUREMENT_PORT:-8082}:8082"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/bin/grpc-health-probe", "-addr=localhost:8082", "-service=procurement"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks: [backend]
+
+  documents:
+    build:
+      context: .
+      dockerfile: deploy/docker/service.Dockerfile
+      args:
+        SERVICE: documents
+    environment:
+      APP_ENV: ${APP_ENV:-local}
+      PORT: "8083"
+      METRICS_PORT: "9103" # container-internal (#55), not published
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # #54: OTLP gRPC endpoint for the process's span exporter.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      MONGO_URI: mongodb://${MONGO_ROOT_USER:-eprocurement}:${MONGO_ROOT_PASSWORD:-eprocurement}@mongo:27017/${MONGO_DB:-eprocurement}?authSource=admin
+      S3_ENDPOINT: minio:9000
+      # Presigned URLs must be reachable from OUTSIDE the compose network.
+      S3_PRESIGN_ENDPOINT: ${S3_PRESIGN_ENDPOINT:-localhost:9000}
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-eprocurement}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-eprocurement}
+      S3_BUCKET: ${S3_BUCKET:-attachments}
+      ATTACHMENT_MAX_SIZE_MB: ${ATTACHMENT_MAX_SIZE_MB:-25}
+      ATTACHMENT_PENDING_TTL: ${ATTACHMENT_PENDING_TTL:-24h}
+      REAPER_INTERVAL: ${REAPER_INTERVAL:-30m}
+    ports:
+      - "${DOCUMENTS_PORT:-8083}:8083"
+    depends_on:
+      mongo:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/bin/grpc-health-probe", "-addr=localhost:8083", "-service=documents"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks: [backend]
+
+  # Background jobs (#45: transactional outbox publisher). The worker dials
+  # out (postgres, rabbitmq, mongo, redis, minio) and serves only its
+  # container-internal /metrics port (#55, METRICS_PORT below — not
+  # published to the host). It deliberately runs no migrations: procurement
+  # is the sole applier, so on a fresh volume the publisher loop's first
+  # polls can fail until procurement has booted; the loop logs and keeps
+  # ticking instead of crash-looping the container.
+  worker:
+    build:
+      context: .
+      dockerfile: deploy/docker/service.Dockerfile
+      args:
+        SERVICE: worker
+    environment:
+      APP_ENV: ${APP_ENV:-local}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      METRICS_PORT: "9104" # container-internal (#55), not published
+      # #54: OTLP gRPC endpoint for the process's span exporter.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      DATABASE_URL: postgres://${POSTGRES_USER:-eprocurement}:${POSTGRES_PASSWORD:-eprocurement}@postgres:5432/${POSTGRES_DB:-eprocurement}?sslmode=disable
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-eprocurement}:${RABBITMQ_PASSWORD:-eprocurement}@rabbitmq:5672/
+      # consumer side (#47): same credentials the documents service uses
+      MONGO_URI: mongodb://${MONGO_ROOT_USER:-eprocurement}:${MONGO_ROOT_PASSWORD:-eprocurement}@mongo:27017/${MONGO_DB:-eprocurement}?authSource=admin
+      MONGO_DB: ${MONGO_DB:-eprocurement}
+      # export scheduler (#49): Redis lock + heartbeat, MinIO CSV writer.
+      # The bucket is THE SINGLE S3_BUCKET documents presigns from — one
+      # bucket, exports/ prefix (maintainer decision: no second bucket).
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT: minio:9000
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-eprocurement}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-eprocurement}
+      S3_BUCKET: ${S3_BUCKET:-attachments}
+      EXPORT_SCHEDULE: ${EXPORT_SCHEDULE:-01:00}
+      EXPORT_TZ: ${EXPORT_TZ:-UTC}
+      EXPORT_LOCK_TTL: ${EXPORT_LOCK_TTL:-15m}
+      EXPORT_JOB_BUDGET: ${EXPORT_JOB_BUDGET:-10m}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks: [backend]
+
+  gateway:
+    build:
+      context: .
+      dockerfile: deploy/docker/service.Dockerfile
+      args:
+        SERVICE: gateway
+    environment:
+      APP_ENV: ${APP_ENV:-local}
+      PORT: "8080"
+      METRICS_PORT: "9100" # container-internal (#55), not published
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # #54: OTLP gRPC endpoint for the process's span exporter.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      IDENTITY_ADDR: identity:8081
+      PROCUREMENT_ADDR: procurement:8082
+      DOCUMENTS_ADDR: documents:8083
+      # admin DLQ surface (#48): the gateway's small AMQP client dials the
+      # broker per request (maintainer option A, 2026-10-28).
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-eprocurement}:${RABBITMQ_PASSWORD:-eprocurement}@rabbitmq:5672/
+      # #44: whose X-Forwarded-For the gateway honors for the audit trail's
+      # actor_ip — the pinned backend subnet below (covers containers and
+      # the host's bridge-gateway address, i.e. published-port calls from
+      # the host-run web BFF). A caller outside the range is recorded with
+      # its socket address.
+      GATEWAY_TRUSTED_PROXIES: 172.28.0.0/16
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+    depends_on:
+      identity:
+        condition: service_healthy
+      procurement:
+        condition: service_healthy
+      documents:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks: [backend]
+
+volumes:
+  pgdata:
+  mongodata:
+  redisdata:
+  rabbitmqdata:
+  miniodata:
+  prometheusdata:
+  grafanadata:
+
+networks:
+  backend:
+    driver: bridge
+    # Pinned subnet (#44): GATEWAY_TRUSTED_PROXIES on the gateway names
+    # exactly this range, so the trust boundary is stable across recreations
+    # instead of tracking Docker's dynamically allocated pools.
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

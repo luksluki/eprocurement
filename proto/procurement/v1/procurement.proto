@@ -1,0 +1,679 @@
+syntax = "proto3";
+
+package procurement.v1;
+
+option go_package = "github.com/luksluki/eprocurement/gen/go/procurement/v1;procurementv1";
+
+// Procurement is the internal domain API (vendors and requisitions first;
+// PO conversion below; GRNs and invoices arrive with later issues). Reachable
+// only inside the backend network; clients go through the gateway.
+service Procurement {
+  // CreateVendor validates and inserts a vendor. The caller's tenant and user
+  // come from the auth metadata (x-tenant-id / x-user-id / x-role) injected
+  // by the gateway; vendor codes are unique per tenant.
+  rpc CreateVendor(CreateVendorRequest) returns (Vendor);
+  // GetVendor returns one vendor of the caller's tenant; other tenants'
+  // vendors are indistinguishable from missing ones.
+  rpc GetVendor(GetVendorRequest) returns (Vendor);
+  // UpdateVendor mutates mutable fields of an active vendor. Deactivated
+  // vendors are immutable (soft-deleted).
+  rpc UpdateVendor(UpdateVendorRequest) returns (Vendor);
+  // DeactivateVendor soft-deletes a vendor: it stays readable for history but
+  // cannot be used in new purchase orders.
+  rpc DeactivateVendor(DeactivateVendorRequest) returns (Vendor);
+  // ListVendors returns one page of the caller's vendors ordered by code.
+  // query matches a code prefix or a name substring (case-insensitive);
+  // status and query combine. total is the number of matching rows across
+  // all pages.
+  rpc ListVendors(ListVendorsRequest) returns (ListVendorsResponse);
+  // CreateRequisition creates a draft for the caller (the requester is the
+  // caller from the auth metadata). The PR number (PR-%06d) is generated
+  // server-side per tenant; total_cents is computed server-side. Items may
+  // be empty — a draft collects its lines before submit.
+  rpc CreateRequisition(CreateRequisitionRequest) returns (Requisition);
+  // UpdateRequisition replaces the line items of a draft the caller owns
+  // (admins may act on any requisition) and recomputes total_cents.
+  // Non-draft requisitions are immutable.
+  rpc UpdateRequisition(UpdateRequisitionRequest) returns (Requisition);
+  // SubmitRequisition moves a draft the caller owns (admins excepted) to
+  // submitted — the basket must hold at least one valid line. The optional
+  // idempotency_key (from the gateway's Idempotency-Key header) names the
+  // submit: replaying the same key returns the requisition's current state
+  // without a second transition; reusing it for another requisition in the
+  // tenant is rejected.
+  rpc SubmitRequisition(SubmitRequisitionRequest) returns (Requisition);
+  // ListRequisitions returns one page of the caller tenant's requisitions
+  // ordered by number descending (newest first). query matches a number
+  // prefix (case-insensitive); status and query combine. total is the number
+  // of matching rows across all pages. Rows are header-only: items and
+  // approval_steps are always empty here — the detail reads own them.
+  rpc ListRequisitions(ListRequisitionsRequest) returns (ListRequisitionsResponse);
+  // GetRequisition returns one requisition of the caller's tenant — the
+  // detail read that owns the items and approval steps the list rows never
+  // carry. Other tenants' requisitions are indistinguishable from missing
+  // ones. Read is tenant-wide (requisition:read); ownership applies to edits
+  // and submit only.
+  rpc GetRequisition(GetRequisitionRequest) returns (Requisition);
+  // DecideApproval applies one approve/reject decision to an approval step.
+  // Only the current step (the smallest pending step_no of a submitted
+  // requisition) may be decided; the decider must hold the step's
+  // role_required (admins excepted) and must not be the requester
+  // (self-approval is forbidden for everyone, admins included). A reject
+  // skips the remaining steps and rejects the requisition; approving the
+  // last step approves it. The optional idempotency_key (from the gateway's
+  // Idempotency-Key header) names the decision: replaying the same key on
+  // the same step returns the current state without a second decision or a
+  // second outbox event; reusing it for another step in the tenant is
+  // rejected. The response carries the requisition with its latest
+  // approval_steps.
+  rpc DecideApproval(DecideApprovalRequest) returns (DecideApprovalResponse);
+  // GetApprovalRules returns the caller tenant's whole rule set.
+  rpc GetApprovalRules(GetApprovalRulesRequest) returns (ApprovalRulesResponse);
+  // ReplaceApprovalRules replaces the caller tenant's whole rule set in one
+  // transaction (delete + insert). Rules are a live configuration: replacing
+  // them never changes steps already materialized on submitted requisitions.
+  rpc ReplaceApprovalRules(ReplaceApprovalRulesRequest) returns (ApprovalRulesResponse);
+  // CreatePurchaseOrder converts one approved requisition of the caller's
+  // tenant into a draft purchase order (FR-05): lines are copied exactly
+  // once, total_cents is recomputed server-side (= the requisition's), and
+  // the PO number (PO-%06d) is allocated per tenant inside the conversion
+  // transaction — a failed conversion burns no number. vendor_id is
+  // required and must name an active vendor of the tenant (requisitions
+  // carry no vendor). Idempotent per requisition: converting again returns
+  // the existing PO unchanged with created=false (the vendor gate is skipped
+  // and a differing vendor_id ignored on replay). On success the
+  // requisition closes (approved → closed) and exactly one po.created
+  // outbox event commits atomically with the PO. The issue transition,
+  // issued_at, and po.issued belong to the lifecycle API (#36).
+  rpc CreatePurchaseOrder(CreatePurchaseOrderRequest) returns (CreatePurchaseOrderResponse);
+  // IssuePurchaseOrder moves a draft PO of the caller's tenant to issued and
+  // stamps issued_at (FR-06) — the PO leaves the buyer and the
+  // acknowledgement SLA clock starts. Anything but draft is rejected
+  // (po_illegal_transition); exactly one po.issued outbox event commits with
+  // the transition.
+  rpc IssuePurchaseOrder(IssuePurchaseOrderRequest) returns (PurchaseOrder);
+  // AcknowledgePurchaseOrder moves an issued PO to acknowledged — the
+  // vendor's confirmation (po.acknowledged). Anything but issued is
+  // rejected; exactly one po.acknowledged outbox event commits with the
+  // transition.
+  rpc AcknowledgePurchaseOrder(AcknowledgePurchaseOrderRequest) returns (PurchaseOrder);
+  // CancelPurchaseOrder moves a draft, issued, or acknowledged PO to
+  // cancelled — but only while nothing has been received (the total
+  // qty_received over all lines is 0); receipts pin the PO and the only exit
+  // is close (po_has_receipts). Any other source status is
+  // po_illegal_transition; exactly one po.cancelled outbox event commits
+  // with the transition.
+  rpc CancelPurchaseOrder(CancelPurchaseOrderRequest) returns (PurchaseOrder);
+  // ClosePurchaseOrder moves a partially_received (short-close) or received
+  // PO to closed. Any other source status is po_illegal_transition; exactly
+  // one po.closed outbox event commits with the transition.
+  rpc ClosePurchaseOrder(ClosePurchaseOrderRequest) returns (PurchaseOrder);
+  // ListPurchaseOrders returns one page of the caller tenant's purchase
+  // orders ordered by number descending (newest first). query matches a number
+  // prefix (case-insensitive); status is one of the seven lifecycle values or
+  // empty; the two combine. total is the number of matching rows across all
+  // pages. Rows are header-only: items are always empty here — the detail
+  // read owns them.
+  rpc ListPurchaseOrders(ListPurchaseOrdersRequest) returns (ListPurchaseOrdersResponse);
+  // GetPurchaseOrder returns one purchase order of the caller's tenant — the
+  // detail read that owns the lines the list rows never carry, with each
+  // line's id (receipt lines reference po_item ids since #37). Other tenants'
+  // purchase orders are indistinguishable from missing ones.
+  rpc GetPurchaseOrder(GetPurchaseOrderRequest) returns (PurchaseOrder);
+  // PostGoodsReceipt records one goods receipt against an acknowledged or
+  // partially_received PO (FR-07): each line advances the PO line's
+  // cumulative qty_received, over-receipts are rejected with the
+  // grn_over_receipt detail line, and the PO status follows the
+  // post-receipt quantities — partially_received while lines are short,
+  // received once every line reaches qty_ordered (a further partial receipt
+  // on a partially_received PO is legal and leaves the status untouched).
+  // The GRN number (GRN-%06d) is allocated per tenant inside the posting
+  // transaction — a rejected receipt burns no number. Exactly one grn.posted
+  // outbox event commits with every successful receipt.
+  rpc PostGoodsReceipt(PostGoodsReceiptRequest) returns (PostGoodsReceiptResponse);
+  // CreateInvoice records one vendor invoice against an acknowledged,
+  // partially_received, or received PO of the caller's tenant (#39): the
+  // vendor_id and currency are derived server-side from the locked PO
+  // (never client input), total_cents is recomputed server-side from the
+  // lines, and the cumulative over-billing guard rejects — strictly, no
+  // tolerance at create (tolerance is the #40 match's concern) — any
+  // invoice whose amount plus the PO's existing invoices would exceed
+  // po.total_cents, with the inv_over_bill detail line. The number is the
+  // vendor's own invoice number, unique per (tenant, vendor) — the same
+  // number under a different vendor is a different invoice. The PO is
+  // locked but never mutated, and no outbox event is written (the §14.6
+  // catalog's invoice.* events belong to the #40 match). Attachments are
+  // declared after creation through the documents service (the architecture
+  // has no cross-service atomicity); the "attachment required" obligation
+  // is enforced by the demo flow (#41/#40), not by this API.
+  rpc CreateInvoice(CreateInvoiceRequest) returns (Invoice);
+  // GetInvoice returns one invoice of the caller's tenant — the detail read
+  // with the lines. Other tenants' invoices are indistinguishable from
+  // missing ones. status stays pending until the #40 match moves it;
+  // match_result_json carries the match's explanation once it ran (empty
+  // while pending).
+  rpc GetInvoice(GetInvoiceRequest) returns (Invoice);
+  // ListInvoices returns one page of the caller tenant's invoices ordered by
+  // created_at descending (newest first — vendor numbers are free-form, so
+  // creation order is the list order; the id breaks ties deterministically).
+  // query matches a number prefix (case-insensitive — vendor numbers are the
+  // issuer's convention); status is pending | matched | discrepancy or empty;
+  // the two combine. total is the number of matching rows across all pages.
+  // Rows are header-only: items are always empty and match_result_json is
+  // always empty here — the detail read owns both.
+  rpc ListInvoices(ListInvoicesRequest) returns (ListInvoicesResponse);
+  // MatchInvoice applies the three-way match (#40, FR-08) to one invoice of
+  // the caller's tenant: every line's cumulative invoiced quantity (across
+  // ALL the PO's invoices, this one included) is checked against the PO
+  // line's received quantity — upper-side only, within the tenant's
+  // qty_pct tolerance — and this invoice's unit price against the PO price,
+  // symmetrically within price_pct. The verdict lands atomically with its
+  // explanation: status moves pending/discrepancy → matched/discrepancy,
+  // match_result_json fills with the per-line detail, and exactly one
+  // invoice.matched or invoice.discrepancy outbox event commits with it.
+  // Re-running on matched is rejected (409 inv_already_matched);
+  // pending/discrepancy may be re-matched (a late GRN resolving a
+  // discrepancy), each run appending its own event. No attachment gate —
+  // the "attachment required" obligation stays with the demo flow (#41).
+  rpc MatchInvoice(MatchInvoiceRequest) returns (Invoice);
+  // GetMatchSettings returns the caller tenant's match tolerances; a tenant
+  // with no stored row reads the effective defaults 0%/0% (strict).
+  rpc GetMatchSettings(GetMatchSettingsRequest) returns (MatchSettings);
+  // ReplaceMatchSettings upserts the caller tenant's match tolerances
+  // (match:configure, admin-only). Values apply to match runs that start
+  // after the commit; stored match results are immutable history.
+  rpc ReplaceMatchSettings(ReplaceMatchSettingsRequest) returns (MatchSettings);
+  // GetDashboard returns the operational-health summary (FR-09) of the
+  // caller's tenant in one round trip: the count and first page of pending
+  // approvals (the current pending step — the smallest pending step_no — of
+  // each submitted requisition, oldest-submitted first), the spend per
+  // vendor+currency over trailing 30- and 90-day windows (issued POs only:
+  // status not draft/cancelled — the #49 register basis minus
+  // issued-then-cancelled POs), and the purchase
+  // order status distribution over all seven FR-06 statuses including zeros.
+  rpc GetDashboard(GetDashboardRequest) returns (DashboardSummary);
+
+  // TriggerExport records a manual export request for the caller's tenant
+  // (#53, FR-10's manual half): exactly one export.requested outbox row
+  // (§14.6 catalog) committed in its own tenant transaction — no business
+  // state changes with it. The worker's exports consumer owns the run: the
+  // trailing-24 h PO register, the manual object key, and the run-history
+  // record. export:trigger — admin-only (docs/rbac.md). The gateway answers
+  // 202 {"status":"requested","event_id":…}; the id correlates the request
+  // with the queued event.
+  rpc TriggerExport(TriggerExportRequest) returns (TriggerExportResponse);
+}
+
+message TriggerExportRequest {}
+
+message TriggerExportResponse {
+  string event_id = 1; // uuid of the export.requested outbox row
+}
+
+message Vendor {
+  string id = 1;
+  string tenant_id = 2;
+  string code = 3;            // tenant-unique, e.g. "V-0001"
+  string name = 4;
+  string contact_email = 5;
+  string tax_id = 6;
+  string status = 7;          // "active" | "deactivated"
+  string created_at = 8;      // RFC 3339
+  string created_by = 9;      // user id
+  string updated_at = 10;     // RFC 3339
+  string updated_by = 11;     // user id
+}
+
+message CreateVendorRequest {
+  string code = 1;
+  string name = 2;
+  string contact_email = 3;
+  string tax_id = 4;
+}
+
+message GetVendorRequest {
+  string id = 1;
+}
+
+message UpdateVendorRequest {
+  string id = 1;
+  // Mutable fields; empty strings keep the stored value (no field masks yet).
+  string name = 2;
+  string contact_email = 3;
+  string tax_id = 4;
+}
+
+message DeactivateVendorRequest {
+  string id = 1;
+}
+
+message ListVendorsRequest {
+  // Free-text match: code prefix or name substring, case-insensitive.
+  // Empty means no text filter. LIKE wildcards in the input are literal.
+  string query = 1;
+  // "active" | "deactivated" | "" (all).
+  string status = 2;
+  int32 page = 3;      // 1-based; default 1
+  int32 page_size = 4; // default 20, max 100
+}
+
+message ListVendorsResponse {
+  repeated Vendor vendors = 1;
+  int32 total = 2;      // matching rows across all pages
+  int32 page = 3;       // normalized values actually applied
+  int32 page_size = 4;
+}
+
+// Requisition is the purchase-requisition aggregate as stored: server-side
+// number, requester, status, currency, and the server-computed total.
+message Requisition {
+  string id = 1;
+  string tenant_id = 2;
+  string number = 3;          // server-generated per tenant, e.g. "PR-000042"
+  string requester_id = 4;    // user who created the PR
+  string status = 5;          // draft | submitted | approved | rejected | cancelled | closed
+  string currency = 6;        // IDR | USD
+  int64 total_cents = 7;      // server-computed sum of qty × unit_price_cents
+  repeated RequisitionItem items = 8;
+  string submitted_at = 9;    // RFC 3339, empty while draft
+  string created_at = 10;     // RFC 3339
+  string created_by = 11;     // user id
+  string updated_at = 12;     // RFC 3339
+  string updated_by = 13;     // user id
+  // Steps materialized from the approval rules at submit (empty while
+  // draft); submit and decide responses carry the latest known state.
+  repeated ApprovalStep approval_steps = 14;
+}
+
+// ApprovalStep is one materialized approval step — a snapshot of the rule
+// that produced it at submit time. Later rule changes never rewrite it.
+message ApprovalStep {
+  string id = 1;
+  string requisition_id = 2;
+  int32 step_no = 3;           // order of decision, 1-based; smallest pending first
+  string role_required = 4;    // decider must hold this role (admins excepted)
+  int64 threshold_cents = 5;   // rule threshold snapshot
+  string status = 6;           // pending | approved | rejected | skipped
+  string decided_by = 7;       // user id, empty while pending/skipped
+  string decided_at = 8;       // RFC 3339, empty while pending/skipped
+  string reason = 9;           // required on reject, optional on approve
+}
+
+message RequisitionItem {
+  string description = 1;     // non-blank
+  int32 qty = 2;              // > 0
+  int64 unit_price_cents = 3; // >= 0, integer cents in the header currency
+  string category = 4;        // free-form, may be empty
+}
+
+message CreateRequisitionRequest {
+  // Currency is required: empty or a value outside {IDR, USD} after the
+  // gateway's trim+uppercase normalization is rejected. There is no default.
+  string currency = 1;
+  repeated RequisitionItem items = 2; // may be empty for a draft
+}
+
+message UpdateRequisitionRequest {
+  string id = 1;
+  repeated RequisitionItem items = 2; // replaces the whole basket
+}
+
+message SubmitRequisitionRequest {
+  string id = 1;
+  // Optional: 1-64 chars after trimming; empty means no idempotency.
+  string idempotency_key = 2;
+}
+
+message ListRequisitionsRequest {
+  // Free-text match: requisition number prefix, case-insensitive. Empty means
+  // no text filter. LIKE wildcards in the input are literal.
+  string query = 1;
+  // draft | submitted | approved | rejected | cancelled | closed | "" (all).
+  string status = 2;
+  int32 page = 3;      // 1-based; default 1
+  int32 page_size = 4; // default 20, max 100
+}
+
+message ListRequisitionsResponse {
+  // Header-only rows: items and approval_steps are always empty (the detail
+  // reads own the bodies).
+  repeated Requisition requisitions = 1;
+  int32 total = 2;      // matching rows across all pages
+  int32 page = 3;       // normalized values actually applied
+  int32 page_size = 4;
+}
+
+message GetRequisitionRequest {
+  string id = 1;
+}
+
+message DecideApprovalRequest {
+  string step_id = 1;
+  // "approve" | "reject" (normalized trim+lowercase at the edge).
+  string decision = 2;
+  // Required for reject (non-blank after trimming), optional for approve;
+  // bounded to 1000 characters at the edge and the service layer.
+  string reason = 3;
+  // Optional: 1-64 chars after trimming; empty means no idempotency.
+  // Replaying the same key on the same step returns the current state;
+  // reusing it for another step in the tenant is rejected.
+  string idempotency_key = 4;
+}
+
+message DecideApprovalResponse {
+  // The requisition after the decision, with approval_steps at their
+  // latest state.
+  Requisition requisition = 1;
+}
+
+// ApprovalRule is one tenant rule: requisitions in `currency` totalling at
+// least `threshold_cents` must collect a decision from a holder of
+// `role_required` at position `step_no`.
+message ApprovalRule {
+  string id = 1;               // server-generated; ignored on replace
+  string currency = 2;         // IDR | USD
+  int32 step_no = 3;           // > 0; unique per currency within the tenant
+  string role_required = 4;    // one of the six fixed roles
+  int64 threshold_cents = 5;   // >= 0; lower bound, inclusive
+}
+
+message GetApprovalRulesRequest {}
+
+message ReplaceApprovalRulesRequest {
+  // The complete new rule set (replaces everything; may be empty).
+  repeated ApprovalRule rules = 1;
+}
+
+message ApprovalRulesResponse {
+  repeated ApprovalRule rules = 1;
+}
+
+// PurchaseOrder is the aggregate as conversion (#35) creates it: a draft
+// linked to its requisition and vendor, lines copied verbatim, total and
+// currency from the requisition, issued_at empty until #36 issues it.
+message PurchaseOrder {
+  string id = 1;
+  string tenant_id = 2;
+  string number = 3;          // server-generated per tenant, e.g. "PO-000042"
+  string requisition_id = 4;  // the converted requisition (one PO per requisition)
+  string vendor_id = 5;       // chosen at conversion; requisitions carry no vendor
+  string status = 6;          // draft | issued | acknowledged | partially_received | received | closed | cancelled
+  string currency = 7;        // IDR | USD — copied from the requisition
+  int64 total_cents = 8;      // server-computed sum of qty_ordered × unit_price_cents
+  repeated PurchaseOrderItem items = 9;
+  string issued_at = 10;      // RFC 3339, empty while draft (#36 sets it)
+  string created_at = 11;     // RFC 3339
+  string created_by = 12;     // user id
+  string updated_at = 13;     // RFC 3339
+  string updated_by = 14;     // user id
+}
+
+// PurchaseOrderItem is one line, copied verbatim from a requisition item.
+message PurchaseOrderItem {
+  string description = 1;
+  int32 qty_ordered = 2;      // > 0
+  int32 qty_received = 3;     // 0 on creation; goods receipts (#37) advance it
+  int64 unit_price_cents = 4; // >= 0, integer cents in the header currency
+  string id = 5;              // po_items row id; receipt lines reference it (#37)
+}
+
+message CreatePurchaseOrderRequest {
+  // The requisition to convert; must be approved (else 409
+  // po_requisition_not_approved). One PO per requisition — replay returns it.
+  string requisition_id = 1;
+  // Required UUID of the vendor to order from; must be active (else 412
+  // vendor_deactivated). Checked on the creation path only — replays ignore it.
+  string vendor_id = 2;
+}
+
+// CreatePurchaseOrderResponse carries the PO and whether this call created
+// it: created=false means the requisition had already been converted and the
+// existing PO is returned as-is (the REST edge answers 200 instead of 201).
+message CreatePurchaseOrderResponse {
+  PurchaseOrder purchase_order = 1;
+  bool created = 2;
+}
+
+// IssuePurchaseOrderRequest names the draft PO to issue (FR-06).
+message IssuePurchaseOrderRequest {
+  string id = 1;
+}
+
+// AcknowledgePurchaseOrderRequest names the issued PO to acknowledge.
+message AcknowledgePurchaseOrderRequest {
+  string id = 1;
+}
+
+// CancelPurchaseOrderRequest names the PO to cancel (draft, issued, or
+// acknowledged — and only while nothing has been received).
+message CancelPurchaseOrderRequest {
+  string id = 1;
+}
+
+// ClosePurchaseOrderRequest names the PO to close (partially_received or
+// received).
+message ClosePurchaseOrderRequest {
+  string id = 1;
+}
+
+// ListPurchaseOrdersRequest is the list filter set (#38): a free-text number
+// prefix, an optional status, and server-side pagination.
+message ListPurchaseOrdersRequest {
+  // Free-text match: purchase order number prefix, case-insensitive. Empty
+  // means no text filter. LIKE wildcards in the input are literal.
+  string query = 1;
+  // draft | issued | acknowledged | partially_received | received | closed |
+  // cancelled | "" (all).
+  string status = 2;
+  int32 page = 3;      // 1-based; default 1
+  int32 page_size = 4; // default 20, max 100
+}
+
+// ListPurchaseOrdersResponse is the list envelope. Rows are header-only:
+// items are always empty (the detail read owns the bodies).
+message ListPurchaseOrdersResponse {
+  repeated PurchaseOrder purchase_orders = 1;
+  int32 total = 2;      // matching rows across all pages
+  int32 page = 3;       // normalized values actually applied
+  int32 page_size = 4;
+}
+
+// GetPurchaseOrderRequest names the purchase order to read.
+message GetPurchaseOrderRequest {
+  string id = 1;
+}
+
+// GoodsReceipt is one goods-receipt note (#37): who received what, when,
+// against which PO. The number is server-generated per tenant.
+message GoodsReceipt {
+  string id = 1;
+  string tenant_id = 2;
+  string po_id = 3;            // the received-against purchase order
+  string number = 4;           // server-generated per tenant, e.g. "GRN-000042"
+  string received_by = 5;      // user id
+  string received_at = 6;      // RFC 3339
+  string notes = 7;            // free-form, <= 1000 chars, may be empty
+  repeated GoodsReceiptItem items = 8;
+  string created_at = 9;       // RFC 3339
+}
+
+// GoodsReceiptItem is one receipt line: the PO line it advances and the
+// quantity received now (> 0; partial receipts accumulate across GRNs).
+message GoodsReceiptItem {
+  string po_item_id = 1;   // must be a line of the named PO
+  int32 qty_received = 2;  // > 0
+}
+
+// PostGoodsReceiptRequest carries one receipt: the PO (must be acknowledged
+// or partially_received), the lines, and optional notes.
+message PostGoodsReceiptRequest {
+  string po_id = 1;
+  repeated GoodsReceiptItem items = 2;
+  string notes = 3;
+}
+
+// PostGoodsReceiptResponse carries the stored GRN and the PO after the
+// receipt (qty_received advanced; status partially_received or received).
+message PostGoodsReceiptResponse {
+  GoodsReceipt goods_receipt = 1;
+  PurchaseOrder purchase_order = 2;
+}
+
+// Invoice is one vendor invoice (#39): the vendor's bill against one PO's
+// lines. vendor_id and currency are derived server-side from the locked PO;
+// total_cents is recomputed server-side from the lines.
+message Invoice {
+  string id = 1;
+  string tenant_id = 2;
+  string po_id = 3;             // the billed purchase order
+  string vendor_id = 4;         // derived from the PO, never client input
+  string number = 5;            // the vendor's own number, unique per (tenant, vendor)
+  string currency = 6;          // IDR | USD — the PO's currency
+  int64 total_cents = 7;        // server-computed sum of qty × unit_price_cents
+  string status = 8;            // pending | matched | discrepancy — pending until #40 matches
+  string match_result_json = 9; // the #40 match's explanation, empty while pending
+  repeated InvoiceItem items = 10;
+  string created_by = 11;       // user id
+  string created_at = 12;       // RFC 3339
+}
+
+// InvoiceItem is one invoice line: the PO line it bills, the invoiced
+// quantity (> 0), and the invoiced unit price (>= 0, integer cents in the
+// header currency).
+message InvoiceItem {
+  string po_item_id = 1;      // must be a line of the named PO, at most once per invoice
+  int32 qty = 2;              // > 0
+  int64 unit_price_cents = 3; // >= 0
+}
+
+// CreateInvoiceRequest carries one invoice: the PO to bill (must be
+// acknowledged, partially_received, or received), the vendor's invoice
+// number, and the lines.
+message CreateInvoiceRequest {
+  string po_id = 1;
+  string number = 2;
+  repeated InvoiceItem items = 3;
+}
+
+// GetInvoiceRequest names the invoice to read.
+message GetInvoiceRequest {
+  string id = 1;
+}
+
+// ListInvoicesRequest is the invoice-list filter set (#41): a free-text
+// number prefix, an optional status, and server-side pagination.
+message ListInvoicesRequest {
+  // Free-text match: invoice number prefix, case-insensitive (vendor numbers
+  // are free-form, the issuer's convention). Empty means no text filter. LIKE
+  // wildcards in the input are literal.
+  string query = 1;
+  // pending | matched | discrepancy | "" (all).
+  string status = 2;
+  int32 page = 3;      // 1-based; default 1
+  int32 page_size = 4; // default 20, max 100
+}
+
+// ListInvoicesResponse is the list envelope. Rows are header-only: items are
+// always empty and match_result_json is always empty (the detail read owns
+// the bodies and the match's explanation).
+message ListInvoicesResponse {
+  repeated Invoice invoices = 1;
+  int32 total = 2;      // matching rows across all pages
+  int32 page = 3;       // normalized values actually applied
+  int32 page_size = 4;
+}
+
+// MatchInvoiceRequest names the invoice to match (the caller's tenant comes
+// from the auth metadata; invoice:write — finance/admin).
+message MatchInvoiceRequest {
+  string id = 1;
+}
+
+// MatchSettings are the tenant's three-way match tolerances (FR-08), whole
+// percentages. qty_pct bounds how far the PO's cumulative invoiced quantity
+// may exceed the received quantity (upper side only); price_pct bounds the
+// symmetric deviation of an invoice unit price from the PO price.
+message MatchSettings {
+  int32 qty_pct = 1;   // 0..100
+  int32 price_pct = 2; // 0..100
+}
+
+message GetMatchSettingsRequest {}
+
+message ReplaceMatchSettingsRequest {
+  int32 qty_pct = 1;   // 0..100; else 400 match_qty_pct_invalid
+  int32 price_pct = 2; // 0..100; else 400 match_price_pct_invalid
+}
+
+// GetDashboardRequest is empty: the caller's tenant comes from the auth
+// metadata and every window is anchored on the server clock.
+message GetDashboardRequest {}
+
+// DashboardSummary is the FR-09 operational-health snapshot, all three
+// widgets from one round trip. The numbers reconcile with the list reads by
+// construction (same tables, same tenant scoping).
+message DashboardSummary {
+  PendingApprovals pending_approvals = 1;
+  // Top vendors by 90-day spend, vendor+currency granularity. Vendors with
+  // no issued PO in the 90-day window are absent (they have nothing to
+  // show); the 30-day arm of a listed vendor may be zero.
+  repeated VendorSpend spend_by_vendor = 2;
+  // All seven FR-06 statuses in canonical lifecycle order, zeros included.
+  repeated PurchaseOrderStatusCount po_status_distribution = 3;
+  // The spend KPI totals per currency over ALL vendors (spend_by_vendor is
+  // bounded to the top rows; these are the unbounded sums the KPI cards
+  // render). One row per currency with issued spend in the 90-day window,
+  // ordered by the 90-day sum descending.
+  repeated CurrencySpend spend_totals = 4;
+}
+
+// PendingApprovals is the approvals widget: the total count of current
+// pending steps across the tenant's submitted requisitions plus the first
+// page of them, oldest-submitted first.
+message PendingApprovals {
+  int32 total = 1; // current pending steps across all submitted requisitions
+  repeated PendingApproval items = 2; // first page, oldest-submitted first
+}
+
+// PendingApproval is one current pending step with the requisition header it
+// blocks: the requisition id links to the detail view, the step fields say
+// who may decide. Only the smallest pending step_no of a submitted
+// requisition appears — the same step the decide API accepts.
+message PendingApproval {
+  string requisition_id = 1;
+  string number = 2;         // requisition number, e.g. "PR-000042"
+  string currency = 3;       // IDR | USD
+  int64 total_cents = 4;     // the requisition's server-computed total
+  string submitted_at = 5;   // RFC 3339
+  string step_id = 6;        // the decide API's {stepId}
+  int32 step_no = 7;
+  string role_required = 8;  // the role a decider must hold
+}
+
+// VendorSpend is one vendor+currency row of the spend widget: the sum of
+// purchase_orders.total_cents over POs with issued_at inside each trailing
+// window and status neither draft nor cancelled (the #49 register basis
+// minus issued-then-cancelled POs).
+message VendorSpend {
+  string vendor_id = 1;
+  string vendor_name = 2;
+  string currency = 3;        // IDR | USD
+  int64 thirty_day_cents = 4; // issued_at >= now - 30 days
+  int64 ninety_day_cents = 5; // issued_at >= now - 90 days
+}
+
+// CurrencySpend is one currency's unbounded window sum — the KPI cards'
+// spend numbers (money never mixes currencies: a tenant may hold IDR and
+// USD side by side, so the totals stay per currency and the cards render
+// each row, the largest first).
+message CurrencySpend {
+  string currency = 1;       // IDR | USD
+  int64 thirty_day_cents = 2;
+  int64 ninety_day_cents = 3;
+}
+
+// PurchaseOrderStatusCount is one FR-06 status with its live row count.
+message PurchaseOrderStatusCount {
+  string status = 1; // draft | issued | acknowledged | partially_received | received | closed | cancelled
+  int32 count = 2;
+}

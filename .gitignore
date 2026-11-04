@@ -27,7 +27,7 @@ bin/
 tmp/
 *.test
 *.out
-vendor/
+/vendor/
 
 # Local data
 data/
@@ -35,3 +35,5 @@ data/
 
 # OS temp
 .openclaw/
+.tools/
+coverage.out

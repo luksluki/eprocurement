@@ -1,0 +1,291 @@
+name: CI
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go · lint · build · test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: eprocurement
+          POSTGRES_PASSWORD: eprocurement
+          POSTGRES_DB: eprocurement
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U eprocurement"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      mongo:
+        image: mongo:7.0
+        env:
+          MONGO_INITDB_ROOT_USERNAME: eprocurement
+          MONGO_INITDB_ROOT_PASSWORD: eprocurement
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ ping: 1 }).ok' | grep 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+      minio:
+        image: bitnamilegacy/minio:2025.7.23-debian-12-r5
+        env:
+          MINIO_ROOT_USER: eprocurement
+          MINIO_ROOT_PASSWORD: eprocurement
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      TEST_DATABASE_URL: postgres://eprocurement:eprocurement@localhost:5432/eprocurement?sslmode=disable
+      TEST_MONGO_URI: mongodb://eprocurement:eprocurement@localhost:27017/?authSource=admin
+      TEST_S3_ENDPOINT: localhost:9000
+      TEST_S3_ACCESS_KEY: eprocurement
+      TEST_S3_SECRET_KEY: eprocurement
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Lint
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      # #57: the unit-suite baseline as a measured gate. TEST_* is cleared at
+      # step level (integration helpers treat empty like unset) so this is the
+      # unit-only suite; scripts/dev/test-unit.sh times the run and fails past
+      # UNIT_SUITE_MAX_SECONDS (default 120s, the AGENTS.md 2-minute contract).
+      # The integration run below keeps its service-container coverage.
+      - name: Unit suite (duration gate)
+        env:
+          TEST_DATABASE_URL: ""
+          TEST_MONGO_URI: ""
+          TEST_S3_ENDPOINT: ""
+          TEST_S3_ACCESS_KEY: ""
+          TEST_S3_SECRET_KEY: ""
+        run: bash scripts/dev/test-unit.sh
+
+      - name: Migrations
+        run: |
+          go run ./services/identity/cmd/migrate
+          go run ./services/identity/cmd/migrate
+          go run ./services/procurement/cmd/migrate
+          go run ./services/procurement/cmd/migrate
+
+      - name: Test
+        run: go test ./...
+
+      - name: Coverage (identity domain, threshold 80%)
+        run: |
+          go test ./services/identity/... -count=1 \
+            -coverprofile=coverage.out \
+            -coverpkg=./services/identity/auth,./services/identity/server,./services/identity/config
+          go tool cover -func=coverage.out | tail -1
+          go tool cover -func=coverage.out | awk '/^total:/ {gsub("%","",$3); if ($3+0 < 80) {print "identity coverage "$3"% is below the 80% threshold"; exit 1}}'
+
+      # #57, maintainer decision 2: procurement is gated at the identity
+      # parity set's threshold (dev-note 024: "apply the same coverage guard
+      # to future domains") — 80% over domain + server + config with the
+      # coverpkg list pinned in writing. It runs with the service containers
+      # (job-level TEST_DATABASE_URL): the DB-backed store tests carry most of
+      # the covered lines, the unit-only read is ~23%.
+      - name: Coverage (procurement parity set, threshold 80%)
+        run: |
+          go test ./services/procurement/... -count=1 -skip 'Scale100k' \
+            -coverprofile=coverage-procurement.out \
+            -coverpkg=./services/procurement/approval,./services/procurement/config,./services/procurement/dashboard,./services/procurement/goodsreceipt,./services/procurement/invoice,./services/procurement/match,./services/procurement/outbox,./services/procurement/purchaseorder,./services/procurement/requisition,./services/procurement/server,./services/procurement/vendor
+          go tool cover -func=coverage-procurement.out | tail -1
+          go tool cover -func=coverage-procurement.out | awk '/^total:/ {gsub("%","",$3); if ($3+0 < 80) {print "procurement coverage "$3"% is below the 80% threshold"; exit 1}}'
+
+      # #57, maintainer decision 2: documents is measured, not gated — its
+      # unit-only baseline (16.7% over the pinned 7-package set) is far below
+      # any sensible gate, so CI reports the number ungated and a follow-up
+      # sets the threshold at the real figure plus buffer. Unit-only (TEST_*
+      # cleared at step level) to match the recorded baseline.
+      - name: Coverage (documents, report-only)
+        env:
+          TEST_DATABASE_URL: ""
+          TEST_MONGO_URI: ""
+          TEST_S3_ENDPOINT: ""
+          TEST_S3_ACCESS_KEY: ""
+          TEST_S3_SECRET_KEY: ""
+        run: |
+          go test ./services/documents/... -count=1 \
+            -coverprofile=coverage-documents.out \
+            -coverpkg=./services/documents/attachment,./services/documents/config,./services/documents/export,./services/documents/history,./services/documents/notifications,./services/documents/objectstore,./services/documents/server
+          go tool cover -func=coverage-documents.out | tail -1
+
+  web:
+    name: Web · install · build · lint · test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Test
+        run: pnpm test
+
+  # ADR-0002 stage 3 — "integration: dockerized Postgres/Mongo/Redis/RabbitMQ
+  # services; run integration tests". The #58 procure-to-pay suite runs the
+  # same `make test-p2p` sequence as locally; Redis is the one stage-3
+  # service it does not need (the notifications projection lives in Mongo;
+  # the Redis-backed export scheduler is out of scope), so the job starts
+  # postgres/mongo/rabbitmq only (no service images are built; the suite
+  # boots the procurement gRPC API in-process and the worker halves itself,
+  # each against its own scratch database and a suffixed broker topology).
+  # The go/web jobs keep running without a broker; e2e is unchanged.
+  integration:
+    name: Integration · procure-to-pay
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [go]
+    env:
+      # Compose's no-.env defaults on the runner (credentials are the public
+      # local-dev defaults from .env.example, not secrets).
+      TEST_DATABASE_URL: postgres://eprocurement:eprocurement@localhost:5432/eprocurement?sslmode=disable
+      TEST_MONGO_URI: mongodb://eprocurement:eprocurement@localhost:27017/?authSource=admin
+      TEST_RABBITMQ_URL: amqp://eprocurement:eprocurement@localhost:5672/
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Start compose infrastructure
+        run: docker compose up -d --wait postgres mongo rabbitmq
+
+      - name: Run procure-to-pay integration suite
+        run: make test-p2p
+
+      - name: Infrastructure health (diagnostics)
+        if: failure() || cancelled()
+        run: docker compose ps postgres mongo rabbitmq
+
+  # ADR-0002 stage 5: Playwright against the compose stack. Self-contained —
+  # it builds the five service images (no layer cache on the runner, hence
+  # the much longer timeout than the go/web jobs), runs the web app with
+  # `next start`, and installs its own chromium. Screenshots/traces are
+  # uploaded on failure AND cancellation (concurrency cancel-in-progress is
+  # active above, and a cancelled run must still carry its artifacts).
+  e2e:
+    name: E2E · Playwright happy path
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: [go, web]
+    env:
+      # The spec logs in repeatedly (UI logins + tenant switches + the API
+      # convert call; retries replay the story — budget table in
+      # docs/dev-notes/59-playwright-e2e-happy-path.md). Identity's 5/min
+      # per-email default is the tight one: compose interpolates this from
+      # the project environment (compose.yaml), so no compose change. The
+      # gateway's 30/min per-IP default (its GATEWAY_LOGIN_RATE_PER_MIN is
+      # not wired into compose) stays comfortably above the ~12-login worst
+      # case.
+      IDENTITY_LOGIN_RATE_PER_MIN: "60"
+      # The web app env for `next start` (the apps/web/.env.example set —
+      # the runner has no .env.local). Without DEMO_ADMIN_PASSWORD the
+      # tenant switcher degrades to a /login redirect and the switch step
+      # cannot pass. Values are the e2e fixtures from e2e/support/fixtures.ts
+      # (throwaway CI stack credentials, not secrets).
+      GATEWAY_URL: http://localhost:8080
+      DEMO_TENANTS: acme=e2e-admin@acme.example,glow=e2e-admin@glow.example
+      DEMO_ADMIN_PASSWORD: e2e-happy-path-59
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build web
+        run: pnpm --filter @eprocurement/web build
+
+      - name: Install Playwright chromium
+        run: pnpm --filter @eprocurement/e2e exec playwright install --with-deps chromium
+
+      - name: Start compose stack
+        run: docker compose up -d --wait
+
+      - name: Run e2e
+        run: pnpm --filter @eprocurement/e2e e2e
+
+      - name: Stack health (diagnostics)
+        if: failure() || cancelled()
+        run: docker compose ps
+
+      - name: Upload Playwright report
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            e2e/playwright-report
+            e2e/test-results
+          retention-days: 7
+          if-no-files-found: warn

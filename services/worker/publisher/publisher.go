@@ -1,0 +1,427 @@
+// Package publisher drains the procurement transactional outbox to RabbitMQ
+// (issue #45; PRD §14.5, §16): poll procurement.outbox every interval in
+// batches, assemble the §14.5 envelope from the row columns, publish to the
+// durable topic exchange procurement.events with routing key = event_type on
+// a confirm-mode channel, and stamp published_at only after the broker
+// confirms — at-least-once, with consumers deduping on event_id (§14.8).
+//
+// The persistence side (outbox.Pending / outbox.MarkPublished) lives with
+// the table's owning service under services/procurement/outbox; importing it
+// here is a conscious cross-service dependency inside the single Go module
+// (documented in docs/schema/procurement.md).
+package publisher
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net"
+	"sync"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	amqp "github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/luksluki/eprocurement/internal/platform/telemetry"
+	"github.com/luksluki/eprocurement/services/procurement/outbox"
+	"github.com/luksluki/eprocurement/services/worker/topology"
+)
+
+// Broker topology (PRD §14.5). The events exchange is the publisher's
+// contract; the DLX pair is a PROVISIONAL bootstrap declaration — see
+// connect.
+const (
+	EventsExchange = "procurement.events"
+	DLXExchange    = "procurement.dlx"
+	DLQQueue       = "procurement.dlq"
+)
+
+// dialTimeout bounds one AMQP dial attempt.
+const dialTimeout = 10 * time.Second
+
+// Envelope is the PRD §14.5 event envelope, assembled 1:1 from an outbox
+// row — the columns exist precisely so this needs no payload parsing.
+// EntityType/EntityID extend §14.5: the outbox columns already exist and
+// consumers (history validation, #47) require them to route the aggregate.
+// ActorIP extends it the same way (#44): the acting client's IP, recorded
+// on the audit trail; "" on rows written before migration 0013.
+type Envelope struct {
+	EventID    string          `json:"event_id"`
+	TenantID   string          `json:"tenant_id"`
+	Type       string          `json:"type"`
+	Version    int32           `json:"version"`
+	EntityType string          `json:"entity_type"`
+	EntityID   string          `json:"entity_id"`
+	OccurredAt time.Time       `json:"occurred_at"`
+	ActorID    string          `json:"actor_id"`
+	ActorIP    string          `json:"actor_ip"`
+	TraceID    string          `json:"trace_id"`
+	Payload    json.RawMessage `json:"payload"`
+}
+
+// EnvelopeFromRow maps one unpublished outbox row onto the wire envelope.
+// Routing key is the event type (PRD §14.5 pr.* bindings).
+func EnvelopeFromRow(r outbox.PendingEvent) Envelope {
+	return Envelope{
+		EventID: r.ID, TenantID: r.TenantID, Type: r.EventType, Version: r.Version,
+		EntityType: r.EntityType, EntityID: r.EntityID,
+		OccurredAt: r.OccurredAt, ActorID: r.ActorID, ActorIP: r.ActorIP,
+		TraceID: r.TraceID, Payload: r.Payload,
+	}
+}
+
+// Publisher publishes one envelope and returns only after the broker
+// confirmed it (or with an error).
+type Publisher interface {
+	Publish(ctx context.Context, env Envelope) error
+}
+
+// OutboxStore is the persistence side of the loop: batched pending reads and
+// the published_at marker.
+type OutboxStore interface {
+	Pending(ctx context.Context, limit int) ([]outbox.PendingEvent, error)
+	MarkPublished(ctx context.Context, ids []string) error
+}
+
+// OutboxDB adapts the procurement outbox package to OutboxStore.
+type OutboxDB struct{ DB *pgxpool.Pool }
+
+func (o OutboxDB) Pending(ctx context.Context, limit int) ([]outbox.PendingEvent, error) {
+	return outbox.Pending(ctx, o.DB, limit)
+}
+
+func (o OutboxDB) MarkPublished(ctx context.Context, ids []string) error {
+	return outbox.MarkPublished(ctx, o.DB, ids)
+}
+
+// AMQPPublisher publishes envelopes to the events exchange on a confirm-mode
+// channel with persistent delivery. A failed or timed-out publish drops the
+// connection; the next call reconnects (one attempt per call), so a broker
+// restart costs at most one tick of delay.
+type AMQPPublisher struct {
+	url            string
+	confirmTimeout time.Duration
+	// exchange is the publish target. Connect pins it to EventsExchange;
+	// ConnectTopology pins it to the topology's events exchange (an isolated
+	// suffixed variant in tests).
+	exchange string
+	// topo, when set by ConnectTopology, is (re-)declared on every connect —
+	// the reconnect path then restores the topology variant's own broker
+	// state, not the production bootstrap. nil (Connect) keeps connect's
+	// bootstrap declarations below.
+	topo *topology.Topology
+
+	mu   sync.Mutex
+	conn *amqp.Connection
+	ch   *amqp.Channel
+}
+
+// Connect dials the broker and declares the topology once. It is the boot
+// path (main retries it with backoff) and the reconnect path of Publish.
+func Connect(ctx context.Context, url string, confirmTimeout time.Duration) (*AMQPPublisher, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("publisher: connect cancelled: %w", err)
+	}
+	p := &AMQPPublisher{url: url, confirmTimeout: confirmTimeout, exchange: EventsExchange}
+	if err := p.connect(); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// ConnectTopology is the topology-aware constructor: the broker topology is
+// declared by topology.Topology.Declare instead of connect's bootstrap
+// declarations, and Publish targets the topology's events exchange. The zero
+// Topology resolves to topology.Default, so ConnectTopology(ctx, url, t,
+// topology.Topology{}) declares and publishes exactly what production runs.
+//
+// The shared-broker hazard is PRECONDITION_FAILED: Declare's exchange/DLX/DLQ
+// arguments must stay argument-for-argument identical to connect's bootstrap
+// declarations (topology.go documents the same contract), or the second
+// declarer on one broker is rejected. Production main keeps calling Connect;
+// this variant exists for test harnesses that need an isolated suffixed copy
+// of the same topology (the procure-to-pay integration suite, #58).
+func ConnectTopology(ctx context.Context, url string, confirmTimeout time.Duration, topo topology.Topology) (*AMQPPublisher, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("publisher: connect cancelled: %w", err)
+	}
+	resolved := resolveTopology(topo)
+	p := &AMQPPublisher{
+		url: url, confirmTimeout: confirmTimeout,
+		exchange: resolved.EventsExchange, topo: &resolved,
+	}
+	if err := p.connect(); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// resolveTopology returns topo, or topology.Default for the zero value — the
+// consumer.New convention, so ConnectTopology's default is production.
+func resolveTopology(topo topology.Topology) topology.Topology {
+	if topo.EventsExchange == "" && topo.DLXExchange == "" && topo.DLQQueue == "" && len(topo.Queues) == 0 {
+		return topology.Default
+	}
+	return topo
+}
+
+// connect dials and declares the channel topology. Not goroutine-safe on its
+// own — callers hold the mutex or have exclusive access.
+func (p *AMQPPublisher) connect() error {
+	conn, err := amqp.DialConfig(p.url, amqp.Config{
+		Dial: (&net.Dialer{Timeout: dialTimeout}).Dial,
+	})
+	if err != nil {
+		return fmt.Errorf("publisher: dial rabbitmq: %w", err)
+	}
+	ch, err := conn.Channel()
+	if err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("publisher: open channel: %w", err)
+	}
+	if p.topo != nil {
+		// Topology variant (ConnectTopology): the full declaration set of the
+		// configured topology, on boot and on every reconnect.
+		if err := p.topo.Declare(ch); err != nil {
+			_ = conn.Close()
+			return err
+		}
+		if err := ch.Confirm(false); err != nil {
+			_ = conn.Close()
+			return fmt.Errorf("publisher: confirm mode: %w", err)
+		}
+		p.conn, p.ch = conn, ch
+		return nil
+	}
+	if err := ch.ExchangeDeclare(EventsExchange, "topic",
+		true, false, false, false, nil); err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("publisher: declare %s: %w", EventsExchange, err)
+	}
+	// PROVISIONAL: the full §14.5 dead-lettering model is consumer-side —
+	// documents.history / notifications / exports each declare
+	// x-dead-letter-exchange with a TTL-backoff retry queue (5s → 30s → 5m),
+	// arriving with the consumer issues. This one idempotent bootstrap
+	// declaration (durable DLX + a # bound DLQ) exists so a future
+	// dead-letter has a destination and is admin-visible from day one; it is
+	// expected to be reshaped, not final.
+	if err := ch.ExchangeDeclare(DLXExchange, "topic",
+		true, false, false, false, nil); err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("publisher: declare %s: %w", DLXExchange, err)
+	}
+	if _, err := ch.QueueDeclare(DLQQueue,
+		true, false, false, false, nil); err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("publisher: declare %s: %w", DLQQueue, err)
+	}
+	if err := ch.QueueBind(DLQQueue, "#", DLXExchange, false, nil); err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("publisher: bind %s: %w", DLQQueue, err)
+	}
+	if err := ch.Confirm(false); err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("publisher: confirm mode: %w", err)
+	}
+	p.conn, p.ch = conn, ch
+	return nil
+}
+
+// drop tears the connection down so the next Publish reconnects clean.
+func (p *AMQPPublisher) drop() {
+	if p.conn != nil {
+		_ = p.conn.Close() // closes the channel with it
+	}
+	p.conn, p.ch = nil, nil
+}
+
+// Close releases the connection.
+func (p *AMQPPublisher) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.conn == nil {
+		return nil
+	}
+	err := p.conn.Close()
+	p.drop()
+	return err
+}
+
+// publishContext synthesizes the producer's trace parent from the outbox
+// row and starts the publish span (#54). The loop runs off the worker's
+// root context — no inbound span exists — and the outbox table stores only
+// trace_id (no span id, docs/schema/procurement.md), so the parent is
+// manufactured from the row's trace id (ContextWithTraceIDString keeps the
+// SAME trace id, never a fresh one). An already-valid span in ctx (a
+// future in-request publisher) is never overridden.
+func publishContext(ctx context.Context, env Envelope) (context.Context, trace.Span) {
+	ctx = telemetry.ContextWithTraceIDString(ctx, env.TraceID)
+	return telemetry.StartPublishSpan(ctx, env.Type)
+}
+
+// Publish marshals the envelope, publishes it to the events exchange with
+// routing key = event type, persistent delivery, and the W3C traceparent
+// injected into the message headers (the REST → broker → worker leg of
+// PRD §18), and waits for the broker confirm before returning. A confirm
+// that never arrives inside confirmTimeout, an explicit nack, or a
+// transport error returns an error — the caller keeps the row's
+// published_at NULL and retries next tick (at-least-once; consumers
+// dedupe on event_id, PRD §14.8).
+func (p *AMQPPublisher) Publish(ctx context.Context, env Envelope) error {
+	headers := amqp.Table{}
+	ctx, span := publishContext(ctx, env)
+	telemetry.InjectAMQP(ctx, headers)
+	err := p.publishConfirmed(ctx, env, headers)
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+	}
+	span.End()
+	return err
+}
+
+// publishConfirmed is the broker path of Publish: reconnect if needed,
+// publish with the prepared headers, and wait for the confirm.
+func (p *AMQPPublisher) publishConfirmed(ctx context.Context, env Envelope, headers amqp.Table) error {
+	body, err := json.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("publisher: marshal envelope %s: %w", env.EventID, err)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.conn == nil || p.conn.IsClosed() {
+		if err := p.connect(); err != nil {
+			return err
+		}
+	}
+	dc, err := p.ch.PublishWithDeferredConfirmWithContext(ctx, p.exchange, env.Type,
+		false, false, amqp.Publishing{
+			ContentType:  "application/json",
+			DeliveryMode: amqp.Persistent,
+			MessageId:    env.EventID,
+			Timestamp:    env.OccurredAt,
+			Headers:      headers,
+			Body:         body,
+		})
+	if err != nil {
+		p.drop()
+		return fmt.Errorf("publisher: publish %s: %w", env.EventID, err)
+	}
+	cctx, cancel := context.WithTimeout(ctx, p.confirmTimeout)
+	defer cancel()
+	acked, err := dc.WaitContext(cctx)
+	if err != nil {
+		// Timeout or shutdown while a confirm was in flight: the channel's
+		// confirm state is unknown, so reset the connection.
+		p.drop()
+		return fmt.Errorf("publisher: confirm wait %s: %w", env.EventID, err)
+	}
+	if !acked {
+		// Explicit nack: the broker refused the message. Keep the channel
+		// (it is still healthy) and let the next tick retry.
+		return fmt.Errorf("publisher: broker nacked %s", env.EventID)
+	}
+	return nil
+}
+
+// Loop is the outbox publisher loop (PRD §16): poll → publish → mark,
+// forever. Every failure is non-fatal by design — a fresh compose volume
+// starts the worker before the procurement service has applied migration
+// 0006 (the worker deliberately runs no migrations; procurement is the only
+// applier), so the first polls can hit a missing schema, and a broker or
+// database restart mid-run looks the same. The loop logs and waits for the
+// next tick instead of dying — a dead loop container would fail the compose
+// gate and the resilience demo (§14.8 "worker down" row).
+type Loop struct {
+	store     OutboxStore
+	pub       Publisher
+	log       *slog.Logger
+	interval  time.Duration
+	batchSize int
+	// setLag, when installed via SetLagSink (#55), receives the outbox lag
+	// after every successful poll: the age of the oldest pending row (rows
+	// come back oldest-first) or 0 when drained. A failed poll reports
+	// nothing — the gauge keeps its last value instead of faking 0.
+	setLag func(time.Duration)
+	// now is the lag clock; tests pin it.
+	now func() time.Time
+}
+
+// NewLoop builds the loop. interval and batchSize come from config (pinned
+// 2 s / 50; env overrides exist for tests).
+func NewLoop(store OutboxStore, pub Publisher, log *slog.Logger, interval time.Duration, batchSize int) *Loop {
+	return &Loop{store: store, pub: pub, log: log, interval: interval, batchSize: batchSize, now: time.Now}
+}
+
+// SetLagSink installs the outbox-lag gauge callback (internal/platform/metrics).
+func (l *Loop) SetLagSink(fn func(time.Duration)) { l.setLag = fn }
+
+// Run polls once immediately, then every interval, until ctx is cancelled
+// (SIGINT/SIGTERM) — then returns nil.
+func (l *Loop) Run(ctx context.Context) error {
+	l.pollOnce(ctx)
+	ticker := time.NewTicker(l.interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			l.pollOnce(ctx)
+		}
+	}
+}
+
+// pollOnce drains one batch: poll, publish each row, mark the confirmed
+// prefix. Failures log a warn and end the tick — the loop itself never
+// exits on them.
+func (l *Loop) pollOnce(ctx context.Context) {
+	rows, err := l.store.Pending(ctx, l.batchSize)
+	if err != nil {
+		if ctx.Err() != nil {
+			return // shutting down; not a publish-path failure
+		}
+		l.log.Warn("outbox poll failed", "error", err)
+		return // the lag gauge deliberately keeps its last value (no fake 0)
+	}
+	if l.setLag != nil {
+		lag := time.Duration(0) // drained: the true lag of an empty outbox
+		if len(rows) > 0 {
+			lag = l.now().Sub(rows[0].CreatedAt) // rows arrive oldest-first
+		}
+		l.setLag(lag)
+	}
+	published := make([]string, 0, len(rows))
+	for _, r := range rows {
+		env := EnvelopeFromRow(r)
+		if err := l.pub.Publish(ctx, env); err != nil {
+			if ctx.Err() != nil {
+				return // shutting down mid-batch; rows retry next run
+			}
+			// Broker down or confirm timeout. The row keeps published_at
+			// NULL and reappears next tick; stop the batch here to keep
+			// ordering and let the tail retry after the failure.
+			l.log.Warn("outbox publish failed",
+				"event_id", r.ID, "tenant_id", r.TenantID,
+				"event_type", r.EventType, "trace_id", r.TraceID, "error", err)
+			break
+		}
+		published = append(published, r.ID)
+		l.log.Info("outbox event published",
+			"event_id", r.ID, "tenant_id", r.TenantID,
+			"event_type", r.EventType, "trace_id", r.TraceID)
+	}
+	if len(published) == 0 {
+		return
+	}
+	if err := l.store.MarkPublished(ctx, published); err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		// The confirmed events are on the broker; the unmarked rows are
+		// re-published next tick and deduped by consumers.
+		l.log.Warn("outbox mark published failed", "count", len(published), "error", err)
+	}
+}
