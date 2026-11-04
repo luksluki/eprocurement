@@ -31,6 +31,11 @@ profile only; Prometheus/Grafana/Jaeger live behind the opt-in
 by default. Run it when you plan to show steps 6–7; skip it for a short
 rehearsal.
 
+Presenting to remote viewers? Expose this local stack through a
+Cloudflare Tunnel for the demo window — see the
+[live-demo tunnel runbook](ops/live-demo-tunnel.md) (only the web UI on
+`:3000` goes through the tunnel).
+
 What `make demo` installs (its own summary output — keep it, it is part of
 the expected result):
 
