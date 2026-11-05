@@ -4,7 +4,14 @@
 // acknowledge only from issued, receipts only on acknowledged/partially_
 // received (the #36/#37 domain edges).
 import { describe, expect, it } from "vitest";
-import { canAcknowledgePO, canIssuePO, canPostGoodsReceipt, holdsGRNPost, holdsPOWrite } from "./po-eligibility";
+import {
+  canAcknowledgePO,
+  canCreatePOFromRequisition,
+  canIssuePO,
+  canPostGoodsReceipt,
+  holdsGRNPost,
+  holdsPOWrite,
+} from "./po-eligibility";
 
 describe("holdsPOWrite / holdsGRNPost", () => {
   it("buyer and admin hold them; every other role does not", () => {
@@ -67,5 +74,25 @@ describe("canPostGoodsReceipt (acknowledged/partially_received only)", () => {
   it("is hidden for a non-holder regardless of status", () => {
     expect(canPostGoodsReceipt(["requester"], "acknowledged")).toBe(false);
     expect(canPostGoodsReceipt(["finance"], "partially_received")).toBe(false);
+  });
+});
+
+describe("canCreatePOFromRequisition (approved requisitions only, issue #112)", () => {
+  it("is shown for a buyer/admin on an approved requisition", () => {
+    expect(canCreatePOFromRequisition(["buyer"], "approved")).toBe(true);
+    expect(canCreatePOFromRequisition(["admin"], "approved")).toBe(true);
+    expect(canCreatePOFromRequisition(["requester", "buyer"], "approved")).toBe(true);
+  });
+
+  it("is hidden for a buyer on any non-approved status", () => {
+    for (const status of ["draft", "submitted", "rejected", "cancelled", "closed"]) {
+      expect(canCreatePOFromRequisition(["buyer"], status)).toBe(false);
+    }
+  });
+
+  it("is hidden for every non-holder on an approved requisition", () => {
+    for (const roles of [["requester"], ["approver"], ["finance"], ["viewer"], []]) {
+      expect(canCreatePOFromRequisition(roles, "approved")).toBe(false);
+    }
   });
 });
