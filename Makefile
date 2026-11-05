@@ -1,4 +1,4 @@
-.PHONY: help install build lint test fmt compose-up compose-down compose-logs compose-ps seed seed-reset reset gen-proto cover cover-procurement test-unit test-integration test-p2p e2e demo demo-reset perf-budget
+.PHONY: help install build lint test fmt compose-up compose-down compose-logs compose-ps seed seed-reset reset gen-proto cover cover-procurement test-unit test-integration test-p2p e2e demo demo-reset perf-budget loadtest
 
 help: ## Show available targets
 	@echo "Available targets:"
@@ -24,6 +24,7 @@ help: ## Show available targets
 	@echo "  demo             Reset the demo tenant and install the seeded story (see docs/demo-script.md)"
 	@echo "  demo-reset       Wipe the demo tenant's data only (no fixtures installed)"
 	@echo "  perf-budget      Run the 100k scale fixtures and report p95 vs budget (stack must be up)"
+	@echo "  loadtest         Run the k6 mixed read/write load test, report per-endpoint results (stack + k6)"
 
 install: ## Install JS workspace dependencies
 	pnpm install
@@ -174,3 +175,15 @@ demo-reset: ## Wipe the demo tenant's data only (no fixtures installed)
 # bulk loads; a full run is roughly 8 minutes.
 perf-budget: ## Run the 100k scale fixtures and report p95 vs budget (stack must be up)
 	bash scripts/dev/perf-budget.sh
+
+# The #61 HTTP load test: the complement to perf-budget's store-level
+# budgets — scripts/dev/loadtest.sh drains the projection queues, resets the
+# dedicated load tenant (7777…), installs the fixture user/vendor/approval
+# rules, runs the k6 mixed read/write scenario (~80% list/dashboard/event
+# reads, ~20% create+submit requisition driving the outbox pipeline), then
+# reports per-endpoint latency, error rate, broker/outbox drain, and row
+# counts. Default 10 VUs x 2m (LOADTEST_VUS / LOADTEST_DURATION; the k6
+# script caps runs at 14m against the 15-minute access-token TTL). Needs k6
+# on PATH and the compose stack up; measured results: docs/perf.md §9.
+loadtest: ## Run the k6 mixed read/write load test against the compose stack (stack + k6)
+	bash scripts/dev/loadtest.sh

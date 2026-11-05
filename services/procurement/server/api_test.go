@@ -218,31 +218,31 @@ func TestVendorGRPCList(t *testing.T) {
 			t.Fatalf("create %s: %v", code, err)
 		}
 	}
-	seed(gTenantA, "L27-A", "PT Athaya Nusantara")
-	seed(gTenantA, "L27-B", "PT Bunda Sejahtera")
-	seed(gTenantA, "L27-C", "PT Cempaka Nusantara")
-	seed(gTenantB, "L27-A", "PT Athaya Nusantara") // other tenant, invisible
-	t.Cleanup(func() {
+	seed(gTenantA, "SVL27-A", "PT Athaya Nusantara")
+	seed(gTenantA, "SVL27-B", "PT Bunda Sejahtera")
+	seed(gTenantA, "SVL27-C", "PT Cempaka Nusantara")
+	seed(gTenantB, "SVL27-A", "PT Athaya Nusantara") // other tenant, invisible
+	defer func() {
 		_ = tenant.WithBypass(context.Background(), db, func(tx pgx.Tx) error {
 			_, err := tx.Exec(context.Background(),
-				`DELETE FROM procurement.vendors WHERE code LIKE 'L27-%'`)
+				`DELETE FROM procurement.vendors WHERE tenant_id IN ($1, $2) AND code LIKE $3`, gTenantA, gTenantB, "SVL27-%")
 			return err
 		})
-	})
+	}()
 
 	// Page defaults with a code-prefix query (the prefix also keeps the
 	// assertion independent of unrelated rows in the shared test tenants):
 	// page 1, page size 20; ordered by code; other tenant's row never
 	// appears.
 	resp, err := client.ListVendors(callerCtx(gTenantA, rbac.RoleViewer),
-		&procurementv1.ListVendorsRequest{Query: "l27-"})
+		&procurementv1.ListVendorsRequest{Query: "svl27-"})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
 	if resp.GetPage() != 1 || resp.GetPageSize() != 20 || resp.GetTotal() != 3 {
 		t.Fatalf("defaults: page=%d size=%d total=%d", resp.GetPage(), resp.GetPageSize(), resp.GetTotal())
 	}
-	if len(resp.GetVendors()) != 3 || resp.GetVendors()[0].GetCode() != "L27-A" {
+	if len(resp.GetVendors()) != 3 || resp.GetVendors()[0].GetCode() != "SVL27-A" {
 		t.Fatalf("vendors = %v", resp.GetVendors())
 	}
 
@@ -258,7 +258,7 @@ func TestVendorGRPCList(t *testing.T) {
 
 	// Cross-tenant listing: tenant B sees only its own row.
 	resp, err = client.ListVendors(callerCtx(gTenantB, rbac.RoleViewer),
-		&procurementv1.ListVendorsRequest{Query: "l27-", PageSize: 50})
+		&procurementv1.ListVendorsRequest{Query: "svl27-", PageSize: 50})
 	if err != nil {
 		t.Fatalf("tenantB list: %v", err)
 	}

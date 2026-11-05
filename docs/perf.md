@@ -344,4 +344,172 @@ separate perf-budget CI job yet (no CI change in #56; see follow-ups).
   log lines into a time series instead of pass/fail gates only.
 - **HTTP-level budgets** — once #9/#110 load `demo.*` data into
   `procurement.*` (or a dedicated HTTP fixture exists), repeat the protocol
-  end-to-end through the gateway.
+  end-to-end through the gateway. The #61 load test (§9) already exercises
+  the HTTP pipeline end-to-end on a small dedicated tenant, with results
+  documented (not latency-gated); HTTP-level *budgets* over large synced
+  data still wait on the demo-sync decision.
+
+## 9. HTTP load test (#61)
+
+`make loadtest` (`scripts/dev/loadtest.sh` + `scripts/loadtest/loadtest.js`,
+k6) is the HTTP-level complement to the store-level budgets of §2–§3: a
+short mixed read/write scenario against a **running compose stack** on a
+dedicated, freshly reset tenant. The only enforced gate is
+**`http_req_failed < 1%`** — latency numbers are documented, not gated; the
+§8 trend/gating follow-up stays open.
+
+### Scenario
+
+- **10 VUs × 2 min** steady state (`LOADTEST_VUS` / `LOADTEST_DURATION`),
+  closed loop, no think time. **One login per run**: k6's `setup()` logs in
+  once and shares the 15-minute access token (`AccessTTL`,
+  `services/identity/auth/service.go`) with every VU — identity allows 5
+  logins/min per email+address (`services/identity/config/config.go`) and
+  the gateway 30/min per IP (`.env.example`), so per-VU logins would
+  measure the limiters, not the API. The script has **no refresh-token
+  path by design** and refuses to start when `DURATION` exceeds 14 min
+  (fail-fast with an explicit message): a longer run would end in 401s as
+  the shared token expires.
+- **~80% reads**, evenly split: `GET /api/v1/vendors`,
+  `/api/v1/requisitions`, `/api/v1/purchase-orders`,
+  `/api/v1/dashboard/summary`, `/api/v1/events` (page 1, `limit=100`).
+  **~20% writes**, a two-call chain: `POST /api/v1/requisitions` (draft) →
+  `POST /api/v1/requisitions/:id/submit`. Submit appends the
+  `pr.submitted` outbox row inside its transaction
+  (`services/procurement/requisition/store.go`), so the write lane also
+  loads the async pipeline (publisher → RabbitMQ → worker → Mongo).
+- **Fixtures per run** (installed by the wrapper): one admin user
+  (`cmd/useradmin`), one active vendor (409-tolerant replay — without it
+  the vendor list and the dashboard's spend-by-vendor read an empty base),
+  and the single-step IDR approval chain (submit answers 412
+  `approval_rules_missing` without it).
+- **Reproducibility protocol**: before wiping the load tenant
+  (`77777777-7777-7777-7777-777777777777` — distinct from the onboarding
+  1111…/2222…, e2e 3333…/4444…, demo-story 5555…, and resilience 6666…
+  tenants), the wrapper waits until BOTH projection queues are empty AND
+  the tenant has no pending outbox row. After a load run the outbox still
+  holds thousands of `pr.submitted` rows (see bottlenecks), and wiping
+  while the worker or an in-flight publisher batch still holds them would
+  re-project events into the freshly wiped tenant — run N+1 would measure
+  on top of run N's backlog. The wipe itself is the `demo-story.sh`
+  per-tenant semantics: all `procurement.*` rows of the tenant (children
+  cascade), the three per-tenant counters, `decision_idempotency`, the
+  outbox, `identity.users` by email, and the five Mongo collections. A
+  second drain-check gates the clean start right before k6 runs.
+- **Re-running**: needs `k6` on PATH (the wrapper prints an install hint
+  when missing — scoop/choco/brew) and `make compose-up`. Back-to-back
+  re-runs within a minute can trip identity's 5/min-per-email login
+  limiter (each run logs in twice: fixture install + k6 setup) — space
+  runs or raise `IDENTITY_LOGIN_RATE_PER_MIN` in `.env` (the e2e/CI
+  convention raises it to 60). A full run takes ~10 minutes wall clock:
+  ~2.5 min reset+fixtures+k6, the rest is the post-run backlog drain
+  (below) — the pre-wipe drain of the *next* run is then instant.
+
+### Results (dev machine, 2026-11-04)
+
+k6 v2.3.0 (windows/amd64). Two consecutive `make loadtest` runs against the
+same healthy stack — the "results reproducible" acceptance criterion; the
+second run started immediately after the first one's drain completed.
+
+| Endpoint | reqs | rate/s | err% | med ms | p95 ms | p99 ms |
+|---|---|---|---|---|---|---|
+| GET /api/v1/vendors | 9 560 / 10 327 | 79.6 / 86.0 | 0.00 / 0.00 | 4.7 / 4.3 | 6.3 / 5.7 | 7.6 / 6.8 |
+| GET /api/v1/requisitions | 9 563 / 10 337 | 79.6 / 86.1 | 0.00 / 0.00 | 16.8 / 15.7 | 27.3 / 26.1 | 30.9 / 29.5 |
+| GET /api/v1/purchase-orders | 9 353 / 10 285 | 77.9 / 85.6 | 0.00 / 0.00 | 3.3 / 3.1 | 4.6 / 4.2 | 5.9 / 5.2 |
+| GET /api/v1/dashboard/summary | 9 439 / 10 331 | 78.6 / 86.0 | 0.00 / 0.00 | 54.3 / 50.6 | 105.4 / 100.5 | 120.2 / 115.9 |
+| GET /api/v1/events | 9 521 / 10 266 | 79.3 / 85.5 | 0.00 / 0.00 | 7.6 / 6.9 | 12.1 / 11.0 | 14.3 / 12.9 |
+| POST /api/v1/requisitions | 11 918 / 12 689 | 99.2 / 105.6 | 0.00 / 0.00 | 16.0 / 14.8 | 27.3 / 24.9 | 105.9 / 34.3 |
+| POST /api/v1/requisitions/:id/submit | 11 918 / 12 689 | 99.2 / 105.6 | 0.00 / 0.00 | 9.5 / 8.6 | 13.5 / 11.4 | 28.2 / 17.3 |
+| **OVERALL** | **71 274 / 76 926** | **593.5 / 640.4** | **0.00 / 0.00** | 9.5 / 8.7 | 68.4 / 64.1 | 102.9 / 97.3 |
+
+(59 354 / 64 235 iterations; write share 20.1% / 19.7%; checks 100% both
+runs; every cell is `run 1 / run 2`.)
+
+Hardware (single host, the whole stack in one Docker engine):
+
+| Layer | What |
+|---|---|
+| Host | Intel Core i7-14700 (28 logical CPUs), 32 GB RAM, Windows 11 Pro |
+| Docker | Docker Desktop 27.3.1, WSL2 backend; engine allocated 28 CPUs / 15.49 GiB |
+| Stack | compose: gateway, identity, procurement, documents, worker + PostgreSQL 16, MongoDB 7.0, RabbitMQ 3.13, Redis 7.4, MinIO, OTel collector |
+| Load generator | k6 v2.3.0 on the Windows host, against `localhost:8080` |
+
+Row counts in the load tenant at the end of run 1 / run 2 (the write lane's
+footprint — `purchase_orders` stays 0 because the write chain deliberately
+stops at submit; conversion is a separate manual step):
+
+| Table / collection | run 1 | run 2 |
+|---|---|---|
+| procurement.vendors | 1 | 1 |
+| procurement.requisitions | 11 918 | 12 689 |
+| procurement.requisition_items | 11 918 | 12 689 |
+| procurement.approval_steps | 11 918 | 12 689 |
+| procurement.purchase_orders | 0 | 0 |
+| procurement.outbox (all published, 0 pending) | 11 918 | 12 689 |
+| mongo events / notifications / audit_log | 11 918 / 11 918 / 0 | 12 689 / 12 689 / 0 |
+
+Every submitted requisition produced exactly one `pr.submitted` event and
+one notification (events = notifications = requisitions in both runs) —
+the idempotent-consumer guarantee held under load; `audit_log` stays 0
+because audit rows are written by the decide/GRN paths this scenario never
+reaches.
+
+### Bottlenecks, measured at THIS run's scale
+
+The scenario measures the **HTTP pipeline overhead** (gateway → gRPC →
+service → PostgreSQL/Mongo) on a dataset that *starts empty* and ends at
+~12k requisitions. It is NOT a large-data query-plan measurement — that is
+#56's store-level territory (§2–§3, ~100k-row fixtures). Concretely: the
+dashboard summary ran against a growing requisitions table but a
+   `purchase_orders` table that stayed at 0 rows, so its three spend queries
+   (`spendTotalsSQL`/`spendByVendorSQL`/`distributionSQL`, all
+   `FROM procurement.purchase_orders` —
+   `services/procurement/dashboard/store.go`) were near-free; the measured
+   dashboard cost is dominated by the
+pending-approvals queries over the growing submitted queue plus the
+five-queries-one-transaction round trip. That 5-query cost does **not**
+saturate at this scale — the number to cite for large-data dashboard cost
+remains #56's (p95 ≈ 199 ms at 100k rows, §3).
+
+1. **The outbox publisher is the async pipeline's metering stage.** The
+   write lane sustained 99.2 / 105.6 submits/s (11 918 / 12 689 chains in
+   120 s) while the publisher drains at its configured 50 rows per 2 s
+   tick (`WORKER_BATCH_SIZE` × `WORKER_POLL_INTERVAL`, PRD §16 defaults —
+   25 rows/s). Peak backlog 8 878 / 9 509 pending rows; full drain 358 s /
+   386 s (24.8 / 24.6 rows/s sustained — the tick cap, twice). Queue depth
+   never exceeded 1 message — the worker and RabbitMQ keep up easily
+   (peak CPU worker 12% / 10%, rabbitmq 9% both runs) — so the constraint
+   is the publisher's tick, not the consumers. Consequence: under
+   sustained submit load the FR-11 "state change visible in the timeline
+   within 2 s" freshness cannot hold (the projection lag grows to minutes
+   while the write lane outruns the publisher). Raising
+   `WORKER_BATCH_SIZE` / lowering `WORKER_POLL_INTERVAL` is a compose-env
+   infra change (golden rule 10) — documented here, deliberately not
+   changed by #61.
+2. **PostgreSQL carries the CPU load** (peak 800% / 826% of the engine's
+   CPUs), ahead of procurement (200% / 191%) and gateway (122% / 127%) —
+   expected for a workload that is 80% list reads plus a transactional
+   write lane. The write chain's two POSTs measure 27.3 / 24.9 ms p95,
+   and the create's p99 tail differed 3× between runs (105.9 vs 34.3 ms)
+   — run-to-run variance, not a stable saturated stage (no request
+   failed: error rate 0.00% both runs, `http_req_failed < 1%` green).
+3. **The dashboard summary is the most expensive single read at this
+   scale** (med 54.3 / 50.6 ms, p95 105.4 / 100.5 ms) — one transaction,
+   five queries, three of them against an empty `purchase_orders` (see
+   the scale caveat above); still ~5× under the §19 500 ms dashboard
+   budget on this near-empty dataset, and its median is ~3× the slowest
+   list endpoint (requisitions, 16.8 / 15.7 ms) and ~16× the fastest
+   (purchase-orders, 3.3 / 3.1 ms — an empty table).
+4. **The event history read stays flat while its base grows** (med
+   7.6 / 6.9 ms, p95 12.1 / 11.0 ms) — because the projection lags the
+   publisher (finding 1), `GET /api/v1/events` reads only what has landed
+   in Mongo so far; re-reading this number after the drain (base = the
+   full ~12k documents) is the honest way to compare it against #56's
+   index review (§6).
+
+**How to re-read every number**: `make loadtest` prints the per-endpoint
+table (also exported as JSON to `scripts/loadtest/summary-latest.json`,
+gitignored), the during-run maxima (queue depth, pending outbox rows) from
+its 5 s sampler, peak per-service CPU from `docker stats` snapshots, the
+post-run drain time, and the per-table row counts — everything above comes
+from those lines, verbatim.

@@ -141,6 +141,7 @@ The whole flow is also driven end-to-end by the Playwright suite: `make e2e` (co
 | `make demo` / `demo-reset` | seeded 5-minute demo story: reset demo tenant + install fixtures / wipe only ([runbook](docs/demo-script.md)) |
 | `make cover` / `make cover-procurement` | identity / procurement coverage vs 80% thresholds (stack up) |
 | `make perf-budget` | 100k-scale fixtures, per-shape p95 vs budget report (stack up) |
+| `make loadtest` | k6 mixed read/write load test against the compose stack (10 VU × 2m default; needs k6) — results & runbook: [docs/perf.md §9](docs/perf.md) (#61) |
 | `make compose-up` / `compose-down` / `compose-logs` / `compose-ps` | stack lifecycle |
 | `make seed` / `seed-reset` / `reset` | demo data: regenerate / wipe / drop volumes + recreate |
 | `make gen-proto` | regenerate `gen/go` from `proto/` (needs protoc) |
