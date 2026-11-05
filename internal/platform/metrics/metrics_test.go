@@ -1,8 +1,10 @@
 package metrics
 
 // Table-driven unit tests for the #55 metric surface: the /metrics HTTP
-// server lifecycle, the HTTP and gRPC latency histograms, and the worker
-// gauge setters (including the honest-gap DeleteExportAge semantics).
+// server lifecycle, the HTTP and gRPC latency histograms, the worker
+// gauge setters (including the honest-gap DeleteExportAge semantics), and
+// the #115 DLQ dead-letter counter (zero pre-initialization + targeted
+// increments).
 
 import (
 	"context"
@@ -147,6 +149,51 @@ func TestWorkerGaugeSetters(t *testing.T) {
 		map[string]string{"tenant": "tenant-a"}).GetGauge().GetValue(); got != 3600 {
 		t.Fatalf("export_age_seconds{tenant-a} after recreate = %v, want 3600", got)
 	}
+}
+
+// TestDLQDeliveriesCounter pins the #115 pre-initialization contract:
+// immediately after New() the dlq_deliveries_total family carries EXACTLY
+// the four reason series, all at 0, and IncDLQDeliveries bumps only the
+// named reason. Without the pre-initialization, /metrics (plain promhttp
+// HandlerOpts — no OpenMetrics created timestamps) would first expose a
+// reason series at its final value after a dead-letter, and Prometheus's
+// increase() would compute last − first = 0: a single dead-letter per
+// reason could never fire DLQDeadLetterRate.
+func TestDLQDeliveriesCounter(t *testing.T) {
+	t.Run("pre-initialized at exactly four zero series", func(t *testing.T) {
+		c := New()
+		mf := gatherFamily(t, c, "dlq_deliveries_total")
+		if got := len(mf.GetMetric()); got != 4 {
+			t.Fatalf("dlq_deliveries_total series count = %d, want 4 (got %v)", got, mf.GetMetric())
+		}
+		for _, reason := range []string{
+			DLQReasonDecodeFailed, DLQReasonInvalidEnvelope,
+			DLQReasonInvalidEvent, DLQReasonMaxRetries,
+		} {
+			if got := findMetric(t, mf, map[string]string{"reason": reason}).GetCounter().GetValue(); got != 0 {
+				t.Fatalf("dlq_deliveries_total{reason=%q} = %v, want 0 immediately after New()", reason, got)
+			}
+		}
+	})
+
+	t.Run("IncDLQDeliveries bumps only the named reason", func(t *testing.T) {
+		c := New()
+		c.IncDLQDeliveries(DLQReasonDecodeFailed)
+		c.IncDLQDeliveries(DLQReasonDecodeFailed)
+		c.IncDLQDeliveries(DLQReasonMaxRetries)
+
+		mf := gatherFamily(t, c, "dlq_deliveries_total")
+		for reason, want := range map[string]float64{
+			DLQReasonDecodeFailed:    2,
+			DLQReasonInvalidEnvelope: 0,
+			DLQReasonInvalidEvent:    0,
+			DLQReasonMaxRetries:      1,
+		} {
+			if got := findMetric(t, mf, map[string]string{"reason": reason}).GetCounter().GetValue(); got != want {
+				t.Fatalf("dlq_deliveries_total{reason=%q} = %v, want %v", reason, got, want)
+			}
+		}
+	})
 }
 
 func TestServeMetricsEndpointAndGracefulStop(t *testing.T) {

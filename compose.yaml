@@ -293,6 +293,10 @@ services:
       EXPORT_TZ: ${EXPORT_TZ:-UTC}
       EXPORT_LOCK_TTL: ${EXPORT_LOCK_TTL:-15m}
       EXPORT_JOB_BUDGET: ${EXPORT_JOB_BUDGET:-10m}
+      # DLQ depth gauge cadence (#48/#115): passed through so a demo can
+      # speed up the gauge (e.g. DLQ_SUMMARY_INTERVAL=15s) without a
+      # rebuild; the default stays the PRD §16 hourly summary.
+      DLQ_SUMMARY_INTERVAL: ${DLQ_SUMMARY_INTERVAL:-1h}
     depends_on:
       postgres:
         condition: service_healthy

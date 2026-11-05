@@ -152,7 +152,7 @@
         }
       ],
       "title": "DLQ depth",
-      "description": "Ready messages in procurement.dlq (PRD §18). Thresholds follow docs/ops/dlq-monitor.md: WARN ≥1, CRITICAL ≥50. Alert rules stay with #54.",
+      "description": "Ready messages in procurement.dlq (PRD §18). Thresholds follow docs/ops/dlq-monitor.md: WARN ≥1, CRITICAL ≥50 — formalized as the DLQDepthWarn/DLQDepthCritical alerts in deploy/compose/prometheus/alerts.yml (#115).",
       "type": "timeseries"
     },
     {

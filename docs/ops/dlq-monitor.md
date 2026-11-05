@@ -141,3 +141,18 @@ Layered on the worker's **hourly** summary cadence (PRD §16):
 
 The `depth` field of `GET /api/v1/dlq` is the live value for ad-hoc
 checks between summaries.
+
+Since #115 these thresholds are formalized as Prometheus alerting rules in
+[`deploy/compose/prometheus/alerts.yml`](../deploy/compose/prometheus/alerts.yml)
+(group `eprocurement-dlq`, loaded by the observability profile's
+Prometheus, scoped to `job="worker"`): **`DLQDepthWarn`** (`dlq_depth_messages
+> 0` for 1 h, warning) and **`DLQDepthCritical`** (`dlq_depth_messages >= 50`,
+critical, no `for`), plus the rate companion **`DLQDeadLetterRate`**
+(`increase(dlq_deliveries_total[10m]) > 0`, warning) on the worker's
+`dlq_deliveries_total{reason}` counter — the depth gauge updates only per
+`DLQ_SUMMARY_INTERVAL`, so the rate alert is what reports a dead-letter
+within minutes instead of at the next gauge tick. For a firing demo, lower
+`DLQ_SUMMARY_INTERVAL` (compose passes it through, default `1h`) and publish
+a poison message to `procurement.events`; **purge the queue afterwards**
+(command above) so the depth alerts do not stay firing into the next
+session.
