@@ -4,7 +4,7 @@
 
 Multi-tenant eProcurement platform (procure-to-pay slice) and reference implementation: **Go microservices + Next.js**, PostgreSQL + MongoDB + Redis + RabbitMQ + MinIO, OpenTelemetry, Docker Compose.
 
-**Status:** the procure-to-pay slice is **implemented and running** — PR → approval → PO → GRN → 3-way invoice match, event history, exports, observability, and a Playwright happy path, all gated in CI. Milestone M5 demo artifacts (demo script #63, video #64, tunnel runbook #65) and the Kubernetes kind manifests (D4) are still open — see [Demo & review artifacts](#demo--review-artifacts) and the [capability matrix](#capability-to-evidence-matrix) for exactly what is real and what is pending. PRD: [`docs/prd/prd-v0.2.md`](docs/prd/prd-v0.2.md).
+**Status:** the procure-to-pay slice is **implemented and running** — PR → approval → PO → GRN → 3-way invoice match, event history, exports, observability, and a Playwright e2e suite (happy path + worker-crash resilience), all gated in CI. Milestone M5 demo artifacts (video #64, tunnel runbook #65) and the Kubernetes kind manifests (D4) are still open — see [Demo & review artifacts](#demo--review-artifacts) and the [capability matrix](#capability-to-evidence-matrix) for exactly what is real and what is pending. PRD: [`docs/prd/prd-v0.2.md`](docs/prd/prd-v0.2.md).
 
 ## Architecture (implemented)
 
@@ -69,7 +69,7 @@ packages/{ui,config}/        shared React components + tooling presets (pnpm wor
 proto/ · gen/go/             gRPC contracts (identity/procurement/documents v1) + generated stubs
 deploy/compose/              stack config: OTel collector, Prometheus, Grafana provisioning
 deploy/docker/               one Dockerfile, five service images
-e2e/                         Playwright happy path (@eprocurement/e2e)
+e2e/                         Playwright e2e: happy path + worker-crash replay (@eprocurement/e2e)
 tests/integration/           procure-to-pay cross-service suite (make test-p2p)
 scripts/                     seed, dev gates, grpc-health-probe
 docs/                        PRD, ADRs, schemas, RBAC, perf, onboarding, dev notes
@@ -125,7 +125,7 @@ Reset the local stack (drops volumes): `make reset`.
 3. `cp apps/web/.env.example apps/web/.env.local` and set `DEMO_TENANTS=acme=admin@acme.example` and `DEMO_ADMIN_PASSWORD=<the admin password>`.
 4. `pnpm dev` → http://localhost:3000 — login, requisition wizard, approvals, PO/GRN, invoices with 3-way match, dashboard, reports, audit, and the tenant switcher.
 
-The whole flow is also driven end-to-end by the Playwright suite: `make e2e` (compose stack must be up).
+The whole flow is also driven end-to-end by the Playwright suite: `make e2e` (compose stack must be up) — the happy-path story plus the worker-crash/replay resilience scenario (PRD §22 step 6).
 
 ### Make targets
 
@@ -137,7 +137,7 @@ The whole flow is also driven end-to-end by the Playwright suite: `make e2e` (co
 | `make test-unit` | unit-only Go suite with a duration gate (default 120s) |
 | `make test-integration` | full `go test ./...` against the compose database/object store |
 | `make test-p2p` | procure-to-pay cross-service suite: gRPC → outbox → RabbitMQ → Mongo projection |
-| `make e2e` | Playwright happy path against the compose stack |
+| `make e2e` | Playwright e2e suite against the compose stack: happy path + worker-crash replay (#59/#60) |
 | `make demo` / `demo-reset` | seeded 5-minute demo story: reset demo tenant + install fixtures / wipe only ([runbook](docs/demo-script.md)) |
 | `make cover` / `make cover-procurement` | identity / procurement coverage vs 80% thresholds (stack up) |
 | `make perf-budget` | 100k-scale fixtures, per-shape p95 vs budget report (stack up) |
@@ -181,7 +181,7 @@ Every must-have from [PRD §20](docs/prd/prd-v0.2.md) (technology stack) and [PR
 | OpenTelemetry + Prometheus | `internal/platform/telemetry` — spans REST → gRPC → pgx → outbox publish → RabbitMQ consume → Redis; `internal/platform/metrics` + `/metrics` ports 9100–9104; OTel collector in the default stack | #54/#55 dev notes; Jaeger/Prometheus/Grafana via `--profile observability`; gateway `trace_test.go` |
 | Docker + Kubernetes | **Implemented:** `compose.yaml` (11 default services) + `deploy/docker/service.Dockerfile`; CI **E2E** builds all five images. **Pending:** `deploy/k8s` kind manifests (D4) not yet in the repo | `make compose-up`; CI **E2E** job |
 | CI (GitLab-CI-shaped) | `.github/workflows/ci.yml` — 4 jobs mapping ADR-0002's stages (see [CI](#ci)); literal `.gitlab-ci.yml` intentionally absent per ADR-0002 | the badge at the top; [ADR-0002](docs/adr/0002-ci-github-actions.md) |
-| Playwright | `e2e/specs/happy-path.spec.ts` — login, tenant switch + isolation, PR wizard + submit, self-approval block, convert → issue → acknowledge → GRN, invoice + attachment + 3-way match | `make e2e`; CI **E2E** job; #59 dev note. **Pending:** resilience scenario (worker kill/replay) = #60 |
+| Playwright | `e2e/specs/happy-path.spec.ts` — login, tenant switch + isolation, PR wizard + submit, self-approval block, convert → issue → acknowledge → GRN, invoice + attachment + 3-way match; `e2e/specs/worker-crash-replay.spec.ts` (#60) — SIGKILL the worker mid-flow (gated on observed in-flight queue state), durable RabbitMQ backlog with consumers == 0, story finished while the worker is dead, replay after restart with every event exactly once per entity, no duplicate projections/notifications/receipts, PO `received` in API + UI | `make e2e`; CI **E2E** job; #59/#60 dev notes |
 | AI-assisted development | `AGENTS.md` (per-issue workflow, gates), `docs/ai-workflow.md`, a per-issue dev note for every merged issue in `docs/dev-notes/` | this repo's history: one issue per branch/PR, conventional commits |
 
 ### PRD §10 — MVP in-scope
@@ -208,7 +208,7 @@ Every must-have from [PRD §20](docs/prd/prd-v0.2.md) (technology stack) and [PR
 - **Live-demo tunnel runbook (Cloudflare Tunnel)** — issue #65 (open)
 - **Hosting context** — [ADR-0003](docs/adr/0003-demo-hosting.md): local-first demo; no always-on public deployment in Phase 0
 
-Until the script lands, the reproducible stand-in for the demo story is `make e2e` (the same sequence, asserted) plus the resilience flow in `make test-p2p`.
+The reproducible stand-ins for the demo story are `make e2e` (the same sequence, asserted, plus the worker-crash resilience of step 6) and the resilience flow in `make test-p2p`.
 
 ## Development workflow (Git Flow)
 
@@ -227,7 +227,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Issues use `type:*`, `area:*`, `priority
 - **Go** — `go vet`, `go build`, duration-gated unit suite, migrations, full `go test` with Postgres/Mongo/MinIO service containers, coverage gates (identity ≥80%, procurement parity set ≥80%, documents report-only)
 - **Web** — `pnpm install --frozen-lockfile`, `pnpm build`, `pnpm lint`, `pnpm test`
 - **Integration** — procure-to-pay suite (`make test-p2p`) against compose Postgres/Mongo/RabbitMQ
-- **E2E** — Playwright happy path against the full compose stack (builds all five service images)
+- **E2E** — Playwright suite against the full compose stack: happy path + worker-crash replay resilience (builds all five service images)
 
 > GitHub Actions minutes for private repositories depend on the account plan (Free includes 2,000 Linux minutes/month). Public repositories use free standard runners.
 

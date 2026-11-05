@@ -142,13 +142,16 @@ test-p2p: ## Run the procure-to-pay integration suite (stack must be up)
 	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" TEST_MONGO_URI="$(TEST_MONGO_URI)" \
 	TEST_RABBITMQ_URL="$(TEST_RABBITMQ_URL)" go test ./tests/integration/... -count=1 -v
 
-# Playwright happy path (#59) — the same sequence the CI e2e job runs:
-# fixtures are installed by the suite's globalSetup (cmd/useradmin needs
-# DATABASE_URL, hence the .env passthrough), the web app is rebuilt and
-# served with `next start`, and the spec drives the compose stack. Identity's
+# Playwright e2e suite (#59 happy path + #60 worker crash/replay) — the
+# same sequence the CI e2e job runs: fixtures are installed by the suite's
+# globalSetup (cmd/useradmin needs DATABASE_URL, hence the .env passthrough),
+# the web app is rebuilt and served with `next start`, and the specs drive
+# the compose stack. The #60 spec kills and restarts the worker container
+# and briefly stalls mongod (fsyncLock) to pin the crash deterministically —
+# docker and the compose stack must be reachable from the runner. Identity's
 # login limiter can 429 rapid local re-runs; raise it per docs/onboarding.md
 # (IDENTITY_LOGIN_RATE_PER_MIN in .env, then make compose-up) if retrying.
-e2e: ## Run the Playwright happy path (compose stack must be up)
+e2e: ## Run the Playwright e2e suite — happy path + worker-crash replay (compose stack must be up)
 	pnpm --filter @eprocurement/web build
 	DATABASE_URL="$(TEST_DATABASE_URL)" pnpm --filter @eprocurement/e2e e2e
 
