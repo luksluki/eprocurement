@@ -1,9 +1,12 @@
 # Alerting rules wired via rule_files in prometheus.yml (#55).
 #
-# Scope note: only the FR-10 export-staleness alert lives here — it is the
-# "gauge + alert" pair dev-note 049 deferred from #49. DLQ-depth alerting
-# deliberately stays with #54 (dev-note 048); this file must not grow a
-# DLQ rule.
+# Groups: the FR-10 export-staleness alert (#55) and the DLQ alerts (#115)
+# — DLQDepthWarn / DLQDepthCritical formalize the docs/ops/dlq-monitor.md
+# thresholds (written there to be formalized into rules), DLQDeadLetterRate
+# rides the worker's dlq_deliveries_total counter (#115). All three DLQ
+# alerts scope to {job="worker"}: the Collectors are exported by every Go
+# process (#55), but only the worker's runner can dead-letter — the other
+# four are structurally 0.
 groups:
   - name: eprocurement-export
     rules:
@@ -24,3 +27,55 @@ groups:
             $value }}s > 93600s for tenant {{ $labels.tenant }}). Check the
             worker's export scheduler and the run history
             (GET /api/v1/exports/runs).
+
+  - name: eprocurement-dlq
+    rules:
+      # The runbook's WARN tier (docs/ops/dlq-monitor.md: depth ≥ 1
+      # persisting > 1 hour — one hour matches the monitor's hourly
+      # summary cadence so a single poison message does not page at
+      # night). The depth gauge updates per DLQ_SUMMARY_INTERVAL.
+      - alert: DLQDepthWarn
+        expr: dlq_depth_messages{job="worker"} > 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: DLQ depth {{ $value }} for over an hour
+          description: >-
+            procurement.dlq has held {{ $value }} ready message(s) for more
+            than an hour (dlq_depth_messages > 0, worker gauge). Inspect
+            and replay via the admin endpoint, or purge with broker
+            tooling. Runbook: docs/ops/dlq-monitor.md.
+      # The runbook's CRITICAL tier (docs/ops/dlq-monitor.md: depth ≥ 50 —
+      # accumulating faster than operators act; consumers or a dependency
+      # are down). No `for`: at this depth every minute counts.
+      - alert: DLQDepthCritical
+        expr: dlq_depth_messages{job="worker"} >= 50
+        labels:
+          severity: critical
+        annotations:
+          summary: DLQ depth {{ $value }} (critical)
+          description: >-
+            procurement.dlq holds {{ $value }} ready messages
+            (dlq_depth_messages >= 50, worker gauge) — consumers or a
+            dependency are likely down. Inspect the worker logs and the
+            admin endpoint immediately. Runbook: docs/ops/dlq-monitor.md.
+      # Dead-letter RATE on the #115 counter (the depth gauge is sampled
+      # hourly, so increase() over it is meaningless). One dead-letter in
+      # the window is worth a look (the runbook's WARN philosophy); the
+      # counter's reason series are pre-initialized at 0 at worker start,
+      # so even a single 0→1 step between two scrapes fires this. The 10 m
+      # window is #115's own decision (see its dev note).
+      - alert: DLQDeadLetterRate
+        expr: increase(dlq_deliveries_total{job="worker"}[10m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: DLQ received dead-letters in the last 10 minutes
+          description: >-
+            increase(dlq_deliveries_total[10m]) = {{ $value }} on the
+            worker — messages are being dead-lettered right now (labels
+            carry the reason: decode_failed / invalid_envelope /
+            invalid_event / max_retries). Check the worker's
+            "delivery dead-lettered" log lines and the DLQ runbook:
+            docs/ops/dlq-monitor.md.

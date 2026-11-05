@@ -135,6 +135,14 @@ type Config struct {
 	// DeliveryTimeout bounds one handler call, so a hung store call cannot
 	// stall a queue forever — the timeout error is transient and retries.
 	DeliveryTimeout time.Duration // default 10 s
+
+	// OnDeadLetter, when set, is invoked with the dead-letter reason
+	// ("decode_failed" | "invalid_envelope" | "invalid_event" |
+	// "max_retries" — the same value the dead-letter log line carries)
+	// every time a delivery is nacked to the DLQ. The worker wires it to
+	// the dlq_deliveries_total counter (#115). It runs inline in the
+	// serial settle loop, so it must be cheap.
+	OnDeadLetter func(reason string)
 }
 
 // Runner consumes the configured queues until ctx is cancelled.
@@ -145,6 +153,7 @@ type Runner struct {
 	log             *slog.Logger
 	prefetch        int
 	deliveryTimeout time.Duration
+	onDeadLetter    func(reason string)
 }
 
 // New validates the configuration and returns the runner. Every handler
@@ -189,7 +198,7 @@ func New(cfg Config) (*Runner, error) {
 	}
 	return &Runner{
 		url: cfg.URL, topo: topo, handlers: cfg.Handlers, log: log,
-		prefetch: prefetch, deliveryTimeout: timeout,
+		prefetch: prefetch, deliveryTimeout: timeout, onDeadLetter: cfg.OnDeadLetter,
 	}, nil
 }
 
@@ -309,6 +318,7 @@ func (r *Runner) handle(ctx context.Context, ch *amqp.Channel, td taggedDelivery
 	if err != nil {
 		_ = d.Nack(false, false) // permanent: straight to the DLQ
 		log.Warn("delivery dead-lettered", "status", "dlq", "reason", "decode_failed", "error", err)
+		r.notifyDeadLetter("decode_failed")
 		return
 	}
 	log = log.With("event_id", env.EventID, "tenant_id", env.TenantID,
@@ -318,6 +328,7 @@ func (r *Runner) handle(ctx context.Context, ch *amqp.Channel, td taggedDelivery
 	if err != nil {
 		_ = d.Nack(false, false) // permanent (e.g. missing entity_type)
 		log.Warn("delivery dead-lettered", "status", "dlq", "reason", "invalid_envelope", "error", err)
+		r.notifyDeadLetter("invalid_envelope")
 		return
 	}
 
@@ -343,6 +354,7 @@ func (r *Runner) handle(ctx context.Context, ch *amqp.Channel, td taggedDelivery
 	if isPermanent(err) {
 		_ = d.Nack(false, false) // will never succeed: no retry
 		log.Warn("delivery dead-lettered", "status", "dlq", "reason", "invalid_event", "error", err)
+		r.notifyDeadLetter("invalid_event")
 		return
 	}
 
@@ -354,6 +366,7 @@ func (r *Runner) handle(ctx context.Context, ch *amqp.Channel, td taggedDelivery
 		_ = d.Nack(false, false)
 		log.Warn("delivery dead-lettered", "status", "dlq",
 			"reason", "max_retries", "retry_count", retryCount, "error", err)
+		r.notifyDeadLetter("max_retries")
 		return
 	}
 	if err := publishRetry(ctx, ch, target, d, retryCount+1); err != nil {
@@ -367,6 +380,15 @@ func (r *Runner) handle(ctx context.Context, ch *amqp.Channel, td taggedDelivery
 	_ = d.Ack(false)
 	log.Warn("delivery scheduled for retry", "status", "retry-tier",
 		"retry_queue", target, "retry_count", retryCount+1, "error", err)
+}
+
+// notifyDeadLetter reports one dead-lettered delivery to the optional
+// OnDeadLetter hook (#115: the worker wires it to the dlq_deliveries_total
+// counter). The reason is the same string the preceding log line carries.
+func (r *Runner) notifyDeadLetter(reason string) {
+	if r.onDeadLetter != nil {
+		r.onDeadLetter(reason)
+	}
 }
 
 // publishRetry parks a copy of the delivery on the retry-tier queue via the

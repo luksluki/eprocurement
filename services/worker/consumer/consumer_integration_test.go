@@ -104,10 +104,15 @@ func (e *itEnv) channel() (*amqp.Channel, error) {
 
 // startRunner runs r.Run in the background and returns its cancel func and
 // a wait func (idempotent; also safe for the cleanup below). The cleanup
-// stops the runner even when the test body never waits.
-func (e *itEnv) startRunner(t *testing.T, handlers map[string]Handler) (context.CancelFunc, func() error) {
+// stops the runner even when the test body never waits. Optional mutators
+// adjust the Config (e.g. wiring the OnDeadLetter hook, #115) before New.
+func (e *itEnv) startRunner(t *testing.T, handlers map[string]Handler, mutators ...func(*Config)) (context.CancelFunc, func() error) {
 	t.Helper()
-	r, err := New(Config{URL: e.amqpURL, Topology: e.topo, Handlers: handlers})
+	cfg := Config{URL: e.amqpURL, Topology: e.topo, Handlers: handlers}
+	for _, mut := range mutators {
+		mut(&cfg)
+	}
+	r, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New runner: %v", err)
 	}
@@ -449,6 +454,101 @@ func TestPermanentInvalidGoesStraightToDLQ(t *testing.T) {
 	})
 	if got := env.count(t, history.EventsCollectionName); got != 1 {
 		t.Fatalf("events = %d, want 1", got)
+	}
+}
+
+// failingFor wraps a Handler: deliveries whose event_id is in failures
+// settle with the configured error (permanent sentinel → invalid_event,
+// anything else → the retry ladder), everything else delegates.
+type failingFor struct {
+	failures map[string]error
+	delegate Handler
+}
+
+func (f *failingFor) Apply(ctx context.Context, ev history.Event) (bool, error) {
+	if err, ok := f.failures[ev.EventID]; ok {
+		return false, err
+	}
+	return f.delegate.Apply(ctx, ev)
+}
+
+// deadLetterRecorder collects the OnDeadLetter reasons behind a mutex
+// (#115; handle() runs serially, the lock is insurance).
+type deadLetterRecorder struct {
+	mu      sync.Mutex
+	reasons []string
+}
+
+func (r *deadLetterRecorder) hook(reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reasons = append(r.reasons, reason)
+}
+
+func (r *deadLetterRecorder) count(reason string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, got := range r.reasons {
+		if got == reason {
+			n++
+		}
+	}
+	return n
+}
+
+func (r *deadLetterRecorder) total() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.reasons)
+}
+
+// TestDeadLetterHookReasons pins the #115 reason set end-to-end through
+// the REAL settle loop and broker: one poison per dead-letter cause fires
+// the OnDeadLetter hook exactly once with its reason — decode_failed
+// (undecodable body), invalid_envelope (failed validation),
+// invalid_event (permanent handler error), max_retries (exhausted ladder)
+// — while the healthy delivery behind them applies and never fires it.
+func TestDeadLetterHookReasons(t *testing.T) {
+	env := newItEnv(t)
+	rec := &deadLetterRecorder{}
+	hist := history.NewStore(env.mongoDB)
+	handler := &failingFor{
+		failures: map[string]error{
+			"ev-invalid-event-1": history.ErrPayloadInvalid, // permanent
+			"ev-doomed-hook-1":   errors.New("transient: mongo connection refused"),
+		},
+		delegate: hist,
+	}
+	env.startRunner(t, map[string]Handler{env.hist: handler},
+		func(cfg *Config) { cfg.OnDeadLetter = rec.hook })
+	env.waitReady(t)
+
+	env.publish(t, "grn.posted", []byte(`{"event_id":`), nil) // undecodable
+	broken := itEnvelope("ev-broken-hook-1", "grn.posted")
+	broken.EntityType = "" // decodes, fails validation
+	env.publishEnvelope(t, broken)
+	env.publishEnvelope(t, itEnvelope("ev-invalid-event-1", "grn.posted"))
+	env.publishEnvelope(t, itEnvelope("ev-doomed-hook-1", "grn.posted"))
+	env.publishEnvelope(t, itEnvelope("ev-healthy-hook-1", "grn.posted")) // control
+
+	waitUntil(t, "healthy event applied behind the poisons", func() bool {
+		return env.count(t, history.EventsCollectionName) == 1
+	})
+	waitUntil(t, "all four poisons dead-lettered", func() bool {
+		return env.queueDepth(t, env.topo.DLQQueue) == 4
+	})
+
+	for _, reason := range []string{
+		"decode_failed", "invalid_envelope", "invalid_event", "max_retries",
+	} {
+		if got := rec.count(reason); got != 1 {
+			t.Fatalf("OnDeadLetter fired %d× for reason %q, want exactly 1 (all: %v)",
+				got, reason, rec.reasons)
+		}
+	}
+	if got := rec.total(); got != 4 {
+		t.Fatalf("OnDeadLetter fired %d× total, want 4 (the healthy delivery must not fire it)", got)
 	}
 }
 

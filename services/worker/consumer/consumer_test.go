@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/luksluki/eprocurement/internal/platform/telemetry"
+	"github.com/luksluki/eprocurement/services/documents/history"
 	"github.com/luksluki/eprocurement/services/worker/publisher"
 	"github.com/luksluki/eprocurement/services/worker/topology"
 )
@@ -114,6 +116,103 @@ func TestNewValidation(t *testing.T) {
 		r.topo.EventsExchange != "procurement.events" || r.log == nil {
 		t.Fatalf("defaults not filled: prefetch=%d timeout=%v topo=%+v log=%v",
 			r.prefetch, r.deliveryTimeout, r.topo, r.log)
+	}
+}
+
+// stubHandler returns a fixed error from Apply (never writes anything).
+type stubHandler struct{ err error }
+
+func (s stubHandler) Apply(context.Context, history.Event) (bool, error) {
+	return false, s.err
+}
+
+// TestHandleDeadLetterHook pins the #115 OnDeadLetter contract without a
+// broker: each of the four dead-letter paths reports its reason exactly
+// once — the same string the dead-letter log line carries — and a nil hook
+// (the default, and every pre-#115 construction) is safe. This works
+// because Nack on a delivery with no Acknowledger is a nil-guarded no-op
+// (amqp091-go delivery.go) and none of the dead-letter paths touch the
+// channel.
+func TestHandleDeadLetterHook(t *testing.T) {
+	hist := topology.Default.Queues[0].Name
+
+	validBody, err := json.Marshal(validEnvelope())
+	if err != nil {
+		t.Fatalf("marshal valid envelope: %v", err)
+	}
+	broken := validEnvelope()
+	broken.EntityType = "" // decodes, then fails validation
+	brokenBody, err := json.Marshal(broken)
+	if err != nil {
+		t.Fatalf("marshal broken envelope: %v", err)
+	}
+
+	cases := []struct {
+		name    string
+		handler Handler
+		body    []byte
+		headers amqp.Table
+		want    string
+	}{
+		{
+			name:    "decode_failed on an undecodable body",
+			handler: stubHandler{}, // never reached
+			body:    []byte(`{"event_id":`),
+			want:    "decode_failed",
+		},
+		{
+			name:    "invalid_envelope on a failed validation",
+			handler: stubHandler{}, // never reached
+			body:    brokenBody,
+			want:    "invalid_envelope",
+		},
+		{
+			name:    "invalid_event on a permanent handler error",
+			handler: stubHandler{err: history.ErrPayloadInvalid},
+			body:    validBody,
+			want:    "invalid_event",
+		},
+		{
+			name:    "max_retries on an exhausted ladder",
+			handler: stubHandler{err: errors.New("transient: mongo down")},
+			body:    validBody,
+			headers: amqp.Table{topology.RetryCountHeader: int32(topology.MaxRetries)},
+			want:    "max_retries",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			delivery := taggedDelivery{queue: hist,
+				d: amqp.Delivery{Body: tc.body, Headers: tc.headers}}
+
+			// Failure path first: no hook configured must not panic.
+			plain, err := New(Config{URL: "amqp://x",
+				Handlers: map[string]Handler{hist: tc.handler}})
+			if err != nil {
+				t.Fatalf("New without hook: %v", err)
+			}
+			plain.handle(context.Background(), nil, delivery)
+
+			var mu sync.Mutex
+			var reasons []string
+			r, err := New(Config{URL: "amqp://x",
+				Handlers: map[string]Handler{hist: tc.handler},
+				OnDeadLetter: func(reason string) {
+					mu.Lock()
+					defer mu.Unlock()
+					reasons = append(reasons, reason)
+				}})
+			if err != nil {
+				t.Fatalf("New with hook: %v", err)
+			}
+			r.handle(context.Background(), nil, delivery)
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(reasons) != 1 || reasons[0] != tc.want {
+				t.Fatalf("OnDeadLetter reasons = %v, want exactly [%s]", reasons, tc.want)
+			}
+		})
 	}
 }
 

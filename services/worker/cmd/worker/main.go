@@ -146,6 +146,9 @@ func run() error {
 			topology.NotificationsQueue:    notifStore,
 		},
 		Logger: log,
+		// #115: every dead-letter (all four reasons, both runners share
+		// handle()) feeds the dlq_deliveries_total counter.
+		OnDeadLetter: mc.IncDLQDeliveries,
 	})
 	if err != nil {
 		return err
@@ -223,6 +226,9 @@ func run() error {
 		Logger:          log,
 		Prefetch:        1,
 		DeliveryTimeout: manualTimeout,
+		// #115: the exports runner shares handle() — its dead-letters count
+		// into the same dlq_deliveries_total counter.
+		OnDeadLetter: mc.IncDLQDeliveries,
 	})
 	if err != nil {
 		return err
