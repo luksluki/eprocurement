@@ -434,7 +434,11 @@ func buildDataset(cfg config, rng *rand.Rand, base time.Time) dataset {
 	ds.grns = make([]grnSeed, 0, cfg.requisitions)
 	ds.invoices = make([]invoiceSeed, 0, cfg.requisitions)
 
-	statuses := []string{"approved", "approved", "approved", "approved", "approved", "submitted", "submitted", "rejected", "closed"}
+	// PO-bearing rows are CLOSED (the real convert edge is approved → closed,
+	// services/procurement/purchaseorder/store.go §152-160): five converted
+	// requisitions, one approved awaiting its convert decision, two in flight,
+	// one rejected — every row a state machine can actually produce (#110 AC-2).
+	statuses := []string{"closed", "closed", "closed", "closed", "closed", "submitted", "submitted", "rejected", "approved"}
 	poStatuses := []string{"issued", "acknowledged", "partially_received", "received", "closed"}
 	// Even spread over the window: each requisition sits at base + i*spacing
 	// (at the 100k default ≈ 1.73 minutes apart), so the last lands at the
@@ -539,7 +543,7 @@ func buildDataset(cfg config, rng *rand.Rand, base time.Time) dataset {
 		r.steps = steps
 		ds.requisitions = append(ds.requisitions, r)
 
-		if status != "approved" && status != "closed" {
+		if status != "closed" {
 			continue
 		}
 
