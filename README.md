@@ -118,7 +118,15 @@ Reset the local stack (drops volumes): `make reset`.
 
 ### See the web UI
 
-`make seed` writes the isolated `demo` schema only — `identity.users` starts empty, so the web shell needs a one-time setup (full copy-paste commands: [onboarding §5.1](docs/onboarding.md#51-demo-tenant-admins-the-web-shell-and-tenant-scoped-app-data)):
+`make seed` loads the demo dataset into BOTH the live service schemas (`procurement.*`, `identity.users` — requisitions, approvals, POs, GRNs, invoices, vendors, users) and the `demo` reconciliation schema, so the running gateway, dashboard, and web screens read seeded data for every demo tenant immediately (#110). Each demo tenant comes with five users — one per role, all with the documented fixture password `demo-password`:
+
+| Tenant (slug) | Login |
+|---|---|
+| `nusantara-retail` | `admin@nusantara-retail.example` (also `requester@`, `approver@`, `buyer@`, `finance@`) |
+| `kirana-logistics` | `admin@kirana-logistics.example` (same role pattern) |
+| `sagara-manufacturing` | `admin@sagara-manufacturing.example` (same role pattern) |
+
+For a hand-driven tenant with your own password, the one-time setup still applies (full copy-paste commands: [onboarding §5.1](docs/onboarding.md#51-demo-tenant-admins-the-web-shell-and-tenant-scoped-app-data)):
 
 1. Create a tenant admin with `go run ./services/identity/cmd/useradmin -email admin@acme.example -password '…' -tenant-id 11111111-1111-1111-1111-111111111111 -role admin -name "Acme Admin"`.
 2. Log in once and create a vendor plus the approval rule chain through the gateway (`POST /api/v1/vendors`, `PUT /api/v1/approval-rules`) — curl snippets in onboarding §5.1.
@@ -148,7 +156,7 @@ The whole flow is also driven end-to-end by the Playwright suite: `make e2e` (co
 
 ## Demo data
 
-`make seed` wipes and regenerates a deterministic dataset: 3 tenants, users, vendors, **100,000 requisitions**, and **1,000,000 domain events** (PostgreSQL `demo` schema + MongoDB `events`). It is budget-gated to complete in under two minutes (`SEED_MAX_SECONDS`).
+`make seed` wipes and regenerates a deterministic dataset: 3 tenants, users, vendors, **100,000 requisitions**, and **1,000,000 domain events** (MongoDB `events`), written to the **live service schemas** (`procurement.*`, `identity.*`) and the PostgreSQL `demo` reconciliation schema alike (#110). It is budget-gated to complete in under two minutes (`SEED_MAX_SECONDS`). `make seed-reset` removes the seeded tenants' rows from the live schemas (per-tenant DELETEs in FK order) and their events/audit documents (Mongo `deleteMany`, other tenants untouched) — tenants created by onboarding, e2e, `make demo`, or load tests survive a reseed.
 
 ```bash
 make seed          # reset + generate (deterministic, seed=42)
@@ -157,7 +165,7 @@ make reset         # drop compose volumes and recreate the stack
 go run ./scripts/seed --tenants 2 --requisitions 10000 --events 100000   # lighter run
 ```
 
-The seed data feeds the scale/perf fixtures (`make perf-budget`, `make test-integration`); the app-schema demo users/vendors for the UI are the §5.1 setup above (loading the seed dataset into the live schema is tracked in #110).
+The seed data feeds the scale/perf fixtures (`make perf-budget`, `make test-integration`) and, since #110, the live screens themselves: after `make seed`, log in as a demo tenant user (password `demo-password`, table above) and the requisitions, purchase-orders, and dashboard pages show seeded rows.
 
 For the 5-minute walkthrough, `make demo` resets a dedicated demo tenant and installs the seeded story (users, vendor, approval rules, tolerances) — the presenter runbook is [`docs/demo-script.md`](docs/demo-script.md).
 
