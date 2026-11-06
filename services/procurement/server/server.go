@@ -9,15 +9,6 @@ import (
 	procurementv1 "github.com/luksluki/eprocurement/gen/go/procurement/v1"
 	"github.com/luksluki/eprocurement/internal/platform/grpcserver"
 	"github.com/luksluki/eprocurement/internal/platform/rbac"
-	"github.com/luksluki/eprocurement/services/procurement/approval"
-	"github.com/luksluki/eprocurement/services/procurement/dashboard"
-	"github.com/luksluki/eprocurement/services/procurement/export"
-	"github.com/luksluki/eprocurement/services/procurement/goodsreceipt"
-	"github.com/luksluki/eprocurement/services/procurement/invoice"
-	"github.com/luksluki/eprocurement/services/procurement/match"
-	"github.com/luksluki/eprocurement/services/procurement/purchaseorder"
-	"github.com/luksluki/eprocurement/services/procurement/requisition"
-	"github.com/luksluki/eprocurement/services/procurement/vendor"
 )
 
 // ServiceName is the readiness health-check service name.
@@ -85,8 +76,12 @@ var methodPermissions = rbac.MethodPermissions{
 	"/procurement.v1.Procurement/TriggerExport":            rbac.ExportTrigger,
 }
 
-// New returns a grpcserver.Server with the procurement API registered.
-func New(log *slog.Logger, pinger grpcserver.Pinger, store *vendor.Store, requisitions *requisition.Store, approvals *approval.Store, purchaseOrders *purchaseorder.Store, goodsReceipts *goodsreceipt.Store, invoices *invoice.Store, matches *match.Store, dashboards *dashboard.Store, exports *export.Store, opts ...grpcserver.Option) *grpcserver.Server {
+// New returns a grpcserver.Server with the procurement API registered. The
+// per-domain store parameters are the consumer-side interfaces defined in
+// stores.go (#118); the concrete stores satisfy them unchanged (see the
+// compile-time assertions there), and in-memory fakes stand in for the API
+// layer's unit tests.
+func New(log *slog.Logger, pinger grpcserver.Pinger, store VendorStore, requisitions RequisitionStore, approvals ApprovalStore, purchaseOrders PurchaseOrderStore, goodsReceipts GoodsReceiptStore, invoices InvoiceStore, matches MatchStore, dashboards DashboardStore, exports ExportStore, opts ...grpcserver.Option) *grpcserver.Server {
 	srv := grpcserver.New(log, pinger, append([]grpcserver.Option{
 		grpcserver.WithServiceName(ServiceName),
 		grpcserver.WithUnary(rbac.UnaryInterceptor(methodPermissions)),

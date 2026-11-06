@@ -18,7 +18,6 @@ import (
 	"github.com/luksluki/eprocurement/internal/platform/rbac"
 	"github.com/luksluki/eprocurement/services/procurement/approval"
 	"github.com/luksluki/eprocurement/services/procurement/dashboard"
-	"github.com/luksluki/eprocurement/services/procurement/export"
 	"github.com/luksluki/eprocurement/services/procurement/goodsreceipt"
 	"github.com/luksluki/eprocurement/services/procurement/invoice"
 	"github.com/luksluki/eprocurement/services/procurement/match"
@@ -35,15 +34,15 @@ import (
 // permission.
 type api struct {
 	procurementv1.UnimplementedProcurementServer
-	store          *vendor.Store
-	requisitions   *requisition.Store
-	approvals      *approval.Store
-	purchaseOrders *purchaseorder.Store
-	goodsReceipts  *goodsreceipt.Store
-	invoices       *invoice.Store
-	matches        *match.Store
-	dashboards     *dashboard.Store
-	exports        *export.Store
+	store          VendorStore
+	requisitions   RequisitionStore
+	approvals      ApprovalStore
+	purchaseOrders PurchaseOrderStore
+	goodsReceipts  GoodsReceiptStore
+	invoices       InvoiceStore
+	matches        MatchStore
+	dashboards     DashboardStore
+	exports        ExportStore
 	log            *slog.Logger
 }
 
