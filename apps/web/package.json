@@ -2,6 +2,7 @@
   "name": "@eprocurement/web",
   "private": true,
   "version": "0.0.0",
+  "license": "Apache-2.0",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
