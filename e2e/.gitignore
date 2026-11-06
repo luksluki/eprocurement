@@ -2,3 +2,4 @@
 # report is generated on every run) — never committed.
 test-results/
 playwright-report/
+test-results-video/

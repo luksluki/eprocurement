@@ -1,0 +1,127 @@
+1
+00:00:00,000 --> 00:00:04,338
+ELCODE ProcureKit is a multi-tenant procure-to-pay platform.
+
+2
+00:00:04,338 --> 00:00:12,720
+This is the full slice: a requisition, its approval, a purchase order, a goods receipt, and a three-way invoice match.
+
+3
+00:00:13,000 --> 00:00:21,170
+Everything runs on a local Docker Compose stack: five Go services, Postgres, Mongo, Redis, RabbitMQ, MinIO, and OpenTelemetry.
+
+4
+00:00:21,170 --> 00:00:22,822
+The web app talks only to the gateway.
+
+5
+00:00:22,822 --> 00:00:25,188
+We start as the admin of Acme.
+
+6
+00:00:25,188 --> 00:00:34,398
+The tenant switcher proves isolation: switching to Glow changes the vendor list, because every table is protected by row-level security.
+
+7
+00:00:34,398 --> 00:00:36,035
+Back in Acme, we raise a requisition.
+
+8
+00:00:36,035 --> 00:00:43,149
+The wizard takes four steps: department and purpose, vendor, line items with quantity and price, then a review.
+
+9
+00:00:43,149 --> 00:00:49,834
+The seeded vendor is E2E Acme Supplies, one line item, and the totals are derived, not typed.
+
+10
+00:00:49,834 --> 00:00:53,391
+The requisition is submitted and enters the approval chain.
+
+11
+00:00:53,391 --> 00:00:58,455
+Now the rule that matters: self-approval is forbidden, even for admins.
+
+12
+00:00:58,455 --> 00:01:01,805
+So we sign out and sign back in as the approver in the same tenant.
+
+13
+00:01:01,805 --> 00:01:07,479
+The requester's view shows no action buttons; the approver can act.
+
+14
+00:01:07,479 --> 00:01:08,379
+Approved.
+
+15
+00:01:07,716 --> 00:01:16,766
+Next, the requisition is converted to a purchase order through the gateway API, because the convert screen does not exist yet.
+
+16
+00:01:16,766 --> 00:01:18,668
+That gap is tracked as an issue.
+
+17
+00:01:18,668 --> 00:01:23,478
+The PO moves from draft to issued, then to acknowledged by the vendor.
+
+18
+00:01:23,478 --> 00:01:28,815
+Only then can we record a goods receipt, and the receipt claims exactly the ordered quantity.
+
+19
+00:01:28,815 --> 00:01:36,525
+Finally the invoice, created against the PO, with a PNG attachment uploaded straight to MinIO through a presigned URL.
+
+20
+00:01:36,525 --> 00:01:40,723
+The attachment has to reach ready before the match will run.
+
+21
+00:01:40,723 --> 00:01:44,062
+The three-way match compares requisition, receipt, and invoice.
+
+22
+00:01:44,062 --> 00:01:48,683
+Quantities and prices line up, and the verdict is matched.
+
+23
+00:01:48,683 --> 00:01:54,480
+Every step writes an audit event and publishes to an outbox; the worker consumes it into read models.
+
+24
+00:01:56,220 --> 00:01:59,693
+Prometheus scrapes the services' internal metrics.
+
+25
+00:01:59,693 --> 00:02:05,695
+In Grafana, the eProcurement overview shows outbox lag and dead-letter depth.
+
+26
+00:02:05,695 --> 00:02:09,395
+Lag returning to zero means the worker has drained the queue.
+
+27
+00:02:09,395 --> 00:02:12,420
+A rising dead-letter count is what the alerts watch.
+
+28
+00:02:14,440 --> 00:02:17,767
+Jaeger shows the same request as one trace.
+
+29
+00:02:17,767 --> 00:02:26,746
+The gateway span parents the gRPC call into procurement, the database query, the outbox publish, and the consumer on the worker.
+
+30
+00:02:26,746 --> 00:02:30,320
+One purchase order, one trace, end to end.
+
+31
+00:02:30,840 --> 00:02:33,330
+ProcureKit is built by ELCODE.
+
+32
+00:02:33,330 --> 00:02:37,440
+The code, the runbook, and the demo script are in the repository.
