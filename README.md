@@ -252,3 +252,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Issues use `type:*`, `area:*`, `priority
 - Backlog map — [`docs/backlog-v0.1.md`](docs/backlog-v0.1.md)
 - Agent workflow — [`AGENTS.md`](AGENTS.md) · AI-assisted workflow — [`docs/ai-workflow.md`](docs/ai-workflow.md)
 - Per-issue dev notes — [`docs/dev-notes/`](docs/dev-notes/)
+
+## License
+
+ELCODE eProcurement is released under the Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+Copyright 2026 R. Luki Rahayu Agung. ELCODE is a trading name of the author.
